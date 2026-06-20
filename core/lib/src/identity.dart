@@ -39,6 +39,16 @@ class Identity {
     return Identity._(kp, Uint8List.fromList(pub.bytes));
   }
 
+  /// Loads the persisted identity from [store], or generates and persists a new
+  /// one on first run. This is the app's identity bootstrap.
+  static Future<Identity> loadOrCreate(KeyStore store) async {
+    final seed = await store.readSeed();
+    if (seed != null) return fromSeed(seed);
+    final identity = await generate();
+    await store.writeSeed(await identity.extractSeed());
+    return identity;
+  }
+
   /// The 32-byte seed to persist via a [KeyStore]. Treat as a secret.
   Future<Uint8List> extractSeed() async =>
       Uint8List.fromList(await _keyPair.extractPrivateKeyBytes());
@@ -52,6 +62,9 @@ class Identity {
   /// Short, human-comparable label (first 4 public-key bytes as hex), e.g.
   /// for "sam#a1b2c3d4"-style display. Not a security boundary.
   String get fingerprint => hex.encode(publicKey.sublist(0, 4));
+
+  /// The full public key as a hex string.
+  String get publicKeyHex => hex.encode(publicKey);
 
   /// Verifies that [signature] is a valid Ed25519 signature by [publicKey]
   /// over [message]. Static because you verify *other people's* messages.

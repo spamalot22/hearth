@@ -189,10 +189,11 @@ Prove the data model._
 - [x] `core`: signed, content-addressed message; canonical (dag-cbor) encoding;
       verify; locked cross-language interop vector + fixture.
 - [x] `core`: DAG store (`MessageStore`) — deterministic topological ordering, heads + merge.
-- [ ] `app`: concrete `KeyStore` (flutter_secure_storage) + identity bootstrap.
+- [x] `app`: concrete `KeyStore` (flutter_secure_storage) + `Identity.loadOrCreate` bootstrap.
+- [x] `app`: identity screen — generate/persist on first launch, show fingerprint + pubkey.
 - [ ] `backend`: Hono `POST /messages` + `GET /poll` relay as a Cloud Function;
       Firestore storage; run locally via the **Firebase Emulator Suite** (no card).
-- [ ] `app`: minimal UI — generate identity, send/receive via relay, show fingerprint.
+- [ ] `app`: send/receive UI over the relay (needs the backend).
 
 ### Phase 2 — Peer-to-peer transport
 _Goal: backend becomes signalling-only; messages flow peer↔peer._

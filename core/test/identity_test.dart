@@ -64,5 +64,16 @@ void main() {
       await store.deleteSeed();
       expect(await store.readSeed(), isNull);
     });
+
+    test(
+      'loadOrCreate generates once, then restores the same identity',
+      () async {
+        final store = InMemoryKeyStore();
+        final first = await Identity.loadOrCreate(store);
+        final second = await Identity.loadOrCreate(store);
+        expect(second.publicKey, first.publicKey);
+        expect(second.publicKeyHex, first.publicKeyHex);
+      },
+    );
   });
 }
