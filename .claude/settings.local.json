@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter --version)",
+      "Bash(flutter doctor *)",
+      "Bash(xcode-select -p)",
+      "Bash(echo \"xcode-select: $\\(xcode-select -p 2>/dev/null || echo no\\)\")",
+      "Bash(brew install *)",
+      "Bash(open -a \"Android Studio\")",
+      "Bash(SDK=\"$HOME/Library/Android/sdk\" *)"
+    ]
+  }
+}

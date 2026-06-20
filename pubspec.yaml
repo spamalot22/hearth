@@ -1,0 +1,12 @@
+# Pub workspace root — unifies dependency resolution across all packages.
+# This is not a real package; it just ties the monorepo together so one
+# `flutter pub get` resolves app, core, and server with a shared lockfile.
+name: _chat_workspace
+publish_to: none
+
+environment:
+  sdk: ^3.12.2
+
+workspace:
+  - app
+  - core
