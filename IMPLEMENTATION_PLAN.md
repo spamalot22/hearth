@@ -191,8 +191,9 @@ Prove the data model._
 - [x] `core`: DAG store (`MessageStore`) — deterministic topological ordering, heads + merge.
 - [x] `app`: concrete `KeyStore` (flutter_secure_storage) + `Identity.loadOrCreate` bootstrap.
 - [x] `app`: identity screen — generate/persist on first launch, show fingerprint + pubkey.
-- [ ] `backend`: Hono `POST /messages` + `GET /poll` relay as a Cloud Function;
-      Firestore storage; run locally via the **Firebase Emulator Suite** (no card).
+- [x] `backend`: Hono relay (`POST /messages` verifies sig+id, `GET /poll`) on
+      Node + in-memory store; **TS↔Dart interop proven** vs the fixture (dag-cbor + Ed25519).
+- [ ] `backend`: swap in-memory store → Firestore; wrap as a Cloud Function on the Emulator.
 - [ ] `app`: send/receive UI over the relay (needs the backend).
 
 ### Phase 2 — Peer-to-peer transport
@@ -275,3 +276,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   analyze; pre-push: tests — run `lefthook install` after clone); **core at
   99.3% line coverage**. Still TODO: real `app` tests (placeholder only) + a CI
   gate (bundle with the Windows-build CI).
+- **2026-06-20** — Backend started as a **plain-Node Hono relay** with an
+  in-memory store (not the Firebase emulator yet): the Hono routes are identical
+  when later wrapped as a Cloud Function, and the priority was proving TS↔Dart
+  interop — now **confirmed** (`@ipld/dag-cbor` reproduces core's canonical signed
+  bytes byte-for-byte; Ed25519 verifies cross-language). Node tooling is **pnpm**,
+  with the public npmjs registry pinned in `backend/.npmrc` (the global npm
+  registry is work's and must not be used here).

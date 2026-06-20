@@ -12,8 +12,14 @@ pre-commit:
     analyze:
       glob: "*.dart"
       run: dart analyze --fatal-infos core app
+    backend-typecheck:
+      glob: "backend/**/*.ts"
+      run: cd backend && pnpm typecheck
 
 pre-push:
+  parallel: true
   commands:
     core-tests:
       run: cd core && dart test
+    backend-tests:
+      run: cd backend && pnpm test
