@@ -1,6 +1,6 @@
-# Decentralised Discord — Implementation Plan
+# Hearth — Implementation Plan
 
-> A gamer-focused, open-source, decentralised communication platform.
+> **Hearth** — a gamer-focused, open-source, decentralised Discord alternative.
 > Local-first, peer-to-peer by default, with an **optional** coordination
 > backend that improves reliability but is never required to function.
 
@@ -180,7 +180,7 @@ Every message is a signed, content-addressed object forming a DAG:
       `pub get` + `flutter analyze` clean.
 - [x] Toolchain green (Flutter · Android · Xcode/iOS/macOS · web).
 - [x] Removed the scaffolded Dart `server` (backend is now Firebase/TS, Phase 1).
-- [ ] Decide on a name (placeholder: **"chat"**).
+- [x] Name: **Hearth** (personal project; low trademark risk accepted).
 
 ### Phase 1 — Text chat via the backend relay
 _Goal: two clients exchange signed messages through a dumb relay. No P2P yet.
@@ -234,7 +234,8 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
    communities? Web-of-trust? Decide before any public discovery exists.
 3. **Permission conflicts.** Two admins act contradictorily while offline — who
    wins? Leaning: one designated owner key whose actions always take precedence.
-4. **Project name.** Currently "chat".
+4. **Bundle / application IDs.** Scaffolding left the default `com.example.*`;
+   set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.
 
 ---
 
@@ -260,3 +261,8 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   real-time listeners can replace polling. Free for tens of users; Functions need
   the Blaze plan (card on file, free within limits + budget alert); dev via the
   Emulator Suite needs no card.
+- **2026-06-20** — Project named **Hearth** (personal, unlikely to be monetised →
+  accepted low trademark risk without formal clearance; it's a common word, so run
+  free UK IPO / app-store checks if it ever goes serious). Git initialised on
+  `main`; repo-local identity `spamalot22` + GitHub noreply (global work email
+  untouched). Internal package names stay generic (`core` / `app`).
