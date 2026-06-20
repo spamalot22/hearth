@@ -1,0 +1,28 @@
+# Shared analysis settings for the Hearth monorepo.
+#
+# Each package includes this *alongside* its base ruleset (package:lints for
+# core, package:flutter_lints for app) — see each package's
+# analysis_options.yaml. Keep this focused on strictness + high-signal lints;
+# avoid noisy stylistic rules.
+
+analyzer:
+  language:
+    # Treat implicit casts / dynamic inference / raw generics as errors. These
+    # catch real type-safety bugs, especially around our async crypto code.
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    # --- bug catchers ---
+    - unawaited_futures            # a forgotten await on crypto/IO is a real bug
+    - avoid_dynamic_calls
+    - cast_nullable_to_non_nullable
+    - unnecessary_statements
+    # --- clarity & consistency ---
+    - always_declare_return_types
+    - prefer_single_quotes
+    - directives_ordering
+    - prefer_final_locals
+    - unnecessary_parenthesis

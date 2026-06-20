@@ -98,5 +98,21 @@ void main() {
       expect(m.idHex, lockedId);
       expect(await m.verify(), isTrue);
     });
+
+    test('canonical encoder handles every integer-size branch', () async {
+      // Payload length drives the CBOR byte-string header size, and the fixed
+      // timestamp exercises the 8-byte branch — together covering all of
+      // _head() in codec.dart (1-, 2-, 4- and 8-byte argument encodings).
+      final author = await _fixedIdentity();
+      for (final size in [23, 200, 5000, 70000]) {
+        final m = await Message.create(
+          author: author,
+          channel: 'c',
+          payload: Uint8List(size),
+          timestampMs: 1718900000000,
+        );
+        expect(await m.verify(), isTrue);
+      }
+    });
   });
 }

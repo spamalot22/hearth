@@ -159,7 +159,7 @@ class Message {
     version: j['v']! as int,
     author: base64Url.decode(j['author']! as String),
     channel: j['channel']! as String,
-    prev: (j['prev']! as List)
+    prev: (j['prev']! as List<dynamic>)
         .cast<String>()
         .map(base64Url.decode)
         .toList(growable: false),

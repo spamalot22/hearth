@@ -1,0 +1,19 @@
+# Git hooks for the Hearth monorepo — managed by Lefthook (https://lefthook.dev).
+#
+# One-time setup after cloning:  lefthook install
+# Fast checks run on commit; the test suite runs on push.
+
+pre-commit:
+  parallel: true
+  commands:
+    format:
+      glob: "*.dart"
+      run: dart format --output=none --set-exit-if-changed {staged_files}
+    analyze:
+      glob: "*.dart"
+      run: dart analyze --fatal-infos core app
+
+pre-push:
+  commands:
+    core-tests:
+      run: cd core && dart test
