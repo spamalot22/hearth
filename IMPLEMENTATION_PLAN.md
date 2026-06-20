@@ -268,3 +268,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   free UK IPO / app-store checks if it ever goes serious). Git initialised on
   `main`; repo-local identity `spamalot22` + GitHub noreply (global work email
   untouched). Internal package names stay generic (`core` / `app`).
+- **2026-06-20** — Quality tooling in place: **strict-curated lints**
+  (`analysis_options.base.yaml` — strict-casts/inference/raw-types + curated
+  rules, shared by both packages); **Lefthook** hooks (pre-commit: format +
+  analyze; pre-push: tests — run `lefthook install` after clone); **core at
+  99.3% line coverage**. Still TODO: real `app` tests (placeholder only) + a CI
+  gate (bundle with the Windows-build CI).
