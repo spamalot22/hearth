@@ -185,9 +185,11 @@ Every message is a signed, content-addressed object forming a DAG:
 ### Phase 1 — Text chat via the backend relay
 _Goal: two clients exchange signed messages through a dumb relay. No P2P yet.
 Prove the data model._
-- [ ] `core`: Ed25519 identity generation + local secure storage.
-- [ ] `core`: signed, content-addressed message; canonical encoding; verify.
+- [x] `core`: Ed25519 identity (keypair = id) + `KeyStore` interface for the seed.
+- [x] `core`: signed, content-addressed message; canonical (dag-cbor) encoding;
+      verify; locked cross-language interop vector + fixture.
 - [ ] `core`: DAG store + topological ordering + deterministic merge.
+- [ ] `app`: concrete `KeyStore` (flutter_secure_storage) + identity bootstrap.
 - [ ] `backend`: Hono `POST /messages` + `GET /poll` relay as a Cloud Function;
       Firestore storage; run locally via the **Firebase Emulator Suite** (no card).
 - [ ] `app`: minimal UI — generate identity, send/receive via relay, show fingerprint.
