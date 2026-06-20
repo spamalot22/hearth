@@ -1,8 +1,8 @@
-/// Support for doing something awesome.
+/// Hearth core — identity, signed messages, and (soon) the message DAG.
 ///
-/// More dartdocs go here.
+/// Pure Dart with no Flutter imports, so it stays portable across every target
+/// and could later be swapped for a Rust module without touching the UI.
 library;
 
-export 'src/core_base.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'src/identity.dart' show Identity, KeyStore, InMemoryKeyStore;
+export 'src/message.dart' show Message, kHearthMessageVersion;

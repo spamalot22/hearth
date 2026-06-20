@@ -10,7 +10,8 @@ resolution: workspace
 
 # Add regular dependencies here.
 dependencies:
-  # path: ^1.9.0
+  convert: ^3.1.2
+  cryptography: ^2.9.0
 
 dev_dependencies:
   lints: ^6.0.0

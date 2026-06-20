@@ -1,0 +1,94 @@
+import 'dart:typed_data';
+
+import 'package:convert/convert.dart';
+import 'package:cryptography/cryptography.dart';
+
+final Ed25519 _ed25519 = Ed25519();
+final Sha256 _sha256 = Sha256();
+
+/// SHA-256 of [bytes]. Used for content-addressing message ids.
+Future<Uint8List> sha256Digest(List<int> bytes) async {
+  final h = await _sha256.hash(bytes);
+  return Uint8List.fromList(h.bytes);
+}
+
+/// A Hearth identity: an Ed25519 keypair whose **public key is the user id**.
+///
+/// No account, no server — possessing the private seed *is* being this user.
+/// The secret seed is persisted by the app through a [KeyStore]; `core` never
+/// touches platform storage directly, so it stays Flutter-free.
+class Identity {
+  final SimpleKeyPair _keyPair;
+
+  /// The 32-byte Ed25519 public key — this identity's canonical id.
+  final Uint8List publicKey;
+
+  Identity._(this._keyPair, this.publicKey);
+
+  /// Creates a brand-new random identity.
+  static Future<Identity> generate() async {
+    final kp = await _ed25519.newKeyPair();
+    final pub = await kp.extractPublicKey();
+    return Identity._(kp, Uint8List.fromList(pub.bytes));
+  }
+
+  /// Restores an identity from a stored 32-byte [seed] (the private material).
+  static Future<Identity> fromSeed(List<int> seed) async {
+    final kp = await _ed25519.newKeyPairFromSeed(seed);
+    final pub = await kp.extractPublicKey();
+    return Identity._(kp, Uint8List.fromList(pub.bytes));
+  }
+
+  /// The 32-byte seed to persist via a [KeyStore]. Treat as a secret.
+  Future<Uint8List> extractSeed() async =>
+      Uint8List.fromList(await _keyPair.extractPrivateKeyBytes());
+
+  /// Ed25519 signature (64 bytes) over [message].
+  Future<Uint8List> sign(List<int> message) async {
+    final sig = await _ed25519.sign(message, keyPair: _keyPair);
+    return Uint8List.fromList(sig.bytes);
+  }
+
+  /// Short, human-comparable label (first 4 public-key bytes as hex), e.g.
+  /// for "sam#a1b2c3d4"-style display. Not a security boundary.
+  String get fingerprint => hex.encode(publicKey.sublist(0, 4));
+
+  /// Verifies that [signature] is a valid Ed25519 signature by [publicKey]
+  /// over [message]. Static because you verify *other people's* messages.
+  static Future<bool> verifySignature(
+    List<int> message, {
+    required List<int> signature,
+    required List<int> publicKey,
+  }) async {
+    final pub = SimplePublicKey(publicKey, type: KeyPairType.ed25519);
+    return _ed25519.verify(
+      message,
+      signature: Signature(signature, publicKey: pub),
+    );
+  }
+}
+
+/// Where an [Identity]'s secret seed is persisted.
+///
+/// Implemented in the app (Keychain on Apple, Keystore on Android, DPAPI on
+/// Windows — via `flutter_secure_storage`). `core` depends only on this
+/// interface so it remains pure Dart and portable.
+abstract interface class KeyStore {
+  Future<void> writeSeed(Uint8List seed);
+  Future<Uint8List?> readSeed();
+  Future<void> deleteSeed();
+}
+
+/// In-memory [KeyStore] for tests and the local dev backend. Not persistent.
+class InMemoryKeyStore implements KeyStore {
+  Uint8List? _seed;
+
+  @override
+  Future<void> writeSeed(Uint8List seed) async => _seed = seed;
+
+  @override
+  Future<Uint8List?> readSeed() async => _seed;
+
+  @override
+  Future<void> deleteSeed() async => _seed = null;
+}

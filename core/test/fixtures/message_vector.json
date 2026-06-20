@@ -1,0 +1,16 @@
+{
+  "description": "Cross-language canonical-encoding vector for Hearth messages. Any implementation (Dart client, TypeScript backend) must reproduce expected.signedBytesHex and expected.idHex from the given input. signedBytes is canonical dag-cbor of the unsigned fields in key order v,prev,author,channel,payload,timestamp; id is multihash(sha256(signedBytes)) with the sha2-256 prefix 0x1220.",
+  "input": {
+    "seedHex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "version": 1,
+    "authorPublicKeyHex": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "channel": "general",
+    "prev": [],
+    "timestampMs": 1718900000000,
+    "payloadUtf8": "hello"
+  },
+  "expected": {
+    "signedBytesHex": "a661760164707265768066617574686f7258208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c676368616e6e656c6767656e6572616c677061796c6f61644568656c6c6f6974696d657374616d701b00000190366c8500",
+    "idHex": "12207ccdd3b5326ef7058d17c87e0018ad43527b57e04b6146903a507a4ce56a43d2"
+  }
+}
