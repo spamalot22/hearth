@@ -29,3 +29,6 @@ GoogleService-Info.plist
 # Firebase (future)
 .firebase/
 *-debug.log
+
+# Claude Code per-machine local settings (not shared)
+.claude/settings.local.json
