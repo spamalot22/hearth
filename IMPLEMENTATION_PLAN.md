@@ -188,7 +188,7 @@ Prove the data model._
 - [x] `core`: Ed25519 identity (keypair = id) + `KeyStore` interface for the seed.
 - [x] `core`: signed, content-addressed message; canonical (dag-cbor) encoding;
       verify; locked cross-language interop vector + fixture.
-- [ ] `core`: DAG store + topological ordering + deterministic merge.
+- [x] `core`: DAG store (`MessageStore`) — deterministic topological ordering, heads + merge.
 - [ ] `app`: concrete `KeyStore` (flutter_secure_storage) + identity bootstrap.
 - [ ] `backend`: Hono `POST /messages` + `GET /poll` relay as a Cloud Function;
       Firestore storage; run locally via the **Firebase Emulator Suite** (no card).

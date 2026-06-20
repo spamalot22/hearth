@@ -4,5 +4,6 @@
 /// and could later be swapped for a Rust module without touching the UI.
 library;
 
+export 'src/dag.dart' show MessageStore;
 export 'src/identity.dart' show Identity, KeyStore, InMemoryKeyStore;
 export 'src/message.dart' show Message, kHearthMessageVersion;
