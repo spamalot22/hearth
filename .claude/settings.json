@@ -3,10 +3,32 @@
     "allow": [
       "Bash(dart analyze)",
       "Bash(dart analyze *)",
+      "Bash(dart test)",
+      "Bash(dart test *)",
+      "Bash(dart format *)",
+      "Bash(dart pub get)",
+      "Bash(dart pub get *)",
+      "Bash(dart pub add *)",
       "Bash(flutter analyze)",
       "Bash(flutter analyze *)",
+      "Bash(flutter test)",
+      "Bash(flutter test *)",
       "Bash(flutter doctor)",
-      "Bash(flutter doctor *)"
+      "Bash(flutter doctor *)",
+      "Bash(flutter pub get)",
+      "Bash(flutter pub get *)",
+      "Bash(flutter pub add *)",
+      "Bash(flutter run *)",
+      "Bash(pnpm install)",
+      "Bash(pnpm install *)",
+      "Bash(pnpm test)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm dev)",
+      "Bash(pnpm start)",
+      "Bash(pnpm add *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
   }
 }
