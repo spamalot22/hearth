@@ -4,7 +4,27 @@
 > Local-first, peer-to-peer by default, with an **optional** coordination
 > backend that improves reliability but is never required to function.
 
-_Status: living document. Last updated: 2026-06-20._
+_Status: living document. Last updated: 2026-06-21._
+
+---
+
+## Product scope (target feature set)
+
+- **Channels are the core primitive** — a channel is a shared, replicated message
+  DAG. **Group channels** (many members) and **direct messages** (a private
+  2-person channel) are the *same* primitive; only membership scope + encryption
+  differ.
+- **Text now; voice next** — text chat works today. Real-time **voice, video, and
+  screen-share** come via WebRTC (Phase 3), with coturn for NAT traversal.
+- **End-to-end encryption (Phase 3, MLS).** Signed today, encrypted later — the
+  payload is opaque bytes, so it becomes ciphertext with no format change. **E2E
+  by default for DMs/private channels; public community channels may opt for
+  plaintext** so they stay moderatable/searchable/bot-friendly (see §5). Caveat:
+  encryption hides payloads, not relay-visible metadata (who/when).
+- **No central accounts — identity is a keypair.** "Account" features map onto the
+  key: **profiles** (signed metadata), **handles** (human name → pubkey, §5),
+  **recovery** (seed backup) and **multi-device** (root key certifies device
+  subkeys, §5). Optional OIDC login is a per-community add-on, never required.
 
 ---
 
@@ -240,6 +260,13 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
    wins? Leaning: one designated owner key whose actions always take precedence.
 4. **Bundle / application IDs.** Scaffolding left the default `com.example.*`;
    set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.
+5. **E2E scope for public channels.** DMs/private channels are always E2E. Are
+   public community channels also E2E, or plaintext-but-signed so they can be
+   moderated/searched/bot-driven? Leaning: per-channel choice, plaintext default
+   for public. Decide before MLS lands (Phase 3).
+6. **Handles / naming.** How do human-readable names map to pubkeys
+   (`hearth#a1b2` → "sam")? Zooko's triangle — likely local petnames + an
+   optional discovery-server namespace. Decide before public discovery exists.
 
 ---
 
