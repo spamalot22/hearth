@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import 'channel.dart';
 import 'contacts.dart';
+import 'emoji_picker.dart';
 import 'key_store.dart';
 
 /// Relay endpoint for local dev; the channel everyone shares for now.
@@ -180,6 +181,20 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  /// Inserts a picked emoji at the cursor in the composer.
+  Future<void> _insertEmoji() async {
+    final emoji = await pickEmoji(context);
+    if (emoji == null) return;
+    final value = _input.value;
+    final sel = value.selection;
+    final start = sel.isValid ? sel.start : value.text.length;
+    final end = sel.isValid ? sel.end : value.text.length;
+    _input.value = TextEditingValue(
+      text: value.text.replaceRange(start, end, emoji),
+      selection: TextSelection.collapsed(offset: start + emoji.length),
+    );
   }
 
   /// A peer's petname if you've set one, else their `hearth#fingerprint`.
@@ -374,6 +389,11 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.all(8),
       child: Row(
         children: [
+          IconButton(
+            onPressed: () => unawaited(_insertEmoji()),
+            icon: const Icon(Icons.emoji_emotions_outlined),
+            tooltip: 'Emoji',
+          ),
           Expanded(
             child: TextField(
               controller: _input,
