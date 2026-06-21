@@ -4,7 +4,9 @@ import 'package:convert/convert.dart';
 import 'package:cryptography/cryptography.dart';
 
 final Ed25519 _ed25519 = Ed25519();
+final X25519 _x25519 = X25519();
 final Sha256 _sha256 = Sha256();
+final Sha512 _sha512 = Sha512();
 
 /// SHA-256 of [bytes]. Used for content-addressing message ids.
 Future<Uint8List> sha256Digest(List<int> bytes) async {
@@ -65,6 +67,34 @@ class Identity {
 
   /// The full public key as a hex string.
   String get publicKeyHex => hex.encode(publicKey);
+
+  /// This identity's X25519 public key — its Ed25519 key mapped to Curve25519,
+  /// so anyone holding the Ed25519 id can encrypt to it with no separate key
+  /// exchange. Used by `SealedBox`.
+  Future<Uint8List> x25519PublicKey() async {
+    final pub = await (await _deriveX25519()).extractPublicKey();
+    return Uint8List.fromList(pub.bytes);
+  }
+
+  /// ECDH shared secret between this identity's X25519 key and [peerX25519Pub].
+  Future<Uint8List> x25519SharedSecret(List<int> peerX25519Pub) async {
+    final secret = await _x25519.sharedSecretKey(
+      keyPair: await _deriveX25519(),
+      remotePublicKey: SimplePublicKey(peerX25519Pub, type: KeyPairType.x25519),
+    );
+    return Uint8List.fromList(await secret.extractBytes());
+  }
+
+  /// Derives this identity's X25519 keypair from the Ed25519 seed — the standard
+  /// `sk_to_curve25519`: SHA-512 of the seed, first 32 bytes, clamped.
+  Future<SimpleKeyPair> _deriveX25519() async {
+    final seed = await _keyPair.extractPrivateKeyBytes();
+    final h = await _sha512.hash(seed);
+    final priv = Uint8List.fromList(h.bytes.sublist(0, 32));
+    priv[0] &= 0xf8;
+    priv[31] = (priv[31] & 0x7f) | 0x40;
+    return _x25519.newKeyPairFromSeed(priv);
+  }
 
   /// Verifies that [signature] is a valid Ed25519 signature by [publicKey]
   /// over [message]. Static because you verify *other people's* messages.

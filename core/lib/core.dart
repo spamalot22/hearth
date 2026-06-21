@@ -5,6 +5,7 @@
 library;
 
 export 'src/dag.dart' show MessageStore;
+export 'src/encryption.dart' show SealedBox, ed25519PublicToX25519;
 export 'src/frame.dart'
     show FrameChannel, GiveFrame, HaveFrame, SyncFrame, WantFrame;
 export 'src/identity.dart' show Identity, KeyStore, InMemoryKeyStore;
