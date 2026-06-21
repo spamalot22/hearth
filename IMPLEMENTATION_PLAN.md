@@ -17,10 +17,13 @@ _Status: living document. Last updated: 2026-06-21._
 - **Text now; voice next** — text chat works today. Real-time **voice, video, and
   screen-share** come via WebRTC (Phase 3), with coturn for NAT traversal.
 - **End-to-end encryption (Phase 3, MLS).** Signed today, encrypted later — the
-  payload is opaque bytes, so it becomes ciphertext with no format change. **E2E
-  by default for DMs/private channels; public community channels may opt for
-  plaintext** so they stay moderatable/searchable/bot-friendly (see §5). Caveat:
-  encryption hides payloads, not relay-visible metadata (who/when).
+  payload is opaque bytes (and messages carry a `v` version), so encryption slots
+  in with no breaking change. **Decided:** **group channels are plaintext (signed)
+  by default** — so they stay moderatable/searchable/bot-friendly — with a
+  **per-channel toggle to enable E2E**, and the UI must spell out what's lost when
+  you do (server-side moderation, search, content-reading bots). **DMs are E2E by
+  default.** Caveat: encryption hides payloads, not relay-visible metadata
+  (who/when).
 - **No central accounts — identity is a keypair.** "Account" features map onto the
   key: **profiles** (signed metadata), **handles** (human name → pubkey, §5),
   **recovery** (seed backup) and **multi-device** (root key certifies device
@@ -260,11 +263,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
    wins? Leaning: one designated owner key whose actions always take precedence.
 4. **Bundle / application IDs.** Scaffolding left the default `com.example.*`;
    set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.
-5. **E2E scope for public channels.** DMs/private channels are always E2E. Are
-   public community channels also E2E, or plaintext-but-signed so they can be
-   moderated/searched/bot-driven? Leaning: per-channel choice, plaintext default
-   for public. Decide before MLS lands (Phase 3).
-6. **Handles / naming.** How do human-readable names map to pubkeys
+5. **Handles / naming.** How do human-readable names map to pubkeys
    (`hearth#a1b2` → "sam")? Zooko's triangle — likely local petnames + an
    optional discovery-server namespace. Decide before public discovery exists.
 
@@ -310,3 +309,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   bytes byte-for-byte; Ed25519 verifies cross-language). Node tooling is **pnpm**,
   with the public npmjs registry pinned in `backend/.npmrc` (the global npm
   registry is work's and must not be used here).
+- **2026-06-21** — **Encryption scope decided:** group channels are plaintext
+  (signed) by default — so they stay moderatable/searchable/bot-friendly — with a
+  per-channel **toggle to E2E** (MLS) that warns the user what it costs (no
+  server-side moderation/search, no content-reading bots). DMs are E2E by default.
+  No code change now: the current plaintext-signed group channel already *is* the
+  default; the toggle + MLS arrive in Phase 3.
