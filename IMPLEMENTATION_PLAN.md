@@ -247,6 +247,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       over per-peer HAVE/WANT/GIVE frames; walks `prev` to backfill, verifies every
       GIVE, drops off-channel/forged. Delivers A→(carried by B)→C. Verified
       two-window: a late joiner backfills the full history, live both ways.
+- [x] **Authenticated signalling** — offers/answers/ICE are Ed25519-signed and
+      verified against the sender's pubkey (`signal_auth`), binding the SDP's DTLS
+      fingerprint to identity. Closes the active-MITM hole; the relay stays a dumb
+      pipe (still sees metadata). Verified two-window + 6 unit tests.
 - [ ] `core`: **DM encryption (sealed box)** — X25519 ECDH to the recipient's key
       so carriers relay blind. Lightweight and **independent of group MLS** (Phase 3).
 - [ ] **Optional always-on relay** (opt-in, not required for P2P): deploy the same
@@ -371,3 +375,13 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   Phase 3**, to keep Phase 2 on the delivery core (local persistence, gossip, DM
   encryption). Trade accepted for now: no identity backup until then — clearing a
   device's storage loses that key irrecoverably.
+- **2026-06-21** — **Authenticated the WebRTC signalling.** Offers/answers/ICE are
+  Ed25519-signed over the security-critical payload (the SDP's DTLS fingerprint /
+  the ICE candidate), bound to kind + recipient; the receiver verifies against the
+  sender's pubkey and drops anything unsigned or tampered. Closes the active-MITM
+  hole flagged earlier — a relay can't impersonate a peer or swap a fingerprint, so
+  the DTLS channel provably terminates at the claimed identity. The relay stays a
+  dumb pipe (no server-side verification; still sees metadata — who announces, IPs).
+  Crypto in a testable `signal_auth` unit (6 tests). Caveat: this binds the channel
+  to the *announced* identity; trusting that a key is who you want is the separate
+  petname/TOFU layer.
