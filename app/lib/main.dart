@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import 'channel.dart';
 import 'contacts.dart';
+import 'content.dart';
 import 'emoji_picker.dart';
 import 'key_store.dart';
 
@@ -154,7 +155,7 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Decrypts the active channel's new DM messages (no-op for groups), then
   /// re-renders.
   Future<void> _refresh() async {
-    await _channels?.active?.refreshPlaintext();
+    await _channels?.active?.refreshContent();
     if (mounted) setState(() {});
   }
 
@@ -167,18 +168,59 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
+    if (text.isEmpty) return;
+    _input.clear();
+    await _publish(TextContent(text));
+  }
+
+  /// Prompts for a GIF URL and sends it.
+  Future<void> _sendGif() async {
+    final controller = TextEditingController();
+    final url = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Send a GIF'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(
+            hintText: 'https://…/something.gif',
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final trimmed = url?.trim();
+    if (trimmed != null && trimmed.isNotEmpty) {
+      await _publish(GifContent(trimmed));
+    }
+  }
+
+  /// Builds, persists, and gossips [content] in the active channel.
+  Future<void> _publish(Content content) async {
     final session = _channels?.active;
-    if (text.isEmpty || _sending || session == null) return;
+    if (_sending || session == null) return;
     setState(() => _sending = true);
     try {
       final message = await Message.create(
         author: widget.identity,
         channel: session.channelId,
-        payload: await session.encodePayload(text),
+        payload: await session.encodePayload(content),
         prev: session.repository.heads(),
       );
-      _input.clear();
-      // Persist + gossip to peers; the updates stream re-renders the new message.
+      // Persist + gossip to peers; the updates stream re-renders it.
       await session.engine.publish(message);
     } catch (_) {
       if (mounted) setState(() => _error = 'send failed');
@@ -401,6 +443,30 @@ class _ChatScreenState extends State<ChatScreen> {
     return (id == null || id.isEmpty) ? null : id;
   }
 
+  /// Renders a message's content — text, or an inline GIF fetched from its URL.
+  Widget _contentView(BuildContext context, Content content) {
+    return switch (content) {
+      TextContent(:final text) => Text(text),
+      GifContent(:final url) => ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 220, maxWidth: 260),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.network(
+            url,
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stack) => Text('[GIF] $url'),
+            loadingBuilder: (context, child, progress) => progress == null
+                ? child
+                : const Padding(
+                    padding: EdgeInsets.all(24),
+                    child: CircularProgressIndicator(),
+                  ),
+          ),
+        ),
+      ),
+    };
+  }
+
   Widget _bubble(
     BuildContext context,
     ChannelSession session,
@@ -426,7 +492,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
               ),
-              Text(session.textOf(message)),
+              _contentView(context, session.contentOf(message)),
             ],
           ),
         ),
@@ -444,6 +510,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => unawaited(_insertEmoji()),
             icon: const Icon(Icons.emoji_emotions_outlined),
             tooltip: 'Emoji',
+          ),
+          IconButton(
+            onPressed: () => unawaited(_sendGif()),
+            icon: const Icon(Icons.gif_box_outlined),
+            tooltip: 'GIF',
           ),
           Expanded(
             child: TextField(

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 
+import 'content.dart';
 import 'message_storage_hive.dart';
 import 'webrtc_mesh.dart';
 
@@ -44,7 +45,7 @@ class ChannelSession {
   final WebRtcMesh? _mesh;
   final StreamSubscription<void> _updatesSub;
   final StreamSubscription<FrameChannel>? _peersSub;
-  final Map<String, String> _plaintext = {};
+  final Map<String, Content> _content = {};
 
   bool get isDm => peerPubkey != null;
 
@@ -90,40 +91,41 @@ class ChannelSession {
     );
   }
 
-  /// Encodes [text] for sending — PairBox-encrypted in a DM, plain UTF-8 in a
-  /// group channel.
-  Future<Uint8List> encodePayload(String text) async {
-    final bytes = Uint8List.fromList(utf8.encode(text));
+  /// Encodes [content] for sending — PairBox-encrypted in a DM, plain in a group
+  /// channel.
+  Future<Uint8List> encodePayload(Content content) async {
+    final bytes = Uint8List.fromList(content.encode());
     final peer = peerPubkey;
     return peer == null
         ? bytes
         : PairBox.encrypt(bytes, self: _identity, peerEd25519PublicKey: peer);
   }
 
-  /// Decrypts any not-yet-cached DM messages into the display cache. No-op for a
-  /// group channel.
-  Future<void> refreshPlaintext() async {
+  /// Decrypts + parses any not-yet-cached DM messages into the display cache.
+  /// No-op for a group channel (parsed lazily in [contentOf]).
+  Future<void> refreshContent() async {
     final peer = peerPubkey;
     if (peer == null) return;
     for (final message in repository.ordered()) {
-      if (_plaintext.containsKey(message.idHex)) continue;
+      if (_content.containsKey(message.idHex)) continue;
       try {
         final clear = await PairBox.decrypt(
           message.payload,
           self: _identity,
           peerEd25519PublicKey: peer,
         );
-        _plaintext[message.idHex] = utf8.decode(clear);
+        _content[message.idHex] = parseContent(clear);
       } catch (_) {
-        _plaintext[message.idHex] = '🔒 unreadable';
+        _content[message.idHex] = const TextContent('🔒 unreadable');
       }
     }
   }
 
-  /// Display text for [message]: decrypted in a DM, the raw text in a group.
-  String textOf(Message message) => peerPubkey == null
-      ? utf8.decode(message.payload)
-      : (_plaintext[message.idHex] ?? '…');
+  /// The content of [message]: decrypted-then-parsed in a DM, parsed directly in
+  /// a group.
+  Content contentOf(Message message) => peerPubkey == null
+      ? parseContent(message.payload)
+      : (_content[message.idHex] ?? const TextContent('…'));
 
   Future<void> close() async {
     await _updatesSub.cancel();
