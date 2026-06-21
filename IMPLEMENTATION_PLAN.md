@@ -240,11 +240,13 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       it lives app-side; public STUN for ICE, deterministic offerer avoids glare.
       Verified two-window: host↔host pair, DTLS up, `hearth` data channel open,
       messages crossing P2P (relay only brokered the handshake).
-- [ ] `core`: **local persistence** for the message DAG — survive restart and let
-      a peer retain messages it's carrying. Local-first store, no backend.
-- [ ] `core`: **gossip sync / epidemic replication** — exchange heads, walk `prev`,
-      send the diff; peers re-serve each other's signed messages (can't forge —
-      content-addressed + signed). This is what delivers A→(carried by B)→C.
+- [x] `core`: **local persistence** — `MessageStorage` port + `MessageRepository`
+      over the DAG; Hive on the app (IndexedDB on web, files on native). Verified:
+      history survives reload. Local-first, no backend.
+- [x] `core`: **gossip sync / epidemic replication** — `SyncEngine`/`SyncSession`
+      over per-peer HAVE/WANT/GIVE frames; walks `prev` to backfill, verifies every
+      GIVE, drops off-channel/forged. Delivers A→(carried by B)→C. Verified
+      two-window: a late joiner backfills the full history, live both ways.
 - [ ] `core`: **DM encryption (sealed box)** — X25519 ECDH to the recipient's key
       so carriers relay blind. Lightweight and **independent of group MLS** (Phase 3).
 - [ ] **Optional always-on relay** (opt-in, not required for P2P): deploy the same
