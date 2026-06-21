@@ -6,10 +6,9 @@ import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'channel.dart';
 import 'contacts.dart';
 import 'key_store.dart';
-import 'message_storage_hive.dart';
-import 'webrtc_mesh.dart';
 
 /// Relay endpoint for local dev; the channel everyone shares for now.
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -118,11 +117,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _input = TextEditingController();
-  MessageRepository? _repo;
-  SyncEngine? _engine;
-  WebRtcMesh? _mesh;
-  StreamSubscription<void>? _updates;
-  StreamSubscription<FrameChannel>? _peers;
+  ChannelManager? _channels;
   ContactBook? _contacts;
   String? _error;
   bool _sending = false;
@@ -133,63 +128,53 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_init());
   }
 
-  /// Opens on-device storage, hydrates saved history, wires the gossip engine,
-  /// then joins the mesh. In widget tests (autoPoll off) storage is in-memory and
-  /// no native plugin — Hive or WebRTC — is touched.
+  /// Opens contacts + the channel manager and joins the default channel. In
+  /// widget tests (autoPoll off) everything stays in-memory — no Hive, no WebRTC.
   Future<void> _init() async {
-    final storage = widget.autoPoll
-        ? await HiveMessageStorage.open()
-        : InMemoryMessageStorage();
     final contacts = widget.autoPoll ? await ContactBook.open() : null;
-    final repo = MessageRepository(storage);
-    await repo.load();
-    if (!mounted) return;
-    final engine = SyncEngine(repo, kChannel);
-    _updates = engine.updates.listen((_) {
-      if (mounted) setState(() {});
-    });
-    setState(() {
-      _repo = repo;
-      _engine = engine;
-      _contacts = contacts;
-    });
-    if (!widget.autoPoll) return;
-    final mesh = WebRtcMesh(
-      baseUrl: widget.relayUrl,
-      channel: kChannel,
+    final channels = ChannelManager(
       identity: widget.identity,
+      relayUrl: widget.relayUrl,
+      live: widget.autoPoll,
+      onUpdate: _onUpdate,
     );
-    _mesh = mesh;
-    // Each connected peer becomes a gossip session against the shared repo.
-    _peers = mesh.peerConnected.listen(engine.addPeer);
+    await channels.open(kChannel);
+    if (!mounted) {
+      await channels.close();
+      return;
+    }
+    setState(() {
+      _contacts = contacts;
+      _channels = channels;
+    });
+  }
+
+  void _onUpdate() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
-    unawaited(_updates?.cancel());
-    unawaited(_peers?.cancel());
-    unawaited(_mesh?.close());
-    unawaited(_engine?.close());
+    unawaited(_channels?.close());
     _input.dispose();
     super.dispose();
   }
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    final engine = _engine;
-    final repo = _repo;
-    if (text.isEmpty || _sending || engine == null || repo == null) return;
+    final session = _channels?.active;
+    if (text.isEmpty || _sending || session == null) return;
     setState(() => _sending = true);
     try {
       final message = await Message.create(
         author: widget.identity,
-        channel: kChannel,
+        channel: session.channelId,
         payload: Uint8List.fromList(utf8.encode(text)),
-        prev: repo.heads(),
+        prev: session.repository.heads(),
       );
       _input.clear();
       // Persist + gossip to peers; the updates stream re-renders the new message.
-      await engine.publish(message);
+      await session.engine.publish(message);
     } catch (_) {
       if (mounted) setState(() => _error = 'send failed');
     } finally {
@@ -240,14 +225,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final messages = _repo?.ordered() ?? const <Message>[];
+    final session = _channels?.active;
+    final messages = session?.repository.ordered() ?? const <Message>[];
     return Scaffold(
       appBar: AppBar(
-        title: Row(
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Hearth'),
-            const SizedBox(width: 10),
+            Text('# ${session?.channelId ?? '…'}'),
             Text(
               'hearth#${widget.identity.fingerprint}',
               key: const Key('identity-fingerprint'),
@@ -257,6 +243,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         bottom: _error == null ? null : _errorBar(context, _error!),
       ),
+      drawer: _drawer(context),
       body: Column(
         children: [
           Expanded(
@@ -272,6 +259,86 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  Widget _drawer(BuildContext context) {
+    final channels = _channels;
+    return Drawer(
+      child: SafeArea(
+        child: ListView(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text(
+                'Channels',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+            ),
+            if (channels != null)
+              for (final id in channels.channelIds)
+                ListTile(
+                  leading: const Icon(Icons.tag),
+                  title: Text(id),
+                  selected: id == channels.activeId,
+                  onTap: () {
+                    channels.activate(id);
+                    Navigator.pop(context);
+                  },
+                ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.add),
+              title: const Text('Join a channel'),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_joinChannel());
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Prompts for a channel name and joins it (creating its local stack).
+  Future<void> _joinChannel() async {
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Join a channel'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'channel name'),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Join'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    final id = _channelId(name);
+    if (id != null) await _channels?.open(id);
+  }
+
+  /// Normalises a typed name to a safe, shareable channel id — so two people who
+  /// type "My Room" land in the same channel, and it's safe as a storage key.
+  String? _channelId(String? name) {
+    final id = name
+        ?.trim()
+        .toLowerCase()
+        .replaceAll(RegExp('[^a-z0-9_-]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    return (id == null || id.isEmpty) ? null : id;
   }
 
   Widget _bubble(BuildContext context, Message message) {
@@ -302,6 +369,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _composer(BuildContext context) {
+    final channelId = _channels?.active?.channelId ?? 'general';
     return Padding(
       padding: const EdgeInsets.all(8),
       child: Row(
@@ -310,9 +378,9 @@ class _ChatScreenState extends State<ChatScreen> {
             child: TextField(
               controller: _input,
               onSubmitted: (_) => unawaited(_send()),
-              decoration: const InputDecoration(
-                hintText: 'Message #general',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                hintText: 'Message #$channelId',
+                border: const OutlineInputBorder(),
               ),
             ),
           ),
