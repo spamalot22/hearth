@@ -247,8 +247,6 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       content-addressed + signed). This is what delivers A→(carried by B)→C.
 - [ ] `core`: **DM encryption (sealed box)** — X25519 ECDH to the recipient's key
       so carriers relay blind. Lightweight and **independent of group MLS** (Phase 3).
-- [ ] `app`: **identity export/import** — seed as recovery phrase / QR so one
-      identity moves across devices; no accounts database. (Per-device subkeys: Phase 3.)
 - [ ] **Optional always-on relay** (opt-in, not required for P2P): deploy the same
       Hono app via **Firebase CLI** as a Cloud Function (HTTP) + Firestore **TTL**
       for transient signalling/presence + encrypted, TTL'd **store-and-forward** for
@@ -261,7 +259,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - [ ] Voice/video over WebRTC media (signaled over the existing layer).
 - [ ] **MLS** for *group* E2E + key rotation (Rust `openmls` candidate) — DMs are
       already sealed-box-encrypted from Phase 2; this covers the multi-member case.
-- [ ] Multi-device identity (subkeys certified by a root key).
+- [ ] Multi-device identity, two tiers: **(a) export/import** the root seed
+      (recovery phrase / QR) — the simple "same key on another device" path, and
+      also the *only* identity **backup/recovery** mechanism; **(b) per-device
+      subkeys** certified by a root key — adds per-device revocation. Until this
+      ships there is **no identity backup**: clearing storage loses the key.
 
 ### Phase 4 — Polish / ecosystem
 - [ ] Notifications, per platform:
@@ -363,3 +365,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   both independent of and earlier than heavyweight **group MLS** (still Phase 3) —
   refines the encryption-scope entry above. Caveat: carriers learn message
   _authorship_; hiding the recipient (sealed sender) is a later step.
+- **2026-06-21** — **Deferred all multi-device identity (incl. export/import) to
+  Phase 3**, to keep Phase 2 on the delivery core (local persistence, gossip, DM
+  encryption). Trade accepted for now: no identity backup until then — clearing a
+  device's storage loses that key irrecoverably.
