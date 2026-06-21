@@ -253,8 +253,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       verified against the sender's pubkey (`signal_auth`), binding the SDP's DTLS
       fingerprint to identity. Closes the active-MITM hole; the relay stays a dumb
       pipe (still sees metadata). Verified two-window + 6 unit tests.
-- [ ] `core`: **DM encryption (sealed box)** — X25519 ECDH to the recipient's key
-      so carriers relay blind. Lightweight and **independent of group MLS** (Phase 3).
+- [x] **DM encryption** — `SealedBox` + `PairBox` (X25519 derived from the Ed25519
+      id) in `core`; the app sends encrypted DMs over a derived DM channel and
+      carriers relay blind. Independent of group MLS. (Limitation: both parties must
+      open the DM — no auto-join/notify yet.)
 - [ ] **Optional always-on relay** (opt-in, not required for P2P): deploy the same
       Hono app via **Firebase CLI** as a Cloud Function (HTTP) + Firestore **TTL**
       for transient signalling/presence + encrypted, TTL'd **store-and-forward** for
@@ -288,9 +290,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - [ ] **Rich content** — typed message payloads via a **content envelope**
       (`{t: text|gif|sticker|sound, …}` inside the payload; composes under
       encryption, since we encrypt the envelope):
-      - [ ] **Emoji** — Unicode already works in text; add a quick **emoji picker**.
-      - [ ] **GIFs** — paste-a-URL renders inline now; **Giphy/Tenor search** needs
-            a provider **API key** (credentials — ask the user when we get there).
+      - [x] **Emoji** — quick picker added (Unicode text already worked).
+      - [x] **GIFs (URL)** — paste-a-URL renders inline; **Giphy/Tenor search** still
+            needs a provider **API key** (credentials — ask the user for it).
       - [ ] **Stickers** — custom sticker packs as content-addressed media blobs.
       - [ ] **Soundboards** — per-channel uploadable audio clips, tap to play
             (`audioplayers`), shared channel-wide.
@@ -396,6 +398,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   the mesh disposes + re-offers on any connection failure with no backoff, turning
   a blip into a retry storm. Workaround: restart the relay / reopen the tab. Fix
   with signal TTL (like presence) + retry backoff when hardening the relay.
+  **Update (2026-06-22): signal TTL shipped (30s); mesh retry backoff still open.**
 - **2026-06-21** — **Authenticated the WebRTC signalling.** Offers/answers/ICE are
   Ed25519-signed over the security-critical payload (the SDP's DTLS fingerprint /
   the ICE candidate), bound to kind + recipient; the receiver verifies against the
@@ -426,3 +429,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   referenced by hash — never gossip large media to everyone). Emoji is ~free
   (Unicode text); GIF *search* (Giphy/Tenor) needs a provider **API key** —
   credentials to request when we build it. Soundboards add `audioplayers`.
+- **2026-06-22** — **Autonomous build run** (multi-channel onward): shipped
+  multi-channel + a channel drawer, encrypted DMs (`PairBox`), the emoji picker,
+  the typed content envelope + GIF-by-URL, and the relay signal TTL. Crypto + core
+  are unit-tested; the live multi-window behaviour of the app features (DM connect,
+  GIF render, channel switching) is **not yet verified in a browser** — pending a
+  manual two-window pass. Still open: stickers/soundboards (need the media-blob
+  subsystem), encrypted groups (need membership), DM auto-join, mesh retry backoff,
+  Giphy/Tenor search (needs an API key).
