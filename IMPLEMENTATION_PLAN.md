@@ -375,6 +375,12 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   Phase 3**, to keep Phase 2 on the delivery core (local persistence, gossip, DM
   encryption). Trade accepted for now: no identity backup until then — clearing a
   device's storage loses that key irrecoverably.
+- **2026-06-21** — **Known robustness gaps** (found while testing, deferred): the
+  dev relay's signal mailboxes never expire, so a long-lived relay accumulates
+  stale offers a freshly-loaded client re-fetches (`since=0`) and churns on; and
+  the mesh disposes + re-offers on any connection failure with no backoff, turning
+  a blip into a retry storm. Workaround: restart the relay / reopen the tab. Fix
+  with signal TTL (like presence) + retry backoff when hardening the relay.
 - **2026-06-21** — **Authenticated the WebRTC signalling.** Offers/answers/ICE are
   Ed25519-signed over the security-critical payload (the SDP's DTLS fingerprint /
   the ICE candidate), bound to kind + recipient; the receiver verifies against the
