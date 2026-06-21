@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'contacts.dart';
 import 'key_store.dart';
 import 'message_storage_hive.dart';
 import 'webrtc_mesh.dart';
@@ -121,6 +123,7 @@ class _ChatScreenState extends State<ChatScreen> {
   WebRtcMesh? _mesh;
   StreamSubscription<void>? _updates;
   StreamSubscription<FrameChannel>? _peers;
+  ContactBook? _contacts;
   String? _error;
   bool _sending = false;
 
@@ -137,6 +140,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final storage = widget.autoPoll
         ? await HiveMessageStorage.open()
         : InMemoryMessageStorage();
+    final contacts = widget.autoPoll ? await ContactBook.open() : null;
     final repo = MessageRepository(storage);
     await repo.load();
     if (!mounted) return;
@@ -147,6 +151,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _repo = repo;
       _engine = engine;
+      _contacts = contacts;
     });
     if (!widget.autoPoll) return;
     final mesh = WebRtcMesh(
@@ -190,6 +195,47 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  /// A peer's petname if you've set one, else their `hearth#fingerprint`.
+  String _displayName(Uint8List author) =>
+      _contacts?.nameFor(hex.encode(author)) ??
+      'hearth#${_fingerprint(author)}';
+
+  /// Prompts for a local petname for [author] and stores it.
+  Future<void> _renameContact(Uint8List author) async {
+    final key = hex.encode(author);
+    final controller = TextEditingController(
+      text: _contacts?.nameFor(key) ?? '',
+    );
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Name hearth#${_fingerprint(author)}'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Petname (only you see this)',
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null) return;
+    await _contacts?.setName(key, name);
+    if (mounted) setState(() {});
   }
 
   @override
@@ -240,9 +286,12 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'hearth#${_fingerprint(message.author)}',
-                style: Theme.of(context).textTheme.labelSmall,
+              GestureDetector(
+                onTap: mine ? null : () => _renameContact(message.author),
+                child: Text(
+                  mine ? 'you' : _displayName(message.author),
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
               ),
               Text(utf8.decode(message.payload)),
             ],
