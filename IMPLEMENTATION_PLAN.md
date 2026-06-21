@@ -148,6 +148,16 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
   first contact is the Phase 3 DHT/libp2p case.
 - **Single point of failure is limited to *new* connections:** if the backend is
   down, existing P2P sessions keep working.
+- **Offline delivery is epidemic, not routed.** Every message is signed +
+  content-addressed, so *any* peer can carry and re-serve another's messages
+  without forging or altering them (recipients verify the author's signature
+  directly); with DM payloads sealed to the recipient, carriers relay **blind**.
+  So A can message an offline C, go offline, and C later syncs it from a carrier B
+  who couriered it without reading it. The optional backend relay is just "a
+  carrier that's always online" — it makes best-effort peer carry reliable. No
+  durable database is required for this, only for the *convenience* of an always-on
+  holder (and for push). Caveat: a carrier still learns it holds a message authored
+  by A; hiding the recipient is a later sealed-sender step.
 
 ### Firebase backend — staying at $0
 Everything lives in **one Firebase project** (Cloud Functions + Firestore + FCM).
@@ -230,16 +240,27 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       it lives app-side; public STUN for ICE, deterministic offerer avoids glare.
       Verified two-window: host↔host pair, DTLS up, `hearth` data channel open,
       messages crossing P2P (relay only brokered the handshake).
-- [ ] Deploy via **Firebase CLI**: Cloud Function (HTTP) + Firestore rules /
-      indexes / TTL; client points at the Function URL. (First cloud deploy needs Blaze.)
-- [ ] Gossip sync: exchange heads, walk `prev`, send the diff.
+- [ ] `core`: **local persistence** for the message DAG — survive restart and let
+      a peer retain messages it's carrying. Local-first store, no backend.
+- [ ] `core`: **gossip sync / epidemic replication** — exchange heads, walk `prev`,
+      send the diff; peers re-serve each other's signed messages (can't forge —
+      content-addressed + signed). This is what delivers A→(carried by B)→C.
+- [ ] `core`: **DM encryption (sealed box)** — X25519 ECDH to the recipient's key
+      so carriers relay blind. Lightweight and **independent of group MLS** (Phase 3).
+- [ ] `app`: **identity export/import** — seed as recovery phrase / QR so one
+      identity moves across devices; no accounts database. (Per-device subkeys: Phase 3.)
+- [ ] **Optional always-on relay** (opt-in, not required for P2P): deploy the same
+      Hono app via **Firebase CLI** as a Cloud Function (HTTP) + Firestore **TTL**
+      for transient signalling/presence + encrypted, TTL'd **store-and-forward** for
+      offline peers. Client points at any relay URL. (Cloud deploy needs Blaze.)
 - [ ] coturn (Docker) — optional TURN fallback for symmetric-NAT peers.
 
 ### Phase 3 — Groups, voice, and the hard stuff
 - [ ] Group = replicated log + membership-as-messages (capability model).
 - [ ] Permission-conflict resolution rule (owner-key-wins, decide in §5).
 - [ ] Voice/video over WebRTC media (signaled over the existing layer).
-- [ ] **MLS** for group key rotation (Rust `openmls` candidate).
+- [ ] **MLS** for *group* E2E + key rotation (Rust `openmls` candidate) — DMs are
+      already sealed-box-encrypted from Phase 2; this covers the multi-member case.
 - [ ] Multi-device identity (subkeys certified by a root key).
 
 ### Phase 4 — Polish / ecosystem
@@ -327,3 +348,18 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   collisions / key changes (TOFU pinning). A namespace/directory is an optional,
   later add-on **only** for cold discovery of strangers by name. Default display
   until petnamed: the `hearth#fingerprint`.
+- **2026-06-21** — **Architecture: a database-free P2P core + an _optional_
+  always-on relay.** "Do we need a database?" reduces to one feature — offline /
+  asynchronous delivery (and push, which needs the same holding). Identity needs no
+  DB (export/import the key); signalling/presence is transient (peers just
+  re-announce); message history is **local-first** on each device. Delivery is
+  **epidemic, not routed**: messages are signed + content-addressed, so any peer can
+  carry and re-serve another's without forging/altering, and DM payloads are
+  **sealed to the recipient** so carriers relay blind. Canonical target: A messages
+  offline C, A goes offline, C later syncs it via carrier B — couriered without
+  reading or tampering. A durable DB is needed only to run an always-online carrier
+  (the optional relay) and for push; the default core runs with none. **Revised
+  ordering:** prioritise **gossip sync** + **DM sealed-box encryption** (X25519),
+  both independent of and earlier than heavyweight **group MLS** (still Phase 3) —
+  refines the encryption-scope entry above. Caveat: carriers learn message
+  _authorship_; hiding the recipient (sealed sender) is a later step.
