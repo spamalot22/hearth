@@ -115,11 +115,11 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final MessageStore _store = MessageStore();
   final TextEditingController _input = TextEditingController();
-  late final RelayTransport _transport = RelayTransport(
+  late final Transport _transport = RelayTransport(
     baseUrl: widget.relayUrl,
     channel: kChannel,
   );
-  Timer? _pollTimer;
+  StreamSubscription<Message>? _sub;
   String? _error;
   bool _sending = false;
 
@@ -127,35 +127,20 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     if (widget.autoPoll) {
-      unawaited(_poll());
-      _pollTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => unawaited(_poll()),
-      );
+      _sub = _transport.incoming.listen(_onIncoming);
     }
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
-    _transport.close();
+    unawaited(_sub?.cancel());
+    unawaited(_transport.close());
     _input.dispose();
     super.dispose();
   }
 
-  Future<void> _poll() async {
-    try {
-      final incoming = await _transport.poll();
-      var changed = _error != null; // clearing a prior error is also a change
-      for (final message in incoming) {
-        if (_store.add(message)) changed = true;
-      }
-      if (changed && mounted) setState(() => _error = null);
-    } catch (_) {
-      if (mounted && _error == null) {
-        setState(() => _error = 'relay unreachable');
-      }
-    }
+  void _onIncoming(Message message) {
+    if (_store.add(message) && mounted) setState(() {});
   }
 
   Future<void> _send() async {

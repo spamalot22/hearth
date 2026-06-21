@@ -124,5 +124,47 @@ void main() {
 
       expect(await transport.poll(), isEmpty); // forged dropped
     });
+
+    test(
+      'incoming stream emits verified messages as they are polled',
+      () async {
+        final m1 = await Message.create(
+          author: author,
+          channel: 'general',
+          payload: _b('streamed'),
+        );
+        var served = false;
+        final client = MockClient((req) async {
+          if (!served) {
+            served = true;
+            return http.Response(
+              jsonEncode({
+                'messages': [
+                  {'seq': 1, ...m1.toJson()},
+                ],
+                'seq': 1,
+              }),
+              200,
+            );
+          }
+          return http.Response(
+            jsonEncode({'messages': <Object?>[], 'seq': 1}),
+            200,
+          );
+        });
+        final transport = RelayTransport(
+          baseUrl: Uri.parse('http://relay.test'),
+          channel: 'general',
+          client: client,
+          pollInterval: const Duration(milliseconds: 5),
+        );
+
+        final first = await transport.incoming.first.timeout(
+          const Duration(seconds: 2),
+        );
+        expect(first.idHex, m1.idHex);
+        await transport.close();
+      },
+    );
   });
 }
