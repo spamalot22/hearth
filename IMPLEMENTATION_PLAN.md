@@ -16,14 +16,16 @@ _Status: living document. Last updated: 2026-06-21._
   differ.
 - **Text now; voice next** — text chat works today. Real-time **voice, video, and
   screen-share** come via WebRTC (Phase 3), with coturn for NAT traversal.
-- **End-to-end encryption (Phase 3, MLS).** Signed today, encrypted later — the
-  payload is opaque bytes (and messages carry a `v` version), so encryption slots
-  in with no breaking change. **Decided:** **group channels are plaintext (signed)
-  by default** — so they stay moderatable/searchable/bot-friendly — with a
-  **per-channel toggle to enable E2E**, and the UI must spell out what's lost when
-  you do (server-side moderation, search, content-reading bots). **DMs are E2E by
-  default.** Caveat: encryption hides payloads, not relay-visible metadata
-  (who/when).
+- **End-to-end encrypted by default — everything.** Signed today, encrypted next —
+  the payload is opaque bytes (and messages carry a `v` version), so encryption
+  slots in with no breaking change. **Decided:** **DMs *and* group channels are
+  E2E-encrypted by default** — privacy first. An opt-*out* to plaintext may come
+  later, but only where a specific feature genuinely needs it (server-side
+  search/moderation, content-reading bots, or open public channels — see the
+  encryption-cost note in §6). Implementation: DMs use a **sealed box** (X25519 —
+  lands first); encrypted groups need a defined member set, so group encryption
+  rides with group membership, and **MLS** adds forward secrecy + key rotation.
+  Caveat: encryption hides payloads, not relay-visible metadata (who/when).
 - **No central accounts — identity is a keypair.** "Account" features map onto the
   key: **profiles** (signed metadata), **names** via the **petname model** (each
   user assigns private local petnames; the other side's self-asserted nickname is
@@ -61,7 +63,7 @@ _Status: living document. Last updated: 2026-06-21._
 | Backend (rendezvous + push) | **Firebase**: Cloud Functions (**TypeScript**) + **Firestore** + **FCM**, free tier | ✅ decided |
 | Backend framework / tooling | **Hono** in an HTTP Cloud Function · **firebase-admin** · **Firebase CLI** + Emulator Suite | ✅ decided |
 | TURN relay (NAT fallback) | **coturn**, self-hosted **Docker** — optional | ✅ decided |
-| Group E2E encryption | **MLS (RFC 9420)** — deferred; likely Rust (`openmls`) when needed | ⏳ deferred |
+| E2E encryption (default) | DMs **sealed box** (X25519, next); groups need membership → **MLS (RFC 9420)** for forward secrecy / rotation (likely Rust `openmls`) | 🔜 next |
 | Heavy P2P (DHT, hole-punching) | **libp2p** — deferred; Rust via `flutter_rust_bridge` if/when needed | ⏳ deferred |
 
 ### Target platforms (priority order)
@@ -263,8 +265,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - [ ] Group = replicated log + membership-as-messages (capability model).
 - [ ] Permission-conflict resolution rule (owner-key-wins, decide in §5).
 - [ ] Voice/video over WebRTC media (signaled over the existing layer).
-- [ ] **MLS** for *group* E2E + key rotation (Rust `openmls` candidate) — DMs are
-      already sealed-box-encrypted from Phase 2; this covers the multi-member case.
+- [ ] **Group encryption** — encrypt each message to the channel's member set
+      (sealed-box per member); requires the membership above. **MLS** (Rust
+      `openmls`) is the upgrade for forward secrecy + efficient key rotation. (DMs
+      are already sealed-box-encrypted from Phase 2.)
 - [ ] Multi-device identity, two tiers: **(a) export/import** the root seed
       (recovery phrase / QR) — the simple "same key on another device" path, and
       also the *only* identity **backup/recovery** mechanism; **(b) per-device
@@ -341,12 +345,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   bytes byte-for-byte; Ed25519 verifies cross-language). Node tooling is **pnpm**,
   with the public npmjs registry pinned in `backend/.npmrc` (the global npm
   registry is work's and must not be used here).
-- **2026-06-21** — **Encryption scope decided:** group channels are plaintext
-  (signed) by default — so they stay moderatable/searchable/bot-friendly — with a
-  per-channel **toggle to E2E** (MLS) that warns the user what it costs (no
-  server-side moderation/search, no content-reading bots). DMs are E2E by default.
-  No code change now: the current plaintext-signed group channel already *is* the
-  default; the toggle + MLS arrive in Phase 3.
+- **2026-06-21** *(superseded → everything-encrypted-by-default; see below)* —
+  **Encryption scope:** group channels plaintext (signed) by default —
+  moderatable/searchable/bot-friendly — with a per-channel **toggle to E2E**; DMs
+  E2E by default. Reversed below in favour of privacy-by-default.
 - **2026-06-21** — **Naming decided (petname model):** identity stays the key;
   human names are **local petnames** each user assigns privately. On first contact
   the client *suggests* the other side's self-asserted nickname (from their signed
@@ -391,3 +393,16 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   Crypto in a testable `signal_auth` unit (6 tests). Caveat: this binds the channel
   to the *announced* identity; trusting that a key is who you want is the separate
   petname/TOFU layer.
+- **2026-06-21** — **Encryption reversed to E2E-by-default for *everything*** (DMs
+  and groups), superseding the plaintext-groups decision. Privacy is the default;
+  an opt-*out* to plaintext comes only where a specific feature demands it
+  (server-side search/moderation, content bots, or **open public channels** — note
+  open/public Discord-style channels become the main thing you'd opt out for, since
+  encryption needs a defined member set). Sequencing: **DMs sealed-box (X25519)
+  first** — cheap, recipient known; **group encryption** rides with group
+  membership (encrypt to the member set), with **MLS** the forward-secrecy +
+  rotation upgrade. Costs accepted (weighed explicitly): no server-side
+  search/moderation/content-bots, push shows "new message" until on-device decrypt,
+  lost key = lost history, new devices must sync history. Sealed-box has **no
+  forward secrecy** (a leaked key exposes past DMs) — MLS fixes that for groups;
+  DMs can ratchet later if wanted.
