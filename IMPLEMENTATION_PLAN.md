@@ -285,6 +285,19 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       - **iOS / web → later** (iOS reintroduces Apple $99/yr + APNs key; FCM can
         cover both when we get there).
       - Self-hoster option later: **UnifiedPush** for de-Googled Android.
+- [ ] **Rich content** — typed message payloads via a **content envelope**
+      (`{t: text|gif|sticker|sound, …}` inside the payload; composes under
+      encryption, since we encrypt the envelope):
+      - [ ] **Emoji** — Unicode already works in text; add a quick **emoji picker**.
+      - [ ] **GIFs** — paste-a-URL renders inline now; **Giphy/Tenor search** needs
+            a provider **API key** (credentials — ask the user when we get there).
+      - [ ] **Stickers** — custom sticker packs as content-addressed media blobs.
+      - [ ] **Soundboards** — per-channel uploadable audio clips, tap to play
+            (`audioplayers`), shared channel-wide.
+      - [ ] **Media-blob subsystem** (shared by stickers/sounds/uploaded GIFs) —
+            content-addressed blobs fetched **on demand** over the data channel
+            (message references a hash; fetch the blob lazily — don't gossip large
+            media to everyone).
 - [ ] Optional federation between communities.
 - [ ] Spam resistance (proof-of-work / invite gating / web-of-trust).
 - [ ] Plugins (WASM) and local bots.
@@ -406,3 +419,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   lost key = lost history, new devices must sync history. Sealed-box has **no
   forward secrecy** (a leaked key exposes past DMs) — MLS fixes that for groups;
   DMs can ratchet later if wanted.
+- **2026-06-21** — **Rich content planned** (user-requested): emoji, GIFs,
+  stickers, soundboards. Approach: a typed **content envelope** in the payload
+  (`{t, …}`) that composes under encryption, plus a shared **media-blob
+  subsystem** (content-addressed blobs fetched on demand over the data channel,
+  referenced by hash — never gossip large media to everyone). Emoji is ~free
+  (Unicode text); GIF *search* (Giphy/Tenor) needs a provider **API key** —
+  credentials to request when we build it. Soundboards add `audioplayers`.
