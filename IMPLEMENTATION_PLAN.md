@@ -25,9 +25,11 @@ _Status: living document. Last updated: 2026-06-21._
   default.** Caveat: encryption hides payloads, not relay-visible metadata
   (who/when).
 - **No central accounts — identity is a keypair.** "Account" features map onto the
-  key: **profiles** (signed metadata), **handles** (human name → pubkey, §5),
-  **recovery** (seed backup) and **multi-device** (root key certifies device
-  subkeys, §5). Optional OIDC login is a per-community add-on, never required.
+  key: **profiles** (signed metadata), **names** via the **petname model** (each
+  user assigns private local petnames; the other side's self-asserted nickname is
+  only a *suggestion* — no global authority; an optional directory exists later
+  just for cold discovery), **recovery** (seed backup) and **multi-device** (root
+  key certifies device subkeys, §5). Optional OIDC login is a per-community add-on.
 
 ---
 
@@ -263,9 +265,6 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
    wins? Leaning: one designated owner key whose actions always take precedence.
 4. **Bundle / application IDs.** Scaffolding left the default `com.example.*`;
    set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.
-5. **Handles / naming.** How do human-readable names map to pubkeys
-   (`hearth#a1b2` → "sam")? Zooko's triangle — likely local petnames + an
-   optional discovery-server namespace. Decide before public discovery exists.
 
 ---
 
@@ -315,3 +314,12 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   server-side moderation/search, no content-reading bots). DMs are E2E by default.
   No code change now: the current plaintext-signed group channel already *is* the
   default; the toggle + MLS arrive in Phase 3.
+- **2026-06-21** — **Naming decided (petname model):** identity stays the key;
+  human names are **local petnames** each user assigns privately. On first contact
+  the client *suggests* the other side's self-asserted nickname (from their signed
+  profile), but the petname is the user's own choice. Keeps names secure +
+  decentralised — only *global* agreement is given up. Safety: nicknames are
+  untrusted suggestions, petnames unique per local list, client flags name
+  collisions / key changes (TOFU pinning). A namespace/directory is an optional,
+  later add-on **only** for cold discovery of strangers by name. Default display
+  until petnamed: the `hearth#fingerprint`.
