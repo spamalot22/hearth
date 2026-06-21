@@ -21,13 +21,20 @@ describe('SignalHub', () => {
 
   it('delivers signals to a recipient mailbox by cursor', () => {
     const hub = new SignalHub();
-    const seq = hub.postSignal('bob', 'alice', 'offer', { sdp: 'x' });
+    const seq = hub.postSignal('bob', 'alice', 'offer', { sdp: 'x' }, 1000);
     expect(seq).toBe(1);
 
-    const got = hub.signalsSince('bob', 0);
+    const got = hub.signalsSince('bob', 0, 1000);
     expect(got).toHaveLength(1);
     expect(got[0]!.from).toBe('alice');
-    expect(hub.signalsSince('bob', seq)).toHaveLength(0); // cursor advanced
+    expect(hub.signalsSince('bob', seq, 1000)).toHaveLength(0); // cursor advanced
+  });
+
+  it('prunes signals older than the TTL', () => {
+    const hub = new SignalHub();
+    hub.postSignal('bob', 'alice', 'offer', { sdp: 'x' }, 0);
+    // 40s later the stale offer is gone, even reading from cursor 0.
+    expect(hub.signalsSince('bob', 0, 40_000)).toHaveLength(0);
   });
 });
 

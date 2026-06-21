@@ -13,12 +13,14 @@ import { Hono } from 'hono';
  */
 
 const PRESENCE_TTL_MS = 15_000;
+const SIGNAL_TTL_MS = 30_000;
 
 interface StoredSignal {
   seq: number;
   from: string;
   kind: string; // 'offer' | 'answer' | 'ice'
   data: unknown;
+  ts: number;
 }
 
 export class SignalHub {
@@ -54,16 +56,34 @@ export class SignalHub {
     return live;
   }
 
-  postSignal(to: string, from: string, kind: string, data: unknown): number {
+  postSignal(
+    to: string,
+    from: string,
+    kind: string,
+    data: unknown,
+    nowMs: number,
+  ): number {
     const box = this.mailboxes.get(to) ?? [];
-    const stored: StoredSignal = { seq: ++this.seq, from, kind, data };
+    const stored: StoredSignal = {
+      seq: ++this.seq,
+      from,
+      kind,
+      data,
+      ts: nowMs,
+    };
     box.push(stored);
     this.mailboxes.set(to, box);
     return stored.seq;
   }
 
-  signalsSince(to: string, since: number): StoredSignal[] {
-    return (this.mailboxes.get(to) ?? []).filter((s) => s.seq > since);
+  // Returns fresh signals past [since], pruning ones older than the TTL so a
+  // long-lived relay never replays stale offers to a freshly-loaded client.
+  signalsSince(to: string, since: number, nowMs: number): StoredSignal[] {
+    const box = this.mailboxes.get(to);
+    if (!box) return [];
+    const fresh = box.filter((s) => nowMs - s.ts <= SIGNAL_TTL_MS);
+    if (fresh.length !== box.length) this.mailboxes.set(to, fresh);
+    return fresh.filter((s) => s.seq > since);
   }
 }
 
@@ -100,7 +120,7 @@ export function addSignalingRoutes(
     if (!body.to || !body.from || !body.kind) {
       return c.json({ error: 'to, from, kind required' }, 400);
     }
-    const seq = hub.postSignal(body.to, body.from, body.kind, body.data);
+    const seq = hub.postSignal(body.to, body.from, body.kind, body.data, now());
     return c.json({ ok: true, seq });
   });
 
@@ -109,7 +129,7 @@ export function addSignalingRoutes(
     const forPubkey = c.req.query('for');
     if (!forPubkey) return c.json({ error: 'for required' }, 400);
     const since = Number(c.req.query('since') ?? '0');
-    const signals = hub.signalsSince(forPubkey, since);
+    const signals = hub.signalsSince(forPubkey, since, now());
     const seq = signals.length ? signals[signals.length - 1]!.seq : since;
     return c.json({ signals, seq });
   });
