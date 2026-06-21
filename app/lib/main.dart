@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
@@ -150,7 +149,12 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  void _onUpdate() {
+  void _onUpdate() => unawaited(_refresh());
+
+  /// Decrypts the active channel's new DM messages (no-op for groups), then
+  /// re-renders.
+  Future<void> _refresh() async {
+    await _channels?.active?.refreshPlaintext();
     if (mounted) setState(() {});
   }
 
@@ -170,7 +174,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final message = await Message.create(
         author: widget.identity,
         channel: session.channelId,
-        payload: Uint8List.fromList(utf8.encode(text)),
+        payload: await session.encodePayload(text),
         prev: session.repository.heads(),
       );
       _input.clear();
@@ -238,6 +242,35 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Tapped a peer's name: offer to DM them or give them a local name.
+  Future<void> _peerActions(Uint8List author) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.alternate_email),
+              title: const Text('Message privately'),
+              onTap: () => Navigator.pop(context, 'dm'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Set a name'),
+              onTap: () => Navigator.pop(context, 'name'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == 'dm') {
+      await _channels?.openDm(author);
+    } else if (action == 'name') {
+      await _renameContact(author);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final session = _channels?.active;
@@ -267,7 +300,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 : ListView.builder(
                     padding: const EdgeInsets.all(8),
                     itemCount: messages.length,
-                    itemBuilder: (context, i) => _bubble(context, messages[i]),
+                    itemBuilder: (context, i) =>
+                        _bubble(context, session!, messages[i]),
                   ),
           ),
           _composer(context),
@@ -278,29 +312,24 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _drawer(BuildContext context) {
     final channels = _channels;
+    final sessions = channels?.sessions.toList() ?? const <ChannelSession>[];
+    final groups = sessions.where((s) => !s.isDm);
+    final dms = sessions.where((s) => s.isDm);
     return Drawer(
       child: SafeArea(
         child: ListView(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
-                'Channels',
-                style: Theme.of(context).textTheme.titleSmall,
+            _drawerHeader('Channels'),
+            for (final s in groups)
+              ListTile(
+                leading: const Icon(Icons.tag),
+                title: Text(s.channelId),
+                selected: s.channelId == channels?.activeId,
+                onTap: () {
+                  channels?.activate(s.channelId);
+                  Navigator.pop(context);
+                },
               ),
-            ),
-            if (channels != null)
-              for (final id in channels.channelIds)
-                ListTile(
-                  leading: const Icon(Icons.tag),
-                  title: Text(id),
-                  selected: id == channels.activeId,
-                  onTap: () {
-                    channels.activate(id);
-                    Navigator.pop(context);
-                  },
-                ),
-            const Divider(),
             ListTile(
               leading: const Icon(Icons.add),
               title: const Text('Join a channel'),
@@ -309,11 +338,27 @@ class _ChatScreenState extends State<ChatScreen> {
                 unawaited(_joinChannel());
               },
             ),
+            if (dms.isNotEmpty) _drawerHeader('Direct messages'),
+            for (final s in dms)
+              ListTile(
+                leading: const Icon(Icons.alternate_email),
+                title: Text(_displayName(Uint8List.fromList(s.peerPubkey!))),
+                selected: s.channelId == channels?.activeId,
+                onTap: () {
+                  channels?.activate(s.channelId);
+                  Navigator.pop(context);
+                },
+              ),
           ],
         ),
       ),
     );
   }
+
+  Widget _drawerHeader(String title) => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+    child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+  );
 
   /// Prompts for a channel name and joins it (creating its local stack).
   Future<void> _joinChannel() async {
@@ -356,7 +401,11 @@ class _ChatScreenState extends State<ChatScreen> {
     return (id == null || id.isEmpty) ? null : id;
   }
 
-  Widget _bubble(BuildContext context, Message message) {
+  Widget _bubble(
+    BuildContext context,
+    ChannelSession session,
+    Message message,
+  ) {
     final mine = listEquals(message.author, widget.identity.publicKey);
     final scheme = Theme.of(context).colorScheme;
     return Align(
@@ -369,13 +418,15 @@ class _ChatScreenState extends State<ChatScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               GestureDetector(
-                onTap: mine ? null : () => _renameContact(message.author),
+                onTap: mine
+                    ? null
+                    : () => unawaited(_peerActions(message.author)),
                 child: Text(
                   mine ? 'you' : _displayName(message.author),
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
               ),
-              Text(utf8.decode(message.payload)),
+              Text(session.textOf(message)),
             ],
           ),
         ),
