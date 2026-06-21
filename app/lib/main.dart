@@ -1,16 +1,33 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:core/core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'key_store.dart';
+
+/// Relay endpoint for local dev; the channel everyone shares for now.
+final Uri kRelayUrl = Uri.parse('http://localhost:8787');
+const String kChannel = 'general';
 
 void main() {
   runApp(HearthApp(keyStore: SecureKeyStore()));
 }
 
 class HearthApp extends StatelessWidget {
-  const HearthApp({required this.keyStore, super.key});
+  const HearthApp({
+    required this.keyStore,
+    this.relayUrl,
+    this.autoPoll = true,
+    super.key,
+  });
 
   final KeyStore keyStore;
+  final Uri? relayUrl;
+
+  /// Disabled in widget tests so there's no background polling timer.
+  final bool autoPoll;
 
   @override
   Widget build(BuildContext context) {
@@ -22,80 +39,245 @@ class HearthApp extends StatelessWidget {
         brightness: Brightness.dark,
         colorSchemeSeed: const Color(0xFFE25822), // ember orange
       ),
-      home: IdentityScreen(keyStore: keyStore),
+      home: _Bootstrap(
+        keyStore: keyStore,
+        relayUrl: relayUrl ?? kRelayUrl,
+        autoPoll: autoPoll,
+      ),
     );
   }
 }
 
-/// First screen: loads (or creates) this device's identity and shows it.
-class IdentityScreen extends StatefulWidget {
-  const IdentityScreen({required this.keyStore, super.key});
+/// Loads (or creates) this device's identity, then hands off to the chat.
+class _Bootstrap extends StatefulWidget {
+  const _Bootstrap({
+    required this.keyStore,
+    required this.relayUrl,
+    required this.autoPoll,
+  });
 
   final KeyStore keyStore;
+  final Uri relayUrl;
+  final bool autoPoll;
 
   @override
-  State<IdentityScreen> createState() => _IdentityScreenState();
+  State<_Bootstrap> createState() => _BootstrapState();
 }
 
-class _IdentityScreenState extends State<IdentityScreen> {
+class _BootstrapState extends State<_Bootstrap> {
   late final Future<Identity> _identity = Identity.loadOrCreate(
     widget.keyStore,
   );
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Hearth')),
-      body: Center(
-        child: FutureBuilder<Identity>(
-          future: _identity,
-          builder: (context, snapshot) {
-            if (snapshot.connectionState != ConnectionState.done) {
-              return const CircularProgressIndicator();
-            }
-            if (snapshot.hasError) {
-              return Text('Failed to load identity: ${snapshot.error}');
-            }
-            return _IdentityCard(identity: snapshot.data!);
-          },
-        ),
-      ),
+    return FutureBuilder<Identity>(
+      future: _identity,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        if (snapshot.hasError) {
+          return Scaffold(
+            body: Center(
+              child: Text('Failed to load identity: ${snapshot.error}'),
+            ),
+          );
+        }
+        return ChatScreen(
+          identity: snapshot.data!,
+          relayUrl: widget.relayUrl,
+          autoPoll: widget.autoPoll,
+        );
+      },
     );
   }
 }
 
-class _IdentityCard extends StatelessWidget {
-  const _IdentityCard({required this.identity});
+class ChatScreen extends StatefulWidget {
+  const ChatScreen({
+    required this.identity,
+    required this.relayUrl,
+    this.autoPoll = true,
+    super.key,
+  });
 
   final Identity identity;
+  final Uri relayUrl;
+  final bool autoPoll;
+
+  @override
+  State<ChatScreen> createState() => _ChatScreenState();
+}
+
+class _ChatScreenState extends State<ChatScreen> {
+  final MessageStore _store = MessageStore();
+  final TextEditingController _input = TextEditingController();
+  late final RelayTransport _transport = RelayTransport(
+    baseUrl: widget.relayUrl,
+    channel: kChannel,
+  );
+  Timer? _pollTimer;
+  String? _error;
+  bool _sending = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoPoll) {
+      unawaited(_poll());
+      _pollTimer = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => unawaited(_poll()),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    _transport.close();
+    _input.dispose();
+    super.dispose();
+  }
+
+  Future<void> _poll() async {
+    try {
+      final incoming = await _transport.poll();
+      var changed = _error != null; // clearing a prior error is also a change
+      for (final message in incoming) {
+        if (_store.add(message)) changed = true;
+      }
+      if (changed && mounted) setState(() => _error = null);
+    } catch (_) {
+      if (mounted && _error == null) {
+        setState(() => _error = 'relay unreachable');
+      }
+    }
+  }
+
+  Future<void> _send() async {
+    final text = _input.text.trim();
+    if (text.isEmpty || _sending) return;
+    setState(() => _sending = true);
+    try {
+      final message = await Message.create(
+        author: widget.identity,
+        channel: kChannel,
+        payload: Uint8List.fromList(utf8.encode(text)),
+        prev: _store.heads(),
+      );
+      _store.add(message);
+      _input.clear();
+      setState(() {}); // echo locally right away
+      await _transport.send(message);
+    } catch (_) {
+      if (mounted) setState(() => _error = 'send failed');
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+    final messages = _store.ordered();
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Hearth'),
+            const SizedBox(width: 10),
+            Text(
+              'hearth#${widget.identity.fingerprint}',
+              key: const Key('identity-fingerprint'),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        bottom: _error == null ? null : _errorBar(context, _error!),
+      ),
+      body: Column(
         children: [
-          const Icon(Icons.local_fire_department, size: 64),
-          const SizedBox(height: 16),
-          Text('Your identity', style: theme.textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Text(
-            'hearth#${identity.fingerprint}',
-            key: const Key('identity-fingerprint'),
-            style: theme.textTheme.headlineSmall,
+          Expanded(
+            child: messages.isEmpty
+                ? const Center(child: Text('No messages yet — say something.'))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: messages.length,
+                    itemBuilder: (context, i) => _bubble(context, messages[i]),
+                  ),
           ),
-          const SizedBox(height: 24),
-          Text('Public key', style: theme.textTheme.labelMedium),
-          const SizedBox(height: 4),
-          SelectableText(
-            identity.publicKeyHex,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace'),
+          _composer(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _bubble(BuildContext context, Message message) {
+    final mine = listEquals(message.author, widget.identity.publicKey);
+    final scheme = Theme.of(context).colorScheme;
+    return Align(
+      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+      child: Card(
+        color: mine ? scheme.primaryContainer : scheme.surfaceContainerHighest,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'hearth#${_fingerprint(message.author)}',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+              Text(utf8.decode(message.payload)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _composer(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(8),
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _input,
+              onSubmitted: (_) => unawaited(_send()),
+              decoration: const InputDecoration(
+                hintText: 'Message #general',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton.filled(
+            onPressed: _sending ? null : () => unawaited(_send()),
+            icon: const Icon(Icons.send),
           ),
         ],
       ),
     );
   }
+
+  PreferredSizeWidget _errorBar(BuildContext context, String text) {
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(22),
+      child: Container(
+        width: double.infinity,
+        color: Theme.of(context).colorScheme.errorContainer,
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Text(text, textAlign: TextAlign.center),
+      ),
+    );
+  }
 }
+
+/// First 4 bytes of a public key as hex — the short author label.
+String _fingerprint(Uint8List key) =>
+    key.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join();

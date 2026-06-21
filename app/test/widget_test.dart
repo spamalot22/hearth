@@ -8,7 +8,7 @@ void main() {
     tester,
   ) async {
     final store = InMemoryKeyStore();
-    await tester.pumpWidget(HearthApp(keyStore: store));
+    await tester.pumpWidget(HearthApp(keyStore: store, autoPoll: false));
 
     // Shows a loader while the identity is generated.
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
@@ -23,12 +23,12 @@ void main() {
   testWidgets('reuses the persisted identity across launches', (tester) async {
     final store = InMemoryKeyStore();
 
-    await tester.pumpWidget(HearthApp(keyStore: store));
+    await tester.pumpWidget(HearthApp(keyStore: store, autoPoll: false));
     await tester.pumpAndSettle();
     final firstSeed = await store.readSeed();
 
     // Re-mount with the same store: should load the seed, not regenerate.
-    await tester.pumpWidget(HearthApp(keyStore: store));
+    await tester.pumpWidget(HearthApp(keyStore: store, autoPoll: false));
     await tester.pumpAndSettle();
     expect(await store.readSeed(), firstSeed);
   });

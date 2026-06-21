@@ -12,6 +12,7 @@ resolution: workspace
 dependencies:
   convert: ^3.1.2
   cryptography: ^2.9.0
+  http: ^1.6.0
 
 dev_dependencies:
   lints: ^6.0.0

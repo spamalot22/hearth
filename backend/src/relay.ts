@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 
 import { type WireMessage, verifyWire } from './message';
 
@@ -36,6 +37,9 @@ export class RelayStore {
  */
 export function createRelay(store: RelayStore = new RelayStore()): Hono {
   const app = new Hono();
+
+  // Allow the web app (served from a different localhost port) to call us.
+  app.use('/*', cors());
 
   app.get('/health', (c) => c.json({ ok: true }));
 
