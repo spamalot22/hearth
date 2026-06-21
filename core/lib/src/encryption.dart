@@ -113,3 +113,60 @@ class SealedBox {
     );
   }
 }
+
+/// Symmetric encryption between two identities, keyed by their *static* ECDH
+/// shared secret — so both parties (and only they) read every message, including
+/// their own. This is what a 1:1 DM uses: a sealed box would stop the sender
+/// reading back what they sent. No forward secrecy (the key is static) — fine for
+/// a first cut; ratchet later. Wire form: `nonce(12) ‖ mac(16) ‖ ciphertext`.
+class PairBox {
+  /// Encrypts [plaintext] for the DM between [self] and [peerEd25519PublicKey].
+  static Future<Uint8List> encrypt(
+    List<int> plaintext, {
+    required Identity self,
+    required List<int> peerEd25519PublicKey,
+  }) async {
+    final key = await _pairKey(self, peerEd25519PublicKey);
+    final box = await _aead.encrypt(plaintext, secretKey: key);
+    return Uint8List.fromList([
+      ...box.nonce,
+      ...box.mac.bytes,
+      ...box.cipherText,
+    ]);
+  }
+
+  /// Decrypts a DM [boxed] message between [self] and [peerEd25519PublicKey].
+  static Future<Uint8List> decrypt(
+    Uint8List boxed, {
+    required Identity self,
+    required List<int> peerEd25519PublicKey,
+  }) async {
+    if (boxed.length < 28) throw const FormatException('pair box too short');
+    final nonce = boxed.sublist(0, 12);
+    final mac = boxed.sublist(12, 28);
+    final cipherText = boxed.sublist(28);
+    final key = await _pairKey(self, peerEd25519PublicKey);
+    final clear = await _aead.decrypt(
+      SecretBox(cipherText, nonce: nonce, mac: Mac(mac)),
+      secretKey: key,
+    );
+    return Uint8List.fromList(clear);
+  }
+
+  /// The shared key. Direction-independent (ECDH is symmetric; salt/info fixed),
+  /// so both parties derive the same one.
+  static Future<SecretKey> _pairKey(
+    Identity self,
+    List<int> peerEd25519PublicKey,
+  ) async {
+    final shared = await self.x25519SharedSecret(
+      ed25519PublicToX25519(peerEd25519PublicKey),
+    );
+    final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+    return hkdf.deriveKey(
+      secretKey: SecretKey(shared),
+      nonce: const [],
+      info: utf8.encode('hearth/pairbox/v1'),
+    );
+  }
+}

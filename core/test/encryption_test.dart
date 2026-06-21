@@ -69,4 +69,56 @@ void main() {
       expect(a, isNot(b)); // same plaintext, different ciphertext
     });
   });
+
+  group('PairBox (DM shared key)', () {
+    test('both parties — and only they — read every message', () async {
+      final a = await Identity.generate();
+      final b = await Identity.generate();
+      final eve = await Identity.generate();
+      final boxed = await PairBox.encrypt(
+        _b('hi from a'),
+        self: a,
+        peerEd25519PublicKey: b.publicKey,
+      );
+
+      // B reads A's message...
+      expect(
+        await PairBox.decrypt(
+          boxed,
+          self: b,
+          peerEd25519PublicKey: a.publicKey,
+        ),
+        _b('hi from a'),
+      );
+      // ...and A reads back its OWN message (the win over a sealed box)...
+      expect(
+        await PairBox.decrypt(
+          boxed,
+          self: a,
+          peerEd25519PublicKey: b.publicKey,
+        ),
+        _b('hi from a'),
+      );
+      // ...but an outsider cannot.
+      await expectLater(
+        PairBox.decrypt(boxed, self: eve, peerEd25519PublicKey: a.publicKey),
+        throwsA(anything),
+      );
+    });
+
+    test('tampering is detected', () async {
+      final a = await Identity.generate();
+      final b = await Identity.generate();
+      final boxed = await PairBox.encrypt(
+        _b('integrity'),
+        self: a,
+        peerEd25519PublicKey: b.publicKey,
+      );
+      boxed[boxed.length - 1] ^= 0x01;
+      await expectLater(
+        PairBox.decrypt(boxed, self: b, peerEd25519PublicKey: a.publicKey),
+        throwsA(anything),
+      );
+    });
+  });
 }
