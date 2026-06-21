@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
 import { type WireMessage, verifyWire } from './message';
+import { SignalHub, addSignalingRoutes } from './signal';
 
 interface StoredMessage {
   seq: number;
@@ -35,13 +36,19 @@ export class RelayStore {
  * verifies each message's signature + id (so it can't be spammed with garbage)
  * but never decrypts or owns history — the clients are the source of truth.
  */
-export function createRelay(store: RelayStore = new RelayStore()): Hono {
+export function createRelay(
+  store: RelayStore = new RelayStore(),
+  signalHub: SignalHub = new SignalHub(),
+): Hono {
   const app = new Hono();
 
   // Allow the web app (served from a different localhost port) to call us.
   app.use('/*', cors());
 
   app.get('/health', (c) => c.json({ ok: true }));
+
+  // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
+  addSignalingRoutes(app, signalHub);
 
   // Accept a signed message: verify it, then store it.
   app.post('/messages', async (c) => {
