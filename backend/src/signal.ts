@@ -6,9 +6,10 @@ import { Hono } from 'hono';
  * candidates through per-recipient mailboxes — just enough rendezvous to open a
  * direct peer-to-peer data channel, after which the backend is out of the loop.
  *
- * NOTE: this first cut is unauthenticated — a `from` is taken on trust. Binding
- * signals to the Ed25519 identity (signing them / pinning the DTLS fingerprint)
- * is a later hardening pass.
+ * The relay is a dumb pipe — it does not verify `from`. Clients now sign each
+ * signal with their Ed25519 identity and verify it on receipt (see the app's
+ * `signal_auth`), so a malicious relay can't impersonate a peer or swap a DTLS
+ * fingerprint. It can still see metadata (who announces, IPs) and drop traffic.
  */
 
 const PRESENCE_TTL_MS = 15_000;

@@ -152,7 +152,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final mesh = WebRtcMesh(
       baseUrl: widget.relayUrl,
       channel: kChannel,
-      selfPubkeyHex: widget.identity.publicKeyHex,
+      identity: widget.identity,
     );
     _mesh = mesh;
     // Each connected peer becomes a gossip session against the shared repo.

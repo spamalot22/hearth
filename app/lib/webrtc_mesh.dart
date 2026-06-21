@@ -5,6 +5,8 @@ import 'package:core/core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import 'signal_auth.dart';
+
 /// A peer-to-peer WebRTC mesh that surfaces each connected peer to the gossip
 /// layer as a [FrameChannel].
 ///
@@ -16,14 +18,14 @@ import 'package:http/http.dart' as http;
 ///
 /// Full mesh: one [RTCPeerConnection] per peer. To avoid both sides offering at
 /// once (glare), the peer with the lexicographically-greater public key offers
-/// and the other waits. Signalling is still unauthenticated (a later hardening
-/// pass binds it to the Ed25519 identity) — but message integrity does not rest
-/// on it, since every gossiped message is verified on arrival.
+/// and the other waits. Signalling is authenticated — each offer/answer/ICE is
+/// Ed25519-signed and verified against the sender's pubkey (see `signal_auth`),
+/// so a relay/MITM can't impersonate a peer or swap a DTLS fingerprint.
 class WebRtcMesh {
   WebRtcMesh({
     required this.baseUrl,
     required this.channel,
-    required this.selfPubkeyHex,
+    required this.identity,
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
@@ -43,8 +45,11 @@ class WebRtcMesh {
   /// Channel everyone in this mesh shares.
   final String channel;
 
+  /// This node's identity — signs our signalling so peers can authenticate it.
+  final Identity identity;
+
   /// Our own public key (hex) — our peer id in the mesh.
-  final String selfPubkeyHex;
+  late final String selfPubkeyHex = identity.publicKeyHex;
 
   /// How often we re-announce presence and discover new peers.
   final Duration announceInterval;
@@ -139,12 +144,15 @@ class WebRtcMesh {
     unawaited(link.start());
   }
 
-  Future<void> _handleSignal(Map<String, Object?> sig) async {
-    final from = sig['from'] as String?;
-    final kind = sig['kind'] as String?;
-    final data = sig['data'];
+  Future<void> _handleSignal(Map<String, Object?> signal) async {
+    final from = signal['from'] as String?;
+    final kind = signal['kind'] as String?;
+    final data = signal['data'];
     if (from == null || kind == null || data is! Map) return;
     final payload = data.cast<String, Object?>();
+    // Drop anything not validly signed by the claimed sender — this is what
+    // stops a relay/MITM impersonating a peer or substituting a fingerprint.
+    if (!await verifySignal(from, selfPubkeyHex, kind, payload)) return;
     switch (kind) {
       case 'offer':
         final link = _links[from] ?? _createLink(from, initiator: false);
@@ -174,6 +182,13 @@ class WebRtcMesh {
   }
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
+    final payload = (data! as Map).cast<String, Object?>();
+    // Authenticate the signal so a relay/MITM can't forge it or swap the SDP's
+    // DTLS fingerprint; the signature rides inside `data`.
+    final signed = {
+      ...payload,
+      'sig': await signSignal(identity, kind, to, payload),
+    };
     try {
       await _client.post(
         baseUrl.replace(path: '/signal'),
@@ -182,7 +197,7 @@ class WebRtcMesh {
           'to': to,
           'from': selfPubkeyHex,
           'kind': kind,
-          'data': data,
+          'data': signed,
         }),
       );
     } catch (_) {
