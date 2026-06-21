@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'key_store.dart';
+import 'webrtc_transport.dart';
 
 /// Relay endpoint for local dev; the channel everyone shares for now.
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -115,10 +116,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final MessageStore _store = MessageStore();
   final TextEditingController _input = TextEditingController();
-  late final Transport _transport = RelayTransport(
-    baseUrl: widget.relayUrl,
-    channel: kChannel,
-  );
+  Transport? _transport;
   StreamSubscription<Message>? _sub;
   String? _error;
   bool _sending = false;
@@ -126,15 +124,23 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    // Construct the (native) WebRTC transport only when actually running — never
+    // in widget tests, which mount with autoPoll disabled.
     if (widget.autoPoll) {
-      _sub = _transport.incoming.listen(_onIncoming);
+      final transport = WebRtcTransport(
+        baseUrl: widget.relayUrl,
+        channel: kChannel,
+        selfPubkeyHex: widget.identity.publicKeyHex,
+      );
+      _transport = transport;
+      _sub = transport.incoming.listen(_onIncoming);
     }
   }
 
   @override
   void dispose() {
     unawaited(_sub?.cancel());
-    unawaited(_transport.close());
+    unawaited(_transport?.close());
     _input.dispose();
     super.dispose();
   }
@@ -157,7 +163,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _store.add(message);
       _input.clear();
       setState(() {}); // echo locally right away
-      await _transport.send(message);
+      await _transport?.send(message);
     } catch (_) {
       if (mounted) setState(() => _error = 'send failed');
     } finally {
