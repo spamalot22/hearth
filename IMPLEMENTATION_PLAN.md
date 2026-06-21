@@ -223,9 +223,11 @@ Prove the data model._
 
 ### Phase 2 — Peer-to-peer transport
 _Goal: backend becomes signalling-only; messages flow peer↔peer._
-- [ ] `core`: `WebRtcTransport` (data channels) via `flutter_webrtc`.
-- [ ] `backend`: signalling endpoints (offer/answer/ICE) + presence in Firestore;
-      public STUN for address discovery.
+- [x] `core`: abstract `Transport` interface; `RelayTransport` is stream-based.
+- [x] `backend`: signalling + presence endpoints (announce / peers / signal),
+      in-memory for now.
+- [ ] `app`: `WebRtcTransport` (flutter_webrtc) + mesh manager — flutter_webrtc is
+      Flutter-only, so the WebRTC transport lives app-side; public STUN for ICE.
 - [ ] Deploy via **Firebase CLI**: Cloud Function (HTTP) + Firestore rules /
       indexes / TTL; client points at the Function URL. (First cloud deploy needs Blaze.)
 - [ ] Gossip sync: exchange heads, walk `prev`, send the diff.
