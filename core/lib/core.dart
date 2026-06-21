@@ -5,8 +5,11 @@
 library;
 
 export 'src/dag.dart' show MessageStore;
+export 'src/frame.dart'
+    show FrameChannel, GiveFrame, HaveFrame, SyncFrame, WantFrame;
 export 'src/identity.dart' show Identity, KeyStore, InMemoryKeyStore;
 export 'src/message.dart' show Message, kHearthMessageVersion;
 export 'src/repository.dart' show MessageRepository;
 export 'src/storage.dart' show InMemoryMessageStorage, MessageStorage;
+export 'src/sync.dart' show SyncEngine, SyncSession;
 export 'src/transport.dart' show RelayTransport, Transport, TransportException;
