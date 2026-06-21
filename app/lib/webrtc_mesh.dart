@@ -5,23 +5,22 @@ import 'package:core/core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
-/// A peer-to-peer [Transport] over WebRTC data channels.
+/// A peer-to-peer WebRTC mesh that surfaces each connected peer to the gossip
+/// layer as a [FrameChannel].
 ///
-/// The relay is used only for rendezvous: we announce our presence, discover
-/// the other live peers, and trade SDP + ICE through per-recipient mailboxes
-/// (`/announce`, `/peers`, `/signal`). Once a data channel opens the backend is
-/// out of the loop — messages flow directly between browsers/devices.
+/// The relay is used only for rendezvous: we announce presence, discover peers,
+/// and trade SDP + ICE through per-recipient mailboxes (`/announce`, `/peers`,
+/// `/signal`). Once a peer's data channel opens it surfaces on [peerConnected];
+/// from then on the backend is out of the loop and a [SyncEngine] session
+/// reconciles directly over the channel.
 ///
-/// Topology is a full mesh: one [RTCPeerConnection] per peer. To avoid both
-/// sides offering at once (glare), the role is decided deterministically — the
-/// peer with the lexicographically-greater public key offers, the other waits.
-///
-/// Each message is the same signed [Message] envelope the relay carried, so
-/// everything received is [Message.verify]-ed and forgeries are dropped exactly
-/// as before. Signalling itself is still unauthenticated (a later hardening
-/// pass binds it to the Ed25519 identity).
-class WebRtcTransport implements Transport {
-  WebRtcTransport({
+/// Full mesh: one [RTCPeerConnection] per peer. To avoid both sides offering at
+/// once (glare), the peer with the lexicographically-greater public key offers
+/// and the other waits. Signalling is still unauthenticated (a later hardening
+/// pass binds it to the Ed25519 identity) — but message integrity does not rest
+/// on it, since every gossiped message is verified on arrival.
+class WebRtcMesh {
+  WebRtcMesh({
     required this.baseUrl,
     required this.channel,
     required this.selfPubkeyHex,
@@ -57,8 +56,8 @@ class WebRtcTransport implements Transport {
   final List<Map<String, dynamic>> _iceServers;
   final Map<String, _PeerLink> _links = {};
 
-  late final StreamController<Message> _incoming =
-      StreamController<Message>.broadcast(onListen: _start);
+  late final StreamController<FrameChannel> _peerConnected =
+      StreamController<FrameChannel>.broadcast(onListen: _start);
   Timer? _announceTimer;
   Timer? _signalTimer;
   int _signalSince = 0;
@@ -66,10 +65,11 @@ class WebRtcTransport implements Transport {
   bool _pollingSignals = false;
   bool _closed = false;
 
-  @override
-  Stream<Message> get incoming => _incoming.stream;
+  /// Emits a [FrameChannel] each time a peer's data channel opens; the app wires
+  /// a [SyncEngine] session onto each.
+  Stream<FrameChannel> get peerConnected => _peerConnected.stream;
 
-  /// Live peers we currently hold a connection (or attempt) for.
+  /// Peers we currently hold a connection (or attempt) for.
   Iterable<String> get peers => _links.keys;
 
   void _start() {
@@ -82,14 +82,6 @@ class WebRtcTransport implements Transport {
       signalPollInterval,
       (_) => unawaited(_pollSignals()),
     );
-  }
-
-  @override
-  Future<void> send(Message message) async {
-    final text = jsonEncode(message.toJson());
-    for (final link in _links.values.toList()) {
-      await link.sendText(text);
-    }
   }
 
   /// Announce presence, then start offering to any peer we don't yet have.
@@ -170,11 +162,15 @@ class WebRtcTransport implements Transport {
       initiator: initiator,
       iceServers: _iceServers,
       onSignal: (kind, data) => _sendSignal(peerHex, kind, data),
-      onMessage: _deliver,
+      onOpen: _emitPeer,
       onClosed: () => _links.remove(peerHex),
     );
     _links[peerHex] = link;
     return link;
+  }
+
+  void _emitPeer(_PeerLink link) {
+    if (!_closed && !_peerConnected.isClosed) _peerConnected.add(link);
   }
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
@@ -194,21 +190,6 @@ class WebRtcTransport implements Transport {
     }
   }
 
-  /// Decode, verify, and surface a data-channel message.
-  Future<void> _deliver(String text) async {
-    if (_closed || _incoming.isClosed) return;
-    try {
-      final json = (jsonDecode(text) as Map).cast<String, Object?>();
-      final message = Message.fromJson(json);
-      if (await message.verify() && !_incoming.isClosed) {
-        _incoming.add(message);
-      }
-    } catch (_) {
-      // Malformed or unverifiable — drop it.
-    }
-  }
-
-  @override
   Future<void> close() async {
     _closed = true;
     _announceTimer?.cancel();
@@ -218,19 +199,20 @@ class WebRtcTransport implements Transport {
     }
     _links.clear();
     _client.close();
-    if (!_incoming.isClosed) await _incoming.close();
+    if (!_peerConnected.isClosed) await _peerConnected.close();
   }
 }
 
-/// One side of a peer connection: owns the [RTCPeerConnection], its data
-/// channel, and the ICE-candidate buffering that handshakes need.
-class _PeerLink {
+/// One peer connection, exposed to the gossip layer as a [FrameChannel]: it owns
+/// the [RTCPeerConnection], its data channel, and the ICE-candidate buffering a
+/// handshake needs, and carries [SyncFrame]s once the channel is open.
+class _PeerLink implements FrameChannel {
   _PeerLink({
     required this.peerHex,
     required this.initiator,
     required this._iceServers,
     required this.onSignal,
-    required this.onMessage,
+    required this.onOpen,
     required this.onClosed,
   });
 
@@ -238,14 +220,27 @@ class _PeerLink {
   final bool initiator;
   final List<Map<String, dynamic>> _iceServers;
   final void Function(String kind, Object? data) onSignal;
-  final Future<void> Function(String text) onMessage;
+  final void Function(_PeerLink link) onOpen;
   final void Function() onClosed;
 
+  final StreamController<SyncFrame> _frames = StreamController<SyncFrame>();
   RTCPeerConnection? _pc;
   RTCDataChannel? _channel;
   bool _remoteSet = false;
+  bool _opened = false;
   bool _disposed = false;
   final List<RTCIceCandidate> _pendingCandidates = [];
+
+  @override
+  Stream<SyncFrame> get frames => _frames.stream;
+
+  @override
+  void send(SyncFrame frame) {
+    final channel = _channel;
+    if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
+      unawaited(channel!.send(RTCDataChannelMessage(frame.encode())));
+    }
+  }
 
   Future<RTCPeerConnection> _ensurePc() async {
     final existing = _pc;
@@ -327,15 +322,16 @@ class _PeerLink {
   void _wireChannel(RTCDataChannel channel) {
     _channel = channel;
     channel.onMessage = (message) {
-      if (!message.isBinary) unawaited(onMessage(message.text));
+      if (message.isBinary) return;
+      final frame = SyncFrame.decode(message.text);
+      if (frame != null && !_frames.isClosed) _frames.add(frame);
     };
-  }
-
-  Future<void> sendText(String text) async {
-    final channel = _channel;
-    if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
-      await channel!.send(RTCDataChannelMessage(text));
-    }
+    channel.onDataChannelState = (state) {
+      if (state == RTCDataChannelState.RTCDataChannelOpen && !_opened) {
+        _opened = true;
+        onOpen(this); // surfaces this peer to the gossip layer
+      }
+    };
   }
 
   Future<void> dispose() async {
@@ -347,6 +343,7 @@ class _PeerLink {
     try {
       await _pc?.close();
     } catch (_) {}
+    if (!_frames.isClosed) await _frames.close();
     onClosed();
   }
 }

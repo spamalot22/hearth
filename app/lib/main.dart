@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 
 import 'key_store.dart';
 import 'message_storage_hive.dart';
-import 'webrtc_transport.dart';
+import 'webrtc_mesh.dart';
 
 /// Relay endpoint for local dev; the channel everyone shares for now.
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -117,8 +117,10 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _input = TextEditingController();
   MessageRepository? _repo;
-  Transport? _transport;
-  StreamSubscription<Message>? _sub;
+  SyncEngine? _engine;
+  WebRtcMesh? _mesh;
+  StreamSubscription<void>? _updates;
+  StreamSubscription<FrameChannel>? _peers;
   String? _error;
   bool _sending = false;
 
@@ -128,9 +130,9 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_init());
   }
 
-  /// Opens on-device storage, hydrates saved history, then starts the transport.
-  /// In widget tests (autoPoll off) storage is in-memory and no native plugin —
-  /// Hive or WebRTC — is touched.
+  /// Opens on-device storage, hydrates saved history, wires the gossip engine,
+  /// then joins the mesh. In widget tests (autoPoll off) storage is in-memory and
+  /// no native plugin — Hive or WebRTC — is touched.
   Future<void> _init() async {
     final storage = widget.autoPoll
         ? await HiveMessageStorage.open()
@@ -138,35 +140,40 @@ class _ChatScreenState extends State<ChatScreen> {
     final repo = MessageRepository(storage);
     await repo.load();
     if (!mounted) return;
-    setState(() => _repo = repo);
+    final engine = SyncEngine(repo, kChannel);
+    _updates = engine.updates.listen((_) {
+      if (mounted) setState(() {});
+    });
+    setState(() {
+      _repo = repo;
+      _engine = engine;
+    });
     if (!widget.autoPoll) return;
-    final transport = WebRtcTransport(
+    final mesh = WebRtcMesh(
       baseUrl: widget.relayUrl,
       channel: kChannel,
       selfPubkeyHex: widget.identity.publicKeyHex,
     );
-    _transport = transport;
-    _sub = transport.incoming.listen(_onIncoming);
+    _mesh = mesh;
+    // Each connected peer becomes a gossip session against the shared repo.
+    _peers = mesh.peerConnected.listen(engine.addPeer);
   }
 
   @override
   void dispose() {
-    unawaited(_sub?.cancel());
-    unawaited(_transport?.close());
+    unawaited(_updates?.cancel());
+    unawaited(_peers?.cancel());
+    unawaited(_mesh?.close());
+    unawaited(_engine?.close());
     _input.dispose();
     super.dispose();
   }
 
-  Future<void> _onIncoming(Message message) async {
-    final repo = _repo;
-    if (repo == null) return;
-    if (await repo.add(message) && mounted) setState(() {});
-  }
-
   Future<void> _send() async {
     final text = _input.text.trim();
+    final engine = _engine;
     final repo = _repo;
-    if (text.isEmpty || _sending || repo == null) return;
+    if (text.isEmpty || _sending || engine == null || repo == null) return;
     setState(() => _sending = true);
     try {
       final message = await Message.create(
@@ -175,10 +182,9 @@ class _ChatScreenState extends State<ChatScreen> {
         payload: Uint8List.fromList(utf8.encode(text)),
         prev: repo.heads(),
       );
-      await repo.add(message);
       _input.clear();
-      setState(() {}); // echo locally right away
-      await _transport?.send(message);
+      // Persist + gossip to peers; the updates stream re-renders the new message.
+      await engine.publish(message);
     } catch (_) {
       if (mounted) setState(() => _error = 'send failed');
     } finally {
