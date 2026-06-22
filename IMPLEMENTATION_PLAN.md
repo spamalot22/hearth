@@ -296,10 +296,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       - [ ] **Stickers** — custom sticker packs as content-addressed media blobs.
       - [ ] **Soundboards** — per-channel uploadable audio clips, tap to play
             (`audioplayers`), shared channel-wide.
-      - [ ] **Media-blob subsystem** (shared by stickers/sounds/uploaded GIFs) —
-            content-addressed blobs fetched **on demand** over the data channel
-            (message references a hash; fetch the blob lazily — don't gossip large
-            media to everyone).
+      - [x] **Media-blob subsystem — foundation** — content-addressed `BlobStore`
+            + want/give-blob transfer over the data channel, fetched on demand and
+            content-address-verified. *Unit-tested.* Remaining (needs live verify +
+            deps): app-side Hive blob store, upload (`file_picker`), inline render,
+            soundboard playback (`audioplayers`).
 - [ ] Optional federation between communities.
 - [ ] Spam resistance (proof-of-work / invite gating / web-of-trust).
 - [ ] Plugins (WASM) and local bots.
@@ -434,6 +435,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   the typed content envelope + GIF-by-URL, and the relay signal TTL. Crypto + core
   are unit-tested; the live multi-window behaviour of the app features (DM connect,
   GIF render, channel switching) is **not yet verified in a browser** — pending a
-  manual two-window pass. Still open: stickers/soundboards (need the media-blob
-  subsystem), encrypted groups (need membership), DM auto-join, mesh retry backoff,
-  Giphy/Tenor search (needs an API key).
+  manual two-window pass. Media-blob foundation (store + on-demand transfer) is
+  built + tested; stickers/soundboards still need app upload/render/playback (deps
+  + live verify). Also open: encrypted groups (membership), DM auto-join, mesh
+  retry backoff, Giphy/Tenor search (API key).
