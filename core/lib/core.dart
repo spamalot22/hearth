@@ -4,6 +4,7 @@
 /// and could later be swapped for a Rust module without touching the UI.
 library;
 
+export 'src/blob.dart' show BlobStore, InMemoryBlobStore, blobHash;
 export 'src/dag.dart' show MessageStore;
 export 'src/encryption.dart' show PairBox, SealedBox, ed25519PublicToX25519;
 export 'src/frame.dart'
