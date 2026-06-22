@@ -439,3 +439,13 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   built + tested; stickers/soundboards still need app upload/render/playback (deps
   + live verify). Also open: encrypted groups (membership), DM auto-join, mesh
   retry backoff, Giphy/Tenor search (API key).
+- **2026-06-22** — **Channels redesigned: invite-only + encrypted by default**
+  (user request, + fixes a multi-channel signal-routing bug). Removed the open
+  `general` channel. A channel = a random **capability id** (unguessable, so only
+  invitees know it) + a 32-byte **GroupCipher key** + a **local name** (never
+  shared). Create mints both; an **invite code** carries `{id, key, name}` to
+  paste; joining = having the invite. Two people who make "games" get different
+  ids — no collisions. All channels now encrypted (group key, or DM PairBox); open
+  public channels would be the plaintext opt-out, later. Bug fixed alongside: the
+  relay's signal mailbox is keyed per `(channel, pubkey)`, so channels no longer
+  cross-talk (the "general works for sender only" symptom).
