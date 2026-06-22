@@ -22,6 +22,11 @@ class ContactBook {
   /// The petname you assigned to [pubkeyHex], or null if unnamed.
   String? nameFor(String pubkeyHex) => _box.get(pubkeyHex);
 
+  /// Every contact you've added: pubkey (hex) → name.
+  Map<String, String> entries() => {
+    for (final id in _box.keys.cast<String>()) id: _box.get(id)!,
+  };
+
   /// Sets (or, for an empty [name], clears) the petname for [pubkeyHex].
   Future<void> setName(String pubkeyHex, String name) {
     final trimmed = name.trim();

@@ -365,33 +365,19 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Everyone whose message you've seen in any channel (so you have their key),
-  /// excluding yourself — the people you can start a DM with.
-  List<Uint8List> _knownPeers() {
-    final self = widget.identity.publicKey;
-    final seen = <String, Uint8List>{};
-    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
-      for (final message in session.repository.ordered()) {
-        if (!listEquals(message.author, self)) {
-          seen[hex.encode(message.author)] = message.author;
-        }
-      }
-    }
-    return seen.values.toList();
-  }
-
-  /// Picks someone you've seen and opens an encrypted DM with them.
+  /// Picks one of your contacts and opens an encrypted DM. You can only DM people
+  /// you've added (by naming them) — there's no directory of all users.
   Future<void> _newDm() async {
-    final peers = _knownPeers();
-    if (peers.isEmpty) {
+    final contacts = _contacts?.entries() ?? const <String, String>{};
+    if (contacts.isEmpty) {
       if (mounted) {
         setState(
-          () => _error = 'no one to message yet — wait for someone to post',
+          () => _error = "no contacts yet — tap someone's name to add them",
         );
       }
       return;
     }
-    final chosen = await showModalBottomSheet<Uint8List>(
+    final chosenHex = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
         child: ListView(
@@ -399,19 +385,21 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             const Padding(
               padding: EdgeInsets.all(16),
-              child: Text('Message someone'),
+              child: Text('Message a contact'),
             ),
-            for (final peer in peers)
+            for (final entry in contacts.entries)
               ListTile(
                 leading: const Icon(Icons.person_outline),
-                title: Text(_displayName(peer)),
-                onTap: () => Navigator.pop(context, peer),
+                title: Text(entry.value),
+                onTap: () => Navigator.pop(context, entry.key),
               ),
           ],
         ),
       ),
     );
-    if (chosen != null) await _channels?.openDm(chosen);
+    if (chosenHex != null) {
+      await _channels?.openDm(hex.decode(chosenHex));
+    }
   }
 
   /// A reusable single-field prompt.
