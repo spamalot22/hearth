@@ -119,7 +119,11 @@ class WebRtcMesh {
       final res = await _client.get(
         baseUrl.replace(
           path: '/signal',
-          queryParameters: {'for': selfPubkeyHex, 'since': '$_signalSince'},
+          queryParameters: {
+            'channel': channel,
+            'for': selfPubkeyHex,
+            'since': '$_signalSince',
+          },
         ),
       );
       if (res.statusCode != 200) return;
@@ -194,6 +198,7 @@ class WebRtcMesh {
         baseUrl.replace(path: '/signal'),
         headers: const {'content-type': 'application/json'},
         body: jsonEncode({
+          'channel': channel,
           'to': to,
           'from': selfPubkeyHex,
           'kind': kind,
