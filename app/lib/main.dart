@@ -10,6 +10,7 @@ import 'channel.dart';
 import 'contacts.dart';
 import 'content.dart';
 import 'emoji_picker.dart';
+import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
 
@@ -181,17 +182,19 @@ class _ChatScreenState extends State<ChatScreen> {
     await _publish(TextContent(text));
   }
 
-  /// Prompts for a GIF URL and sends it.
+  /// Searches Giphy and sends the chosen GIF.
   Future<void> _sendGif() async {
-    final url = await _promptText(
-      title: 'Send a GIF',
-      hint: 'https://…/something.gif',
-      action: 'Send',
-    );
-    final trimmed = url?.trim();
-    if (trimmed != null && trimmed.isNotEmpty) {
-      await _publish(GifContent(trimmed));
+    if (!gifSearchEnabled) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'GIF search needs a Giphy key — run with --dart-define=GIPHY_KEY=…',
+        );
+      }
+      return;
     }
+    final url = await pickGif(context);
+    if (url != null) await _publish(GifContent(url));
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
@@ -359,6 +362,55 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Everyone whose message you've seen in any channel (so you have their key),
+  /// excluding yourself — the people you can start a DM with.
+  List<Uint8List> _knownPeers() {
+    final self = widget.identity.publicKey;
+    final seen = <String, Uint8List>{};
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      for (final message in session.repository.ordered()) {
+        if (!listEquals(message.author, self)) {
+          seen[hex.encode(message.author)] = message.author;
+        }
+      }
+    }
+    return seen.values.toList();
+  }
+
+  /// Picks someone you've seen and opens an encrypted DM with them.
+  Future<void> _newDm() async {
+    final peers = _knownPeers();
+    if (peers.isEmpty) {
+      if (mounted) {
+        setState(
+          () => _error = 'no one to message yet — wait for someone to post',
+        );
+      }
+      return;
+    }
+    final chosen = await showModalBottomSheet<Uint8List>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Message someone'),
+            ),
+            for (final peer in peers)
+              ListTile(
+                leading: const Icon(Icons.person_outline),
+                title: Text(_displayName(peer)),
+                onTap: () => Navigator.pop(context, peer),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen != null) await _channels?.openDm(chosen);
+  }
+
   /// A reusable single-field prompt.
   Future<String?> _promptText({
     required String title,
@@ -505,7 +557,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 unawaited(_joinViaInvite());
               },
             ),
-            if (dms.isNotEmpty) _drawerHeader('Direct messages'),
+            _drawerHeader('Direct messages'),
+            ListTile(
+              leading: const Icon(Icons.add),
+              title: const Text('New message'),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_newDm());
+              },
+            ),
             for (final s in dms)
               ListTile(
                 leading: const Icon(Icons.alternate_email),
