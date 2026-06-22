@@ -8,7 +8,14 @@ export 'src/blob.dart' show BlobStore, InMemoryBlobStore, blobHash;
 export 'src/dag.dart' show MessageStore;
 export 'src/encryption.dart' show PairBox, SealedBox, ed25519PublicToX25519;
 export 'src/frame.dart'
-    show FrameChannel, GiveFrame, HaveFrame, SyncFrame, WantFrame;
+    show
+        FrameChannel,
+        GiveBlobFrame,
+        GiveFrame,
+        HaveFrame,
+        SyncFrame,
+        WantBlobFrame,
+        WantFrame;
 export 'src/identity.dart'
     show Identity, InMemoryKeyStore, KeyStore, sha256Digest;
 export 'src/message.dart' show Message, kHearthMessageVersion;

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'message.dart';
 
@@ -40,6 +41,13 @@ sealed class SyncFrame {
           return GiveFrame(
             Message.fromJson((json['m']! as Map).cast<String, Object?>()),
           );
+        case 'wantblob':
+          return WantBlobFrame(json['h']! as String);
+        case 'giveblob':
+          return GiveBlobFrame(
+            json['h']! as String,
+            base64.decode(json['b']! as String),
+          );
         default:
           return null;
       }
@@ -77,4 +85,30 @@ class GiveFrame extends SyncFrame {
 
   @override
   Map<String, Object?> toJson() => {'t': 'give', 'm': message.toJson()};
+}
+
+/// "Send me the media blob with this id" (hex). Media is fetched on demand.
+class WantBlobFrame extends SyncFrame {
+  const WantBlobFrame(this.hash);
+
+  final String hash;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'wantblob', 'h': hash};
+}
+
+/// "Here is a blob's bytes" (base64). The receiver checks the bytes hash to the
+/// requested id before storing.
+class GiveBlobFrame extends SyncFrame {
+  const GiveBlobFrame(this.hash, this.bytes);
+
+  final String hash;
+  final Uint8List bytes;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'giveblob',
+    'h': hash,
+    'b': base64.encode(bytes),
+  };
 }

@@ -168,4 +168,38 @@ void main() {
       expect(b.length, 0);
     });
   });
+
+  group('blob transfer', () {
+    test('a peer fetches a blob it lacks via want/give', () async {
+      final aBlobs = InMemoryBlobStore();
+      final bBlobs = InMemoryBlobStore();
+      final hash = await aBlobs.put(_b('sticker bytes')); // A holds it
+      final engA = SyncEngine(_repo(), 'general', blobStore: aBlobs);
+      final engB = SyncEngine(_repo(), 'general', blobStore: bBlobs);
+      final (la, lb) = _pair();
+      engA.addPeer(la);
+      engB.addPeer(lb);
+
+      String? arrived;
+      engB.blobArrived.listen((h) => arrived = h);
+      engB.requestBlob(hash);
+
+      await _settle(() => arrived != null);
+      expect(arrived, hash);
+      expect(await bBlobs.get(hash), _b('sticker bytes'));
+    });
+
+    test('bytes that do not match the requested id are dropped', () async {
+      final bBlobs = InMemoryBlobStore();
+      final engB = SyncEngine(_repo(), 'general', blobStore: bBlobs);
+      final link = _Link();
+      engB.addPeer(link);
+
+      final claimed = await blobHash(_b('what was asked for'));
+      link.incoming.add(GiveBlobFrame(claimed, _b('evil different bytes')));
+
+      await _pump();
+      expect(await bBlobs.has(claimed), isFalse);
+    });
+  });
 }

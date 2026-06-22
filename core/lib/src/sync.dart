@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
 
+import 'blob.dart';
 import 'frame.dart';
 import 'message.dart';
 import 'repository.dart';
@@ -14,7 +15,7 @@ import 'repository.dart';
 /// This is the seam between the app and the mesh: the UI [publish]es and listens
 /// to [updates]; the transport hands connected peers to [addPeer].
 class SyncEngine {
-  SyncEngine(this.repository, this.channel);
+  SyncEngine(this.repository, this.channel, {this.blobStore});
 
   final MessageRepository repository;
 
@@ -22,12 +23,20 @@ class SyncEngine {
   /// dropped on receipt.
   final String channel;
 
+  /// Optional content-addressed store for media blobs fetched from peers.
+  final BlobStore? blobStore;
+
   final Set<SyncSession> _sessions = {};
   final StreamController<void> _updates = StreamController<void>.broadcast();
+  final StreamController<String> _blobArrived =
+      StreamController<String>.broadcast();
 
   /// Fires whenever a message is stored (locally published or gossiped in), so a
   /// UI can re-render.
   Stream<void> get updates => _updates.stream;
+
+  /// Fires with a blob's id once its bytes arrive from a peer.
+  Stream<String> get blobArrived => _blobArrived.stream;
 
   /// Registers a peer's frame [link] and starts reconciling with it.
   SyncSession addPeer(FrameChannel link) {
@@ -36,6 +45,8 @@ class SyncEngine {
       channel: channel,
       link: link,
       onAdded: _onNewMessage,
+      blobStore: blobStore,
+      onBlob: _onBlob,
     );
     _sessions.add(session);
     session.start();
@@ -60,6 +71,17 @@ class SyncEngine {
     }
   }
 
+  /// Asks every peer for the blob [hash]; arrivals surface on [blobArrived].
+  void requestBlob(String hash) {
+    for (final session in _sessions) {
+      session.requestBlob(hash);
+    }
+  }
+
+  void _onBlob(String hash) {
+    if (!_blobArrived.isClosed) _blobArrived.add(hash);
+  }
+
   /// Closes every session and releases resources.
   Future<void> close() async {
     for (final session in _sessions.toList()) {
@@ -67,6 +89,7 @@ class SyncEngine {
     }
     _sessions.clear();
     await _updates.close();
+    await _blobArrived.close();
   }
 }
 
@@ -90,6 +113,8 @@ class SyncSession {
     required this.channel,
     required this._link,
     required this.onAdded,
+    this.blobStore,
+    this.onBlob,
   }) {
     _sub = _link.frames.listen(_enqueue);
   }
@@ -97,6 +122,8 @@ class SyncSession {
   final MessageRepository repository;
   final String channel;
   final FrameChannel _link;
+  final BlobStore? blobStore;
+  final void Function(String hash)? onBlob;
 
   /// Called after this session stores a *new* message, so the engine can spread
   /// it to other peers.
@@ -111,6 +138,9 @@ class SyncSession {
 
   /// Sends [message] to this peer (a live send or an epidemic forward).
   void gossip(Message message) => _link.send(GiveFrame(message));
+
+  /// Asks this peer for the blob [hash].
+  void requestBlob(String hash) => _link.send(WantBlobFrame(hash));
 
   Future<void> close() => _sub.cancel();
 
@@ -130,6 +160,16 @@ class SyncSession {
         }
       case GiveFrame(:final message):
         await _receive(message);
+      case WantBlobFrame(:final hash):
+        final bytes = await blobStore?.get(hash);
+        if (bytes != null) _link.send(GiveBlobFrame(hash, bytes));
+      case GiveBlobFrame(:final hash, :final bytes):
+        // Content-addressed: the bytes must hash to the requested id.
+        if (await blobHash(bytes) != hash) return;
+        final store = blobStore;
+        if (store == null) return;
+        await store.put(bytes);
+        onBlob?.call(hash);
     }
   }
 
