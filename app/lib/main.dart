@@ -185,18 +185,9 @@ class _ChatScreenState extends State<ChatScreen> {
     await _publish(TextContent(text));
   }
 
-  /// Searches Giphy and sends the chosen GIF.
+  /// Searches GIFs (via the relay's proxy) and sends the chosen one.
   Future<void> _sendGif() async {
-    if (!gifSearchEnabled) {
-      if (mounted) {
-        setState(
-          () => _error =
-              'GIF search needs a Tenor key — run with --dart-define=TENOR_KEY=…',
-        );
-      }
-      return;
-    }
-    final url = await pickGif(context);
+    final url = await pickGif(context, widget.relayUrl);
     if (url != null) await _publish(GifContent(url));
   }
 

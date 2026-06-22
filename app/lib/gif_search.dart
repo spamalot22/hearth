@@ -3,12 +3,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-/// Tenor (Google) API key, supplied at build/run time and never committed:
-/// `flutter run --dart-define=TENOR_KEY=your_key`. Free key from the Google
-/// Cloud console (enable the Tenor API). Empty (the default) disables search.
-const String _tenorKey = String.fromEnvironment('TENOR_KEY');
-
-bool get gifSearchEnabled => _tenorKey.isNotEmpty;
+/// GIF search goes through the relay's `/gif/search` proxy, so the Tenor API key
+/// lives on the relay — never in the client. When the relay is unreachable or
+/// has no key, the sheet falls back to pasting a GIF URL, with an explanation.
 
 class _Gif {
   const _Gif(this.url, this.preview);
@@ -16,41 +13,56 @@ class _Gif {
   final String preview; // small GIF for the grid
 }
 
-Future<List<_Gif>> _searchTenor(String query) async {
-  final res = await http.get(
-    Uri.parse('https://tenor.googleapis.com/v2/search').replace(
-      queryParameters: {
-        'key': _tenorKey,
-        'q': query,
-        'limit': '24',
-        'media_filter': 'gif,tinygif',
-        'contentfilter': 'medium',
-      },
-    ),
-  );
-  if (res.statusCode != 200) {
-    throw Exception('Tenor error ${res.statusCode}');
-  }
-  final results = (jsonDecode(res.body) as Map)['results'] as List;
-  return results.map((r) {
-    final formats = (r as Map)['media_formats'] as Map;
-    final full = formats['gif'] as Map;
-    final preview = (formats['tinygif'] ?? formats['gif']) as Map;
-    return _Gif(full['url'] as String, preview['url'] as String);
-  }).toList();
+/// A search outcome: results, or a reason it's [unavailable] (→ URL fallback).
+class _GifResult {
+  const _GifResult.ok(this.gifs) : unavailable = null;
+  const _GifResult.unavailable(this.unavailable) : gifs = const [];
+
+  final List<_Gif> gifs;
+  final String? unavailable;
 }
 
-/// Shows a Giphy search sheet; resolves to the chosen GIF's URL, or null.
-Future<String?> pickGif(BuildContext context) {
+Future<_GifResult> _search(Uri relayUrl, String query) async {
+  final http.Response res;
+  try {
+    res = await http.get(
+      relayUrl.replace(path: '/gif/search', queryParameters: {'q': query}),
+    );
+  } catch (_) {
+    return const _GifResult.unavailable(
+      "Can't reach the relay — it may be offline.",
+    );
+  }
+  if (res.statusCode != 200) {
+    return const _GifResult.unavailable(
+      'GIF search is unavailable on this relay right now.',
+    );
+  }
+  final body = jsonDecode(res.body) as Map;
+  if (body['configured'] == false) {
+    return const _GifResult.unavailable(
+      'This relay has no GIF provider set up.',
+    );
+  }
+  final gifs = (body['gifs'] as List)
+      .map((g) => _Gif((g as Map)['url'] as String, g['preview'] as String))
+      .toList();
+  return _GifResult.ok(gifs);
+}
+
+/// Shows a GIF search sheet; resolves to the chosen GIF's URL, or null.
+Future<String?> pickGif(BuildContext context, Uri relayUrl) {
   return showModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
-    builder: (context) => const _GifSearchSheet(),
+    builder: (context) => _GifSearchSheet(relayUrl: relayUrl),
   );
 }
 
 class _GifSearchSheet extends StatefulWidget {
-  const _GifSearchSheet();
+  const _GifSearchSheet({required this.relayUrl});
+
+  final Uri relayUrl;
 
   @override
   State<_GifSearchSheet> createState() => _GifSearchSheetState();
@@ -58,16 +70,23 @@ class _GifSearchSheet extends StatefulWidget {
 
 class _GifSearchSheetState extends State<_GifSearchSheet> {
   final _query = TextEditingController();
-  Future<List<_Gif>>? _results;
+  final _url = TextEditingController();
+  Future<_GifResult>? _results;
 
-  void _search() {
+  void _runSearch() {
     final q = _query.text.trim();
-    if (q.isNotEmpty) setState(() => _results = _searchTenor(q));
+    if (q.isNotEmpty) setState(() => _results = _search(widget.relayUrl, q));
+  }
+
+  void _sendUrl() {
+    final url = _url.text.trim();
+    if (url.isNotEmpty) Navigator.pop(context, url);
   }
 
   @override
   void dispose() {
     _query.dispose();
+    _url.dispose();
     super.dispose();
   }
 
@@ -78,7 +97,7 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
         bottom: MediaQuery.of(context).viewInsets.bottom,
       ),
       child: SizedBox(
-        height: 420,
+        height: 440,
         child: Column(
           children: [
             Padding(
@@ -87,13 +106,13 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
                 controller: _query,
                 autofocus: true,
                 textInputAction: TextInputAction.search,
-                onSubmitted: (_) => _search(),
+                onSubmitted: (_) => _runSearch(),
                 decoration: InputDecoration(
                   hintText: 'Search GIFs',
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
                     icon: const Icon(Icons.search),
-                    onPressed: _search,
+                    onPressed: _runSearch,
                   ),
                 ),
               ),
@@ -110,24 +129,25 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
     if (results == null) {
       return const Center(child: Text('Search for a GIF'));
     }
-    return FutureBuilder<List<_Gif>>(
+    return FutureBuilder<_GifResult>(
       future: results,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Center(child: CircularProgressIndicator());
         }
-        if (snapshot.hasError) {
-          return const Center(child: Text('Search failed'));
+        final result = snapshot.data;
+        if (result == null) return _fallback('GIF search failed.');
+        if (result.unavailable != null) return _fallback(result.unavailable!);
+        if (result.gifs.isEmpty) {
+          return const Center(child: Text('No results'));
         }
-        final gifs = snapshot.data ?? const <_Gif>[];
-        if (gifs.isEmpty) return const Center(child: Text('No results'));
         return GridView.count(
           crossAxisCount: 3,
           padding: const EdgeInsets.all(8),
           mainAxisSpacing: 6,
           crossAxisSpacing: 6,
           children: [
-            for (final gif in gifs)
+            for (final gif in result.gifs)
               GestureDetector(
                 onTap: () => Navigator.pop(context, gif.url),
                 child: Image.network(gif.preview, fit: BoxFit.cover),
@@ -135,6 +155,42 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
           ],
         );
       },
+    );
+  }
+
+  /// Shown when search isn't available — explain, and offer a URL paste.
+  Widget _fallback(String reason) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.cloud_off_outlined),
+              const SizedBox(width: 8),
+              Expanded(child: Text(reason)),
+            ],
+          ),
+          const SizedBox(height: 16),
+          const Text('Paste a GIF URL instead:'),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _url,
+            keyboardType: TextInputType.url,
+            onSubmitted: (_) => _sendUrl(),
+            decoration: const InputDecoration(
+              hintText: 'https://…/something.gif',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton(onPressed: _sendUrl, child: const Text('Send')),
+          ),
+        ],
+      ),
     );
   }
 }

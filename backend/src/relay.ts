@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 
+import { addGifRoutes } from './gif';
 import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
 
@@ -49,6 +50,9 @@ export function createRelay(
 
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
   addSignalingRoutes(app, signalHub);
+
+  // GIF search proxy (Tenor key stays on the relay, never in clients).
+  addGifRoutes(app);
 
   // Accept a signed message: verify it, then store it.
   app.post('/messages', async (c) => {
