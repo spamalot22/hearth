@@ -6,7 +6,8 @@ library;
 
 export 'src/blob.dart' show BlobStore, InMemoryBlobStore, blobHash;
 export 'src/dag.dart' show MessageStore;
-export 'src/encryption.dart' show PairBox, SealedBox, ed25519PublicToX25519;
+export 'src/encryption.dart'
+    show GroupCipher, PairBox, SealedBox, ed25519PublicToX25519;
 export 'src/frame.dart'
     show
         FrameChannel,

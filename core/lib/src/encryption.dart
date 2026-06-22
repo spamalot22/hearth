@@ -170,3 +170,40 @@ class PairBox {
     );
   }
 }
+
+/// Symmetric encryption with a shared 32-byte channel key — for invite-only
+/// group channels, where the key travels in the invite (a capability: holding it
+/// is membership). Everyone with the key reads everything. No forward secrecy or
+/// per-member revocation yet (rotate the key + re-invite, or MLS later). Wire
+/// form: `nonce(12) ‖ mac(16) ‖ ciphertext`.
+class GroupCipher {
+  /// Encrypts [plaintext] with the channel [key] (32 bytes).
+  static Future<Uint8List> encrypt(
+    List<int> plaintext, {
+    required List<int> key,
+  }) async {
+    final box = await _aead.encrypt(plaintext, secretKey: SecretKey(key));
+    return Uint8List.fromList([
+      ...box.nonce,
+      ...box.mac.bytes,
+      ...box.cipherText,
+    ]);
+  }
+
+  /// Decrypts a [boxed] message with the channel [key].
+  static Future<Uint8List> decrypt(
+    Uint8List boxed, {
+    required List<int> key,
+  }) async {
+    if (boxed.length < 28) throw const FormatException('group box too short');
+    final clear = await _aead.decrypt(
+      SecretBox(
+        boxed.sublist(28),
+        nonce: boxed.sublist(0, 12),
+        mac: Mac(boxed.sublist(12, 28)),
+      ),
+      secretKey: SecretKey(key),
+    );
+    return Uint8List.fromList(clear);
+  }
+}

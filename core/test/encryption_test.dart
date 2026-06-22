@@ -6,6 +6,8 @@ import 'package:test/test.dart';
 
 Uint8List _b(String s) => Uint8List.fromList(utf8.encode(s));
 
+Uint8List _key32() => Uint8List.fromList(List.generate(32, (i) => i));
+
 void main() {
   group('SealedBox', () {
     test('the Ed25519→X25519 conversion matches the derived keypair', () async {
@@ -117,6 +119,33 @@ void main() {
       boxed[boxed.length - 1] ^= 0x01;
       await expectLater(
         PairBox.decrypt(boxed, self: b, peerEd25519PublicKey: a.publicKey),
+        throwsA(anything),
+      );
+    });
+  });
+
+  group('GroupCipher (channel key)', () {
+    test('round-trips with the channel key', () async {
+      final key = _key32();
+      final boxed = await GroupCipher.encrypt(_b('hi channel'), key: key);
+      expect(await GroupCipher.decrypt(boxed, key: key), _b('hi channel'));
+    });
+
+    test('a wrong key cannot decrypt', () async {
+      final boxed = await GroupCipher.encrypt(_b('secret'), key: _key32());
+      final wrong = Uint8List.fromList(List.generate(32, (i) => 255 - i));
+      await expectLater(
+        GroupCipher.decrypt(boxed, key: wrong),
+        throwsA(anything),
+      );
+    });
+
+    test('tampering is detected', () async {
+      final key = _key32();
+      final boxed = await GroupCipher.encrypt(_b('x'), key: key);
+      boxed[boxed.length - 1] ^= 0x01;
+      await expectLater(
+        GroupCipher.decrypt(boxed, key: key),
         throwsA(anything),
       );
     });
