@@ -158,6 +158,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _registry = registry;
       _channels = channels;
     });
+    // Decrypt the active channel's loaded history: the onUpdate calls during the
+    // open loop above ran before _channels was set, so they were no-ops.
+    unawaited(_refresh());
   }
 
   void _onUpdate() => unawaited(_refresh());
