@@ -161,6 +161,47 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
   holder (and for push). Caveat: a carrier still learns it holds a message authored
   by A; hiding the recipient is a later sealed-sender step.
 
+### Relay discovery & resilience (multi-relay)
+
+The relay is a **disposable hint, not the channel.** A channel's identity is
+`{id, key}` + each member's local history — none of it depends on any relay.
+Losing relays never loses a channel; it only makes the rendezvous *pointer* stale
+until refreshed.
+
+**Two relay roles, chosen differently:**
+- **Signalling (rendezvous)** must be *shared* by a channel's peers, so it belongs
+  to the **channel**: relay URLs ride in the **invite** (`{id, key, name,
+  relays:[…]}`); joiners inherit them; list several for failover (announce on all,
+  connect via whichever brokers the handshake first).
+- **Services (GIF search, push)** are utility calls that needn't match anyone, so
+  they use the **user's home relay** (a per-user setting) and *its* key. "Which
+  Tenor key" = your home relay's — independent of any channel.
+
+**Fallback ladder** (each rung independently shippable; more rungs = harder to
+strand): invite relays → learned relays (peer-exchange) → app default/seed relays
+→ LAN/mDNS → **DHT (libp2p)** → out-of-band re-invite (re-share the same `{id,key}`
+with a fresh relay). You *cannot* auto-discover a relay you have no pointer to and
+no surviving rendezvous to learn it from — the goal is never having *zero* live
+rungs, not magic.
+
+**Per-relay directory (Phase 3 — build thin; the DHT subsumes much of it):**
+- Each client keeps a local set of known relays — `{relay-id, url(s),
+  lastSeenAlive, health, source}` — grown from invites + peer-exchange + relays'
+  own served lists + a bundled seed list.
+- **Stable id = an Ed25519 keypair per relay; relays sign their announcements**
+  (mirrors user identity). **De-dup by pubkey, not URL** (union URLs, keep freshest
+  liveness); signing kills spoofed entries.
+- **Relays serve their own relay list** (Bitcoin `addr`-style) with liveness they
+  verified by health-checking each other → connect to one, learn the mesh.
+- **Liveness-gated pruning** (the subtle part): prune on *corroborated relay
+  death*, **never** on "I haven't contacted it lately" — that conflates the relay
+  being down with the *user* being away. Only count failures while you're provably
+  online (you can reach *something* else), ideally corroborated by peers.
+  Soft-demote + keep a long stale tail (dead relays revive); hard-delete only after
+  long + corroborated death. Bound future-dated "last seen" (clock skew).
+- **Poisoning/eclipse:** never trust a single source's list, cap entries per
+  source, prefer relays corroborated by many and verified-alive by you.
+
 ### Firebase backend — staying at $0
 Everything lives in **one Firebase project** (Cloud Functions + Firestore + FCM).
 What keeps it free for tens of users:
@@ -276,6 +317,14 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       also the *only* identity **backup/recovery** mechanism; **(b) per-device
       subkeys** certified by a root key — adds per-device revocation. Until this
       ships there is **no identity backup**: clearing storage loses the key.
+- [ ] **Multi-relay** — relay URLs in the invite (per-channel signalling) + a
+      per-user **home relay** setting (services); failover across a channel's
+      relays. (See "Relay discovery & resilience".)
+- [ ] **Relay directory** — signed Ed25519 relay identities, peer + relay gossip
+      of known relays, **liveness-gated pruning** (online-gated + corroborated),
+      de-dup by relay pubkey, poisoning/eclipse mitigations. Build thin.
+- [ ] **DHT (libp2p)** — relay-independent rendezvous keyed by channel id; the
+      "all relays down" endgame. Bigger; likely Rust via `flutter_rust_bridge`.
 
 ### Phase 4 — Polish / ecosystem
 - [ ] Notifications, per platform:
@@ -449,3 +498,20 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   public channels would be the plaintext opt-out, later. Bug fixed alongside: the
   relay's signal mailbox is keyed per `(channel, pubkey)`, so channels no longer
   cross-talk (the "general works for sender only" symptom).
+- **2026-06-22** — **GIF search via the relay** (proxied, not in the client):
+  decentralisation point — embedding/per-user API keys don't work, so the Tenor
+  key lives on the relay (`TENOR_KEY` env), one key per relay operator. App calls
+  `/gif/search`; the relay reports `{gifs, configured}`; unreachable/unconfigured
+  → the GIF sheet falls back to paste-a-URL with an explanation. Switched provider
+  Giphy → **Tenor** (more generous free tier, the messaging default; key needs no
+  billing, but ToS wants attribution if public).
+- **2026-06-22** — **Relay discovery & resilience designed** (captured, not built;
+  see the section above). Relay = disposable hint; the channel is `{id,key}` +
+  local history and survives any relay. Signalling relays ride in the invite
+  (per-channel); services (GIF/push) use the user's **home relay** (per-user).
+  Fallback ladder: invite relays → peer-exchanged → app seed list → LAN/mDNS → DHT
+  → out-of-band re-invite. Directory (Phase 3): signed Ed25519 relay identities,
+  de-dup by pubkey, relay + peer gossip, **liveness-gated pruning** (prune on
+  corroborated death while *you're* online — never on your own contact gap),
+  poisoning/eclipse mitigations. Build thin; the **DHT (libp2p)** is the endgame
+  and subsumes much of it.
