@@ -9,25 +9,60 @@ import 'content.dart';
 import 'message_storage_hive.dart';
 import 'webrtc_mesh.dart';
 
-/// Deterministic id for the DM channel between two identities — a hash of their
-/// sorted pubkeys, so both compute the same one. Anyone who knows both keys can
-/// derive it (the *pairing* is guessable), but the content is [PairBox]-encrypted.
+/// Encrypts/decrypts a channel's payloads — every channel is encrypted now. A
+/// group channel uses its shared key ([GroupChannelCipher]); a DM uses the
+/// pairwise key ([DmChannelCipher]).
+abstract class ChannelCipher {
+  Future<Uint8List> encrypt(List<int> plaintext);
+  Future<Uint8List> decrypt(Uint8List boxed);
+}
+
+class GroupChannelCipher implements ChannelCipher {
+  GroupChannelCipher(this._key);
+
+  final Uint8List _key;
+
+  @override
+  Future<Uint8List> encrypt(List<int> plaintext) =>
+      GroupCipher.encrypt(plaintext, key: _key);
+
+  @override
+  Future<Uint8List> decrypt(Uint8List boxed) =>
+      GroupCipher.decrypt(boxed, key: _key);
+}
+
+class DmChannelCipher implements ChannelCipher {
+  DmChannelCipher(this._self, this._peer);
+
+  final Identity _self;
+  final List<int> _peer;
+
+  @override
+  Future<Uint8List> encrypt(List<int> plaintext) =>
+      PairBox.encrypt(plaintext, self: _self, peerEd25519PublicKey: _peer);
+
+  @override
+  Future<Uint8List> decrypt(Uint8List boxed) =>
+      PairBox.decrypt(boxed, self: _self, peerEd25519PublicKey: _peer);
+}
+
+/// Deterministic id for the DM channel between two identities (a hash of the
+/// sorted pubkeys), so both sides derive the same one.
 Future<String> dmChannelId(String aHex, String bHex) async {
   final pair = [aHex, bHex]..sort();
   final digest = await sha256Digest(utf8.encode(pair.join('|')));
   return 'dm-${hex.encode(digest).substring(0, 24)}';
 }
 
-/// One channel's live stack: its durable DAG ([MessageRepository]), gossip
-/// [SyncEngine], and — when running for real — the [WebRtcMesh] that feeds peers
-/// in. A DM channel additionally carries [peerPubkey] and encrypts/decrypts its
-/// payloads with [PairBox]; a group channel is plaintext.
+/// One channel's live stack: its durable DAG, gossip [SyncEngine], the mesh that
+/// feeds peers in, and the [cipher] for its (always-encrypted) payloads. A DM
+/// also carries [peerPubkey], for display; a group channel does not.
 class ChannelSession {
   ChannelSession._(
     this.channelId,
     this.repository,
     this.engine,
-    this._identity,
+    this.cipher,
     this.peerPubkey,
     this._mesh,
     this._updatesSub,
@@ -37,9 +72,9 @@ class ChannelSession {
   final String channelId;
   final MessageRepository repository;
   final SyncEngine engine;
-  final Identity _identity;
+  final ChannelCipher cipher;
 
-  /// The DM partner's Ed25519 key, or null for a (plaintext) group channel.
+  /// The DM partner's key, or null for a group channel.
   final List<int>? peerPubkey;
 
   final WebRtcMesh? _mesh;
@@ -49,15 +84,13 @@ class ChannelSession {
 
   bool get isDm => peerPubkey != null;
 
-  /// Opens a channel. With [live] false (widget tests) storage is in-memory and
-  /// no mesh runs. [peerPubkey] makes it an encrypted DM. [onUpdate] fires when
-  /// this channel stores a message.
   static Future<ChannelSession> open({
     required String channelId,
     required Identity identity,
     required Uri relayUrl,
     required bool live,
     required void Function() onUpdate,
+    required ChannelCipher cipher,
     List<int>? peerPubkey,
   }) async {
     final storage = live
@@ -83,7 +116,7 @@ class ChannelSession {
       channelId,
       repository,
       engine,
-      identity,
+      cipher,
       peerPubkey,
       mesh,
       updatesSub,
@@ -91,41 +124,27 @@ class ChannelSession {
     );
   }
 
-  /// Encodes [content] for sending — PairBox-encrypted in a DM, plain in a group
-  /// channel.
-  Future<Uint8List> encodePayload(Content content) async {
-    final bytes = Uint8List.fromList(content.encode());
-    final peer = peerPubkey;
-    return peer == null
-        ? bytes
-        : PairBox.encrypt(bytes, self: _identity, peerEd25519PublicKey: peer);
-  }
+  /// Encrypts [content] for sending.
+  Future<Uint8List> encodePayload(Content content) =>
+      cipher.encrypt(content.encode());
 
-  /// Decrypts + parses any not-yet-cached DM messages into the display cache.
-  /// No-op for a group channel (parsed lazily in [contentOf]).
+  /// Decrypts + parses any not-yet-cached messages into the display cache.
   Future<void> refreshContent() async {
-    final peer = peerPubkey;
-    if (peer == null) return;
     for (final message in repository.ordered()) {
       if (_content.containsKey(message.idHex)) continue;
       try {
-        final clear = await PairBox.decrypt(
-          message.payload,
-          self: _identity,
-          peerEd25519PublicKey: peer,
+        _content[message.idHex] = parseContent(
+          await cipher.decrypt(message.payload),
         );
-        _content[message.idHex] = parseContent(clear);
       } catch (_) {
         _content[message.idHex] = const TextContent('🔒 unreadable');
       }
     }
   }
 
-  /// The content of [message]: decrypted-then-parsed in a DM, parsed directly in
-  /// a group.
-  Content contentOf(Message message) => peerPubkey == null
-      ? parseContent(message.payload)
-      : (_content[message.idHex] ?? const TextContent('…'));
+  /// The (decrypted, parsed) content of [message].
+  Content contentOf(Message message) =>
+      _content[message.idHex] ?? const TextContent('…');
 
   Future<void> close() async {
     await _updatesSub.cancel();
@@ -136,8 +155,8 @@ class ChannelSession {
 }
 
 /// Owns every open [ChannelSession] and tracks which one is active. Channels are
-/// opened lazily and kept running (so messages keep arriving in the background);
-/// the UI binds to [active].
+/// kept running so messages keep arriving in the background; the UI binds to
+/// [active].
 class ChannelManager {
   ChannelManager({
     required this.identity,
@@ -148,33 +167,29 @@ class ChannelManager {
 
   final Identity identity;
   final Uri relayUrl;
-
-  /// False in widget tests — keeps storage in-memory and the mesh off.
   final bool live;
-
-  /// Called when a channel updates or the active selection changes.
   final void Function() onUpdate;
 
   final Map<String, ChannelSession> _sessions = {};
   String? _activeId;
 
-  Iterable<String> get channelIds => _sessions.keys;
   Iterable<ChannelSession> get sessions => _sessions.values;
   String? get activeId => _activeId;
   ChannelSession? get active => _activeId == null ? null : _sessions[_activeId];
 
-  /// Opens [channelId] if it isn't already open, then makes it active.
-  Future<void> open(String channelId) async {
-    if (!_sessions.containsKey(channelId)) {
-      _sessions[channelId] = await ChannelSession.open(
-        channelId: channelId,
+  /// Opens (or focuses) a group channel given its [id] and encryption [key].
+  Future<void> openGroup(String id, Uint8List key) async {
+    if (!_sessions.containsKey(id)) {
+      _sessions[id] = await ChannelSession.open(
+        channelId: id,
         identity: identity,
         relayUrl: relayUrl,
         live: live,
         onUpdate: onUpdate,
+        cipher: GroupChannelCipher(key),
       );
     }
-    _activeId = channelId;
+    _activeId = id;
     onUpdate();
   }
 
@@ -188,6 +203,7 @@ class ChannelManager {
         relayUrl: relayUrl,
         live: live,
         onUpdate: onUpdate,
+        cipher: DmChannelCipher(identity, peerPubkey),
         peerPubkey: peerPubkey,
       );
     }
@@ -195,7 +211,6 @@ class ChannelManager {
     onUpdate();
   }
 
-  /// Switches the active channel to an already-open [channelId].
   void activate(String channelId) {
     if (_sessions.containsKey(channelId)) {
       _activeId = channelId;
