@@ -191,7 +191,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) {
         setState(
           () => _error =
-              'GIF search needs a Giphy key — run with --dart-define=GIPHY_KEY=…',
+              'GIF search needs a Tenor key — run with --dart-define=TENOR_KEY=…',
         );
       }
       return;

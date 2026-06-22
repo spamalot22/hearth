@@ -3,12 +3,12 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 
-/// Giphy API key, supplied at build/run time and never committed:
-/// `flutter run --dart-define=GIPHY_KEY=your_key`. Free key from
-/// developers.giphy.com. Empty (the default) disables search.
-const String _giphyKey = String.fromEnvironment('GIPHY_KEY');
+/// Tenor (Google) API key, supplied at build/run time and never committed:
+/// `flutter run --dart-define=TENOR_KEY=your_key`. Free key from the Google
+/// Cloud console (enable the Tenor API). Empty (the default) disables search.
+const String _tenorKey = String.fromEnvironment('TENOR_KEY');
 
-bool get gifSearchEnabled => _giphyKey.isNotEmpty;
+bool get gifSearchEnabled => _tenorKey.isNotEmpty;
 
 class _Gif {
   const _Gif(this.url, this.preview);
@@ -16,26 +16,26 @@ class _Gif {
   final String preview; // small GIF for the grid
 }
 
-Future<List<_Gif>> _searchGiphy(String query) async {
+Future<List<_Gif>> _searchTenor(String query) async {
   final res = await http.get(
-    Uri.parse('https://api.giphy.com/v1/gifs/search').replace(
+    Uri.parse('https://tenor.googleapis.com/v2/search').replace(
       queryParameters: {
-        'api_key': _giphyKey,
+        'key': _tenorKey,
         'q': query,
         'limit': '24',
-        'rating': 'pg-13',
+        'media_filter': 'gif,tinygif',
+        'contentfilter': 'medium',
       },
     ),
   );
   if (res.statusCode != 200) {
-    throw Exception('Giphy error ${res.statusCode}');
+    throw Exception('Tenor error ${res.statusCode}');
   }
-  final data = (jsonDecode(res.body) as Map)['data'] as List;
-  return data.map((g) {
-    final images = (g as Map)['images'] as Map;
-    final full = (images['downsized'] ?? images['fixed_height']) as Map;
-    final preview =
-        (images['fixed_width_small'] ?? images['fixed_height']) as Map;
+  final results = (jsonDecode(res.body) as Map)['results'] as List;
+  return results.map((r) {
+    final formats = (r as Map)['media_formats'] as Map;
+    final full = formats['gif'] as Map;
+    final preview = (formats['tinygif'] ?? formats['gif']) as Map;
     return _Gif(full['url'] as String, preview['url'] as String);
   }).toList();
 }
@@ -62,7 +62,7 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
 
   void _search() {
     final q = _query.text.trim();
-    if (q.isNotEmpty) setState(() => _results = _searchGiphy(q));
+    if (q.isNotEmpty) setState(() => _results = _searchTenor(q));
   }
 
   @override
