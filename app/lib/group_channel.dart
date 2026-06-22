@@ -1,0 +1,99 @@
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:hive_ce_flutter/hive_ce_flutter.dart';
+
+/// A joined group channel: a random capability [id] (used for rendezvous *and*
+/// as the access secret — only people you invite know it), the symmetric [key]
+/// that encrypts its messages, and a local [name] you chose (yours only, never
+/// shared). Two people who create "games" get different ids — no collisions.
+class GroupChannel {
+  GroupChannel({required this.id, required this.key, required this.name});
+
+  final String id; // 16 random bytes, hex
+  final Uint8List key; // 32 random bytes
+  final String name; // local display name
+
+  /// Creates a brand-new channel (random id + key) with local [name].
+  factory GroupChannel.create(String name) {
+    final rng = Random.secure();
+    return GroupChannel(
+      id: _hex(rng, 16),
+      key: Uint8List.fromList(List.generate(32, (_) => rng.nextInt(256))),
+      name: name,
+    );
+  }
+
+  /// The invite string others paste to join — carries id + key + a suggested
+  /// name. Anyone holding it can join and read, so share it carefully.
+  String invite() =>
+      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'n': name})))}';
+
+  /// Parses an [invite] string, or null if malformed.
+  static GroupChannel? fromInvite(String invite) {
+    try {
+      final body = invite.trim().replaceFirst('hearth:', '');
+      final json = (jsonDecode(utf8.decode(base64Url.decode(body))) as Map)
+          .cast<String, Object?>();
+      final id = json['id'] as String?;
+      final k = json['k'] as String?;
+      if (id == null || k == null || id.isEmpty) return null;
+      return GroupChannel(
+        id: id,
+        key: base64Url.decode(k),
+        name: (json['n'] as String?)?.trim().isNotEmpty == true
+            ? json['n']! as String
+            : id,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  GroupChannel withName(String newName) =>
+      GroupChannel(id: id, key: key, name: newName);
+
+  Map<String, Object?> _toRegistry() => {'k': base64Url.encode(key), 'n': name};
+
+  static GroupChannel _fromRegistry(String id, Map<String, Object?> m) =>
+      GroupChannel(
+        id: id,
+        key: base64Url.decode(m['k']! as String),
+        name: m['n'] as String? ?? id,
+      );
+
+  static String _hex(Random rng, int bytes) => List.generate(
+    bytes,
+    (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+}
+
+/// On-device list of the group channels you've created or joined (Hive), so they
+/// survive restart. Keyed by channel id → {key, local name}.
+class ChannelRegistry {
+  ChannelRegistry._(this._box);
+
+  final Box<String> _box;
+
+  static Future<ChannelRegistry> open() async {
+    await Hive.initFlutter();
+    final box = await Hive.openBox<String>('hearth.channels');
+    return ChannelRegistry._(box);
+  }
+
+  List<GroupChannel> all() => _box.keys
+      .cast<String>()
+      .map(
+        (id) => GroupChannel._fromRegistry(
+          id,
+          (jsonDecode(_box.get(id)!) as Map).cast<String, Object?>(),
+        ),
+      )
+      .toList();
+
+  Future<void> save(GroupChannel channel) =>
+      _box.put(channel.id, jsonEncode(channel._toRegistry()));
+
+  Future<void> remove(String id) => _box.delete(id);
+}
