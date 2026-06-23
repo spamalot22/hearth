@@ -173,9 +173,13 @@ until refreshed.
   to the **channel**: relay URLs ride in the **invite** (`{id, key, name,
   relays:[…]}`); joiners inherit them; list several for failover (announce on all,
   connect via whichever brokers the handshake first).
-- **Services (GIF search, push)** are utility calls that needn't match anyone, so
-  they use the **user's home relay** (a per-user setting) and *its* key. "Which
-  Tenor key" = your home relay's — independent of any channel.
+- **Services (GIF search, push)** are *stateless* calls that needn't match anyone,
+  so they can use **any capable relay**, not just one. The client picks a service
+  relay **trust-ranked**: your **home/trusted relays first**, then other known
+  relays that *advertise* the capability, then degrade (GIF → paste-a-URL). "Which
+  Tenor key" = whichever relay answers — independent of the channel. Caveat:
+  whatever relay you query *sees the query* (search terms), so rank by trust, not
+  just health; could be a user setting ("home relay only" vs "any capable").
 
 **Fallback ladder** (each rung independently shippable; more rungs = harder to
 strand): invite relays → learned relays (peer-exchange) → app default/seed relays
@@ -186,8 +190,11 @@ rungs, not magic.
 
 **Per-relay directory (Phase 3 — build thin; the DHT subsumes much of it):**
 - Each client keeps a local set of known relays — `{relay-id, url(s),
-  lastSeenAlive, health, source}` — grown from invites + peer-exchange + relays'
-  own served lists + a bundled seed list.
+  lastSeenAlive, health, capabilities, source}` — grown from invites +
+  peer-exchange + relays' own served lists + a bundled seed list. **Capabilities**
+  (`gif`, `push`, …) are advertised by the relay (via `/health` or its signed
+  announcement), so the client knows which relays can serve which service and can
+  use one even when its own home relay can't.
 - **Stable id = an Ed25519 keypair per relay; relays sign their announcements**
   (mirrors user identity). **De-dup by pubkey, not URL** (union URLs, keep freshest
   liveness); signing kills spoofed entries.
@@ -322,7 +329,8 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       relays. (See "Relay discovery & resilience".)
 - [ ] **Relay directory** — signed Ed25519 relay identities, peer + relay gossip
       of known relays, **liveness-gated pruning** (online-gated + corroborated),
-      de-dup by relay pubkey, poisoning/eclipse mitigations. Build thin.
+      de-dup by relay pubkey, **service-capability advertisement** + trust-ranked
+      service-relay selection, poisoning/eclipse mitigations. Build thin.
 - [ ] **DHT (libp2p)** — relay-independent rendezvous keyed by channel id; the
       "all relays down" endgame. Bigger; likely Rust via `flutter_rust_bridge`.
 
