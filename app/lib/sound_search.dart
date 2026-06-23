@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -69,6 +70,13 @@ class _SoundSearchSheet extends StatefulWidget {
 class _SoundSearchSheetState extends State<_SoundSearchSheet> {
   final _query = TextEditingController();
   Future<_SoundResult>? _results;
+  Timer? _debounce;
+
+  // Search as you type, debounced so we don't fire on every keystroke.
+  void _onChanged() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 350), _runSearch);
+  }
 
   void _runSearch() {
     final q = _query.text.trim();
@@ -77,6 +85,7 @@ class _SoundSearchSheetState extends State<_SoundSearchSheet> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _query.dispose();
     super.dispose();
   }
@@ -97,6 +106,7 @@ class _SoundSearchSheetState extends State<_SoundSearchSheet> {
                 controller: _query,
                 autofocus: true,
                 textInputAction: TextInputAction.search,
+                onChanged: (_) => _onChanged(),
                 onSubmitted: (_) => _runSearch(),
                 decoration: InputDecoration(
                   hintText: 'Search sounds (Freesound, CC0)',

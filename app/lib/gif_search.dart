@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -72,6 +73,13 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
   final _query = TextEditingController();
   final _url = TextEditingController();
   Future<_GifResult>? _results;
+  Timer? _debounce;
+
+  // Search as you type, debounced so we don't fire on every keystroke.
+  void _onChanged() {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 350), _runSearch);
+  }
 
   void _runSearch() {
     final q = _query.text.trim();
@@ -85,6 +93,7 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _query.dispose();
     _url.dispose();
     super.dispose();
@@ -106,6 +115,7 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
                 controller: _query,
                 autofocus: true,
                 textInputAction: TextInputAction.search,
+                onChanged: (_) => _onChanged(),
                 onSubmitted: (_) => _runSearch(),
                 decoration: InputDecoration(
                   hintText: 'Search GIFs',
