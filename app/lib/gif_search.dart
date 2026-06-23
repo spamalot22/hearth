@@ -150,7 +150,17 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
             for (final gif in result.gifs)
               GestureDetector(
                 onTap: () => Navigator.pop(context, gif.url),
-                child: Image.network(gif.preview, fit: BoxFit.cover),
+                child: Image.network(
+                  gif.preview,
+                  fit: BoxFit.cover,
+                  loadingBuilder: (context, child, progress) => progress == null
+                      ? child
+                      : const ColoredBox(color: Colors.black12),
+                  errorBuilder: (context, error, stack) => const ColoredBox(
+                    color: Colors.black26,
+                    child: Icon(Icons.broken_image_outlined),
+                  ),
+                ),
               ),
           ],
         );
