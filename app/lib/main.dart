@@ -313,14 +313,21 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Sound button: search the CC0 library, or upload your own file.
-  Future<void> _addSound() async {
+  /// Sound button: play the channel soundboard, search the CC0 library, or
+  /// upload your own file.
+  Future<void> _addSound(ChannelSession session) async {
     final action = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            ListTile(
+              leading: const Icon(Icons.grid_view_outlined),
+              title: const Text('Soundboard'),
+              subtitle: const Text('play this channel’s clips'),
+              onTap: () => Navigator.pop(context, 'board'),
+            ),
             ListTile(
               leading: const Icon(Icons.search),
               title: const Text('Search sounds'),
@@ -335,10 +342,13 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ),
     );
-    if (action == 'search') {
-      await _searchSound();
-    } else if (action == 'upload') {
-      await _sendSound();
+    switch (action) {
+      case 'board':
+        await _openSoundboard(session);
+      case 'search':
+        await _searchSound();
+      case 'upload':
+        await _sendSound();
     }
   }
 
@@ -607,12 +617,6 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          if (session != null)
-            IconButton(
-              onPressed: () => unawaited(_openSoundboard(session)),
-              icon: const Icon(Icons.grid_view_outlined),
-              tooltip: 'Soundboard',
-            ),
           if (session != null && !session.isDm)
             IconButton(
               onPressed: () => unawaited(_shareInvite(session.channelId)),
@@ -1003,7 +1007,7 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'Sticker',
           ),
           IconButton(
-            onPressed: () => unawaited(_addSound()),
+            onPressed: () => unawaited(_addSound(session)),
             icon: const Icon(Icons.library_music_outlined),
             tooltip: 'Sound',
           ),
