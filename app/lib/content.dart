@@ -33,6 +33,29 @@ class GifContent extends Content {
   Map<String, Object?> toJson() => {'t': 'gif', 'url': url};
 }
 
+/// A sticker — an image stored in the content-addressed blob store and
+/// referenced here by its [blob] hash (fetched on demand from peers).
+class StickerContent extends Content {
+  const StickerContent(this.blob);
+
+  final String blob;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'sticker', 'blob': blob};
+}
+
+/// A soundboard clip — audio in the blob store, referenced by [blob] hash, with
+/// a display [name] for the soundboard.
+class SoundContent extends Content {
+  const SoundContent(this.blob, this.name);
+
+  final String blob;
+  final String name;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'sound', 'blob': blob, 'name': name};
+}
+
 /// Parses a payload into [Content], falling back to plain text for unknown or
 /// legacy (pre-envelope) payloads.
 Content parseContent(List<int> payload) {
@@ -44,6 +67,13 @@ Content parseContent(List<int> payload) {
           return TextContent(decoded['text'] as String? ?? '');
         case 'gif':
           return GifContent(decoded['url'] as String? ?? '');
+        case 'sticker':
+          return StickerContent(decoded['blob'] as String? ?? '');
+        case 'sound':
+          return SoundContent(
+            decoded['blob'] as String? ?? '',
+            decoded['name'] as String? ?? 'sound',
+          );
       }
     }
   } catch (_) {

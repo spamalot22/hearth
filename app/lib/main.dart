@@ -2,10 +2,12 @@ import 'dart:async';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'blob_store_hive.dart';
 import 'channel.dart';
 import 'contacts.dart';
 import 'content.dart';
@@ -123,6 +125,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ChannelManager? _channels;
   ContactBook? _contacts;
   ChannelRegistry? _registry;
+  BlobStore? _blobStore;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
   bool _sending = false;
@@ -139,11 +142,13 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _init() async {
     final contacts = widget.autoPoll ? await ContactBook.open() : null;
     final registry = widget.autoPoll ? await ChannelRegistry.open() : null;
+    final blobStore = widget.autoPoll ? await HiveBlobStore.open() : null;
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: widget.relayUrl,
       live: widget.autoPoll,
       onUpdate: _onUpdate,
+      blobStore: blobStore,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -156,6 +161,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _contacts = contacts;
       _registry = registry;
+      _blobStore = blobStore;
       _channels = channels;
     });
     // Decrypt the active channel's loaded history: the onUpdate calls during the
@@ -189,6 +195,21 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendGif() async {
     final url = await pickGif(context, widget.relayUrl);
     if (url != null) await _publish(GifContent(url));
+  }
+
+  /// Picks an image and sends it as a sticker — stored as a content-addressed
+  /// blob, fetched on demand by peers (never gossiped to everyone).
+  Future<void> _sendSticker() async {
+    final store = _blobStore;
+    if (store == null) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      withData: true,
+    );
+    final bytes = result?.files.single.bytes;
+    if (bytes == null) return;
+    final hash = await store.put(bytes);
+    await _publish(StickerContent(hash));
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
@@ -569,8 +590,12 @@ class _ChatScreenState extends State<ChatScreen> {
     child: Text(title, style: Theme.of(context).textTheme.titleSmall),
   );
 
-  /// Renders a message's content — text, or an inline GIF fetched from its URL.
-  Widget _contentView(BuildContext context, Content content) {
+  /// Renders a message's content — text, an inline GIF, a sticker, or a sound.
+  Widget _contentView(
+    BuildContext context,
+    ChannelSession session,
+    Content content,
+  ) {
     return switch (content) {
       TextContent(:final text) => Text(text),
       GifContent(:final url) => ConstrainedBox(
@@ -590,7 +615,37 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
       ),
+      StickerContent(:final blob) => _stickerView(session, blob),
+      SoundContent(:final blob, :final name) => _soundView(session, blob, name),
     };
+  }
+
+  /// A sticker image, once its blob has been fetched (spinner until then).
+  Widget _stickerView(ChannelSession session, String blob) {
+    final bytes = session.blobOf(blob);
+    if (bytes == null) {
+      return const SizedBox(
+        width: 120,
+        height: 120,
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 160, maxWidth: 160),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.memory(bytes, fit: BoxFit.contain),
+      ),
+    );
+  }
+
+  /// A soundboard clip. Playback + the channel soundboard land next; for now
+  /// it's shown as a labelled chip.
+  Widget _soundView(ChannelSession session, String blob, String name) {
+    return Chip(
+      avatar: const Icon(Icons.volume_up_outlined, size: 18),
+      label: Text(name),
+    );
   }
 
   Widget _bubble(
@@ -618,7 +673,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: Theme.of(context).textTheme.labelSmall,
                 ),
               ),
-              _contentView(context, session.contentOf(message)),
+              _contentView(context, session, session.contentOf(message)),
             ],
           ),
         ),
@@ -640,6 +695,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => unawaited(_sendGif()),
             icon: const Icon(Icons.gif_box_outlined),
             tooltip: 'GIF',
+          ),
+          IconButton(
+            onPressed: () => unawaited(_sendSticker()),
+            icon: const Icon(Icons.image_outlined),
+            tooltip: 'Sticker',
           ),
           Expanded(
             child: TextField(

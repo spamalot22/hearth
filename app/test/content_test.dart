@@ -17,6 +17,21 @@ void main() {
       expect((parsed as GifContent).url, 'https://x/y.gif');
     });
 
+    test('sticker round-trips', () {
+      final parsed = parseContent(const StickerContent('1220abcd').encode());
+      expect(parsed, isA<StickerContent>());
+      expect((parsed as StickerContent).blob, '1220abcd');
+    });
+
+    test('sound round-trips', () {
+      final parsed = parseContent(
+        const SoundContent('1220beef', 'airhorn').encode(),
+      );
+      expect(parsed, isA<SoundContent>());
+      expect((parsed as SoundContent).blob, '1220beef');
+      expect(parsed.name, 'airhorn');
+    });
+
     test('legacy plain-text payloads fall back to text', () {
       final parsed = parseContent(utf8.encode('just raw text'));
       expect(parsed, isA<TextContent>());
