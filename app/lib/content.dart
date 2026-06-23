@@ -23,14 +23,16 @@ class TextContent extends Content {
   Map<String, Object?> toJson() => {'t': 'text', 'text': text};
 }
 
-/// A GIF referenced by URL (the image isn't stored — the client fetches it).
+/// A GIF — like a sticker, an image in the content-addressed blob store,
+/// referenced by [blob] hash. Fetched once from its source at send time, then it
+/// lives in the blob store and transfers P2P; it's never re-fetched from a CDN.
 class GifContent extends Content {
-  const GifContent(this.url);
+  const GifContent(this.blob);
 
-  final String url;
+  final String blob;
 
   @override
-  Map<String, Object?> toJson() => {'t': 'gif', 'url': url};
+  Map<String, Object?> toJson() => {'t': 'gif', 'blob': blob};
 }
 
 /// A sticker — an image stored in the content-addressed blob store and
@@ -66,7 +68,7 @@ Content parseContent(List<int> payload) {
         case 'text':
           return TextContent(decoded['text'] as String? ?? '');
         case 'gif':
-          return GifContent(decoded['url'] as String? ?? '');
+          return GifContent(decoded['blob'] as String? ?? '');
         case 'sticker':
           return StickerContent(decoded['blob'] as String? ?? '');
         case 'sound':

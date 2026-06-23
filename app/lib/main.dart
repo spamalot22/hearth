@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 
 import 'blob_store_hive.dart';
 import 'channel.dart';
@@ -195,10 +196,24 @@ class _ChatScreenState extends State<ChatScreen> {
     await _publish(TextContent(text));
   }
 
-  /// Searches GIFs (via the relay's proxy) and sends the chosen one.
+  /// Searches GIFs (via the relay's proxy), fetches the chosen one's bytes once,
+  /// then sends it as a blob — after that it's local + P2P, never re-fetched.
   Future<void> _sendGif() async {
+    final store = _blobStore;
+    if (store == null) return;
     final url = await pickGif(context, widget.relayUrl);
-    if (url != null) await _publish(GifContent(url));
+    if (url == null) return;
+    try {
+      final res = await http.get(Uri.parse(url));
+      if (res.statusCode != 200) {
+        if (mounted) setState(() => _error = 'could not fetch that GIF');
+        return;
+      }
+      final hash = await store.put(res.bodyBytes);
+      await _publish(GifContent(hash));
+    } catch (_) {
+      if (mounted) setState(() => _error = 'could not fetch that GIF');
+    }
   }
 
   /// Picks an image and sends it as a sticker — stored as a content-addressed
@@ -633,30 +648,15 @@ class _ChatScreenState extends State<ChatScreen> {
   ) {
     return switch (content) {
       TextContent(:final text) => Text(text),
-      GifContent(:final url) => ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 220, maxWidth: 260),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Image.network(
-            url,
-            fit: BoxFit.contain,
-            errorBuilder: (context, error, stack) => Text('[GIF] $url'),
-            loadingBuilder: (context, child, progress) => progress == null
-                ? child
-                : const Padding(
-                    padding: EdgeInsets.all(24),
-                    child: CircularProgressIndicator(),
-                  ),
-          ),
-        ),
-      ),
-      StickerContent(:final blob) => _stickerView(session, blob),
+      GifContent(:final blob) => _imageBlobView(session, blob),
+      StickerContent(:final blob) => _imageBlobView(session, blob),
       SoundContent(:final blob, :final name) => _soundView(session, blob, name),
     };
   }
 
-  /// A sticker image, once its blob has been fetched (spinner until then).
-  Widget _stickerView(ChannelSession session, String blob) {
+  /// An image blob — sticker or GIF — once fetched (spinner until then).
+  /// Image.memory animates GIFs.
+  Widget _imageBlobView(ChannelSession session, String blob) {
     final bytes = session.blobOf(blob);
     if (bytes == null) {
       return const SizedBox(
@@ -666,7 +666,7 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 160, maxWidth: 160),
+      constraints: const BoxConstraints(maxHeight: 220, maxWidth: 260),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
         child: Image.memory(bytes, fit: BoxFit.contain),

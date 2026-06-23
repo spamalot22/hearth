@@ -12,9 +12,9 @@ void main() {
     });
 
     test('gif round-trips', () {
-      final parsed = parseContent(const GifContent('https://x/y.gif').encode());
+      final parsed = parseContent(const GifContent('1220cafe').encode());
       expect(parsed, isA<GifContent>());
-      expect((parsed as GifContent).url, 'https://x/y.gif');
+      expect((parsed as GifContent).blob, '1220cafe');
     });
 
     test('sticker round-trips', () {
