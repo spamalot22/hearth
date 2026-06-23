@@ -80,7 +80,12 @@ class _SoundSearchSheetState extends State<_SoundSearchSheet> {
 
   void _runSearch() {
     final q = _query.text.trim();
-    if (q.isNotEmpty) setState(() => _results = _search(widget.relayUrl, q));
+    if (q.isEmpty) return;
+    // Block body: an arrow here would *return* the Future to setState, which
+    // throws "callback returned a Future".
+    setState(() {
+      _results = _search(widget.relayUrl, q);
+    });
   }
 
   @override
