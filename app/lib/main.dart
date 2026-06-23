@@ -17,6 +17,7 @@ import 'emoji_picker.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
+import 'media_library.dart';
 
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -128,6 +129,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ContactBook? _contacts;
   ChannelRegistry? _registry;
   BlobStore? _blobStore;
+  MediaLibrary? _library;
   AudioPlayer? _player;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
@@ -146,6 +148,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final contacts = widget.autoPoll ? await ContactBook.open() : null;
     final registry = widget.autoPoll ? await ChannelRegistry.open() : null;
     final blobStore = widget.autoPoll ? await HiveBlobStore.open() : null;
+    final library = widget.autoPoll ? await MediaLibrary.open() : null;
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: widget.relayUrl,
@@ -165,6 +168,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _contacts = contacts;
       _registry = registry;
       _blobStore = blobStore;
+      _library = library;
       _player = widget.autoPoll ? AudioPlayer() : null;
       _channels = channels;
     });
@@ -175,10 +179,38 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onUpdate() => unawaited(_refresh());
 
-  /// Decrypts the active channel's new messages, then re-renders.
+  /// Decrypts the active channel's new messages, indexes any media into your
+  /// library, then re-renders.
   Future<void> _refresh() async {
-    await _channels?.active?.refreshContent();
+    final active = _channels?.active;
+    await active?.refreshContent();
+    if (active != null) await _indexLibrary(active);
     if (mounted) setState(() {});
+  }
+
+  /// Adds the active channel's media (whose blobs are held) to your library, so
+  /// anything sent or received can be re-sent in any channel.
+  Future<void> _indexLibrary(ChannelSession session) async {
+    final library = _library;
+    if (library == null) return;
+    for (final message in session.repository.ordered()) {
+      switch (session.contentOf(message)) {
+        case StickerContent(:final blob):
+          if (session.blobOf(blob) != null) {
+            await library.add(blob, MediaKind.sticker);
+          }
+        case GifContent(:final blob):
+          if (session.blobOf(blob) != null) {
+            await library.add(blob, MediaKind.gif);
+          }
+        case SoundContent(:final blob, :final name):
+          if (session.blobOf(blob) != null) {
+            await library.add(blob, MediaKind.sound, name: name);
+          }
+        case TextContent():
+          break;
+      }
+    }
   }
 
   @override
@@ -231,7 +263,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await _publish(StickerContent(hash));
   }
 
-  /// Picks an audio file and posts it as a soundboard clip (blob + name).
+  /// Picks an audio file, lets you name it, and posts it as a soundboard clip.
   Future<void> _sendSound() async {
     final store = _blobStore;
     if (store == null) return;
@@ -242,9 +274,15 @@ class _ChatScreenState extends State<ChatScreen> {
     final file = result?.files.single;
     final bytes = file?.bytes;
     if (file == null || bytes == null) return;
-    final name = file.name.split('.').first;
+    final name = await _promptText(
+      title: 'Name this sound',
+      hint: 'e.g. airhorn',
+      initial: file.name.split('.').first,
+      action: 'Add',
+    );
+    if (name == null || name.trim().isEmpty) return;
     final hash = await store.put(bytes);
-    await _publish(SoundContent(hash, name));
+    await _publish(SoundContent(hash, name.trim()));
   }
 
   /// Plays a soundboard clip if its blob is held locally.
@@ -698,6 +736,110 @@ class _ChatScreenState extends State<ChatScreen> {
     return sounds.reversed.toList();
   }
 
+  /// Your saved media (everything sent or received), to re-send here.
+  Future<void> _openLibrary() async {
+    final library = _library;
+    final store = _blobStore;
+    if (library == null || store == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => SizedBox(
+        height: 480,
+        child: ListView(
+          padding: const EdgeInsets.all(12),
+          children: [
+            _drawerHeader('Stickers'),
+            _imageLibrary(
+              library.byKind(MediaKind.sticker),
+              store,
+              (hash) => _publish(StickerContent(hash)),
+            ),
+            _drawerHeader('GIFs'),
+            _imageLibrary(
+              library.byKind(MediaKind.gif),
+              store,
+              (hash) => _publish(GifContent(hash)),
+            ),
+            _drawerHeader('Sounds'),
+            _soundLibrary(library.byKind(MediaKind.sound)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A wrap of image-blob thumbnails (stickers/GIFs); tap to re-send.
+  Widget _imageLibrary(
+    List<MediaItem> items,
+    BlobStore store,
+    Future<void> Function(String) onPick,
+  ) {
+    if (items.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(8),
+        child: Text('Nothing yet'),
+      );
+    }
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final item in items)
+          GestureDetector(
+            onTap: () {
+              Navigator.pop(context);
+              unawaited(onPick(item.hash));
+            },
+            child: SizedBox(
+              width: 72,
+              height: 72,
+              child: FutureBuilder<Uint8List?>(
+                future: store.get(item.hash),
+                builder: (context, snapshot) {
+                  final bytes = snapshot.data;
+                  if (bytes == null) {
+                    return const ColoredBox(color: Colors.black12);
+                  }
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: Image.memory(bytes, fit: BoxFit.cover),
+                  );
+                },
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// A wrap of named sound chips; tap to re-send to this channel.
+  Widget _soundLibrary(List<MediaItem> items) {
+    if (items.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(8),
+        child: Text('Nothing yet'),
+      );
+    }
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final item in items)
+          ActionChip(
+            avatar: const Icon(Icons.add, size: 18),
+            label: Text(item.name ?? 'sound'),
+            onPressed: () {
+              Navigator.pop(context);
+              unawaited(
+                _publish(SoundContent(item.hash, item.name ?? 'sound')),
+              );
+            },
+          ),
+      ],
+    );
+  }
+
   /// Opens the channel soundboard — a grid of its clips, tap any to play.
   Future<void> _openSoundboard(ChannelSession session) async {
     await showModalBottomSheet<void>(
@@ -785,6 +927,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => unawaited(_sendSound()),
             icon: const Icon(Icons.library_music_outlined),
             tooltip: 'Sound',
+          ),
+          IconButton(
+            onPressed: () => unawaited(_openLibrary()),
+            icon: const Icon(Icons.collections_bookmark_outlined),
+            tooltip: 'Your media',
           ),
           Expanded(
             child: TextField(
