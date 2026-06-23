@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:file_picker/file_picker.dart';
@@ -126,6 +127,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ContactBook? _contacts;
   ChannelRegistry? _registry;
   BlobStore? _blobStore;
+  AudioPlayer? _player;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
   bool _sending = false;
@@ -162,6 +164,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _contacts = contacts;
       _registry = registry;
       _blobStore = blobStore;
+      _player = widget.autoPoll ? AudioPlayer() : null;
       _channels = channels;
     });
     // Decrypt the active channel's loaded history: the onUpdate calls during the
@@ -180,6 +183,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     unawaited(_channels?.close());
+    unawaited(_player?.dispose());
     _input.dispose();
     super.dispose();
   }
@@ -210,6 +214,31 @@ class _ChatScreenState extends State<ChatScreen> {
     if (bytes == null) return;
     final hash = await store.put(bytes);
     await _publish(StickerContent(hash));
+  }
+
+  /// Picks an audio file and posts it as a soundboard clip (blob + name).
+  Future<void> _sendSound() async {
+    final store = _blobStore;
+    if (store == null) return;
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+      withData: true,
+    );
+    final file = result?.files.single;
+    final bytes = file?.bytes;
+    if (file == null || bytes == null) return;
+    final name = file.name.split('.').first;
+    final hash = await store.put(bytes);
+    await _publish(SoundContent(hash, name));
+  }
+
+  /// Plays a soundboard clip if its blob is held locally.
+  Future<void> _playSound(ChannelSession session, String blob) async {
+    final bytes = session.blobOf(blob);
+    final player = _player;
+    if (bytes == null || player == null) return;
+    await player.stop();
+    await player.play(BytesSource(bytes));
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
@@ -468,6 +497,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
+          if (session != null)
+            IconButton(
+              onPressed: () => unawaited(_openSoundboard(session)),
+              icon: const Icon(Icons.grid_view_outlined),
+              tooltip: 'Soundboard',
+            ),
           if (session != null && !session.isDm)
             IconButton(
               onPressed: () => unawaited(_shareInvite(session.channelId)),
@@ -639,12 +674,57 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// A soundboard clip. Playback + the channel soundboard land next; for now
-  /// it's shown as a labelled chip.
+  /// A soundboard clip — tap to play (once its blob is fetched).
   Widget _soundView(ChannelSession session, String blob, String name) {
-    return Chip(
-      avatar: const Icon(Icons.volume_up_outlined, size: 18),
+    return ActionChip(
+      avatar: const Icon(Icons.play_arrow, size: 18),
       label: Text(name),
+      onPressed: () => unawaited(_playSound(session, blob)),
+    );
+  }
+
+  /// The channel's soundboard: its distinct sound clips, newest first.
+  List<SoundContent> _channelSounds(ChannelSession session) {
+    final seen = <String>{};
+    final sounds = <SoundContent>[];
+    for (final message in session.repository.ordered()) {
+      final content = session.contentOf(message);
+      if (content is SoundContent &&
+          content.blob.isNotEmpty &&
+          seen.add(content.blob)) {
+        sounds.add(content);
+      }
+    }
+    return sounds.reversed.toList();
+  }
+
+  /// Opens the channel soundboard — a grid of its clips, tap any to play.
+  Future<void> _openSoundboard(ChannelSession session) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) {
+        final sounds = _channelSounds(session);
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: sounds.isEmpty
+                ? const Text('No sounds yet — upload one with the 🎵 button.')
+                : Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final sound in sounds)
+                        ActionChip(
+                          avatar: const Icon(Icons.play_arrow),
+                          label: Text(sound.name),
+                          onPressed: () =>
+                              unawaited(_playSound(session, sound.blob)),
+                        ),
+                    ],
+                  ),
+          ),
+        );
+      },
     );
   }
 
@@ -700,6 +780,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => unawaited(_sendSticker()),
             icon: const Icon(Icons.image_outlined),
             tooltip: 'Sticker',
+          ),
+          IconButton(
+            onPressed: () => unawaited(_sendSound()),
+            icon: const Icon(Icons.library_music_outlined),
+            tooltip: 'Sound',
           ),
           Expanded(
             child: TextField(
