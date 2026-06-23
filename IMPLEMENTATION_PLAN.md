@@ -523,3 +523,13 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   corroborated death while *you're* online — never on your own contact gap),
   poisoning/eclipse mitigations. Build thin; the **DHT (libp2p)** is the endgame
   and subsumes much of it.
+- **2026-06-23** — **Rich media is all local blobs + provider updates.** GIFs,
+  stickers, and sounds are now content-addressed **blobs stored on every device**
+  (no CDN at render); received media joins a local **media library** that's
+  re-sendable in any channel. Sounds carry a name + **emoji icon**; a bundled
+  **CC0 starter-pack** loads from `assets/sounds/`. Search providers are
+  relay-proxied (key server-side, loaded from gitignored `backend/.env` via
+  dotenv): **Giphy** for GIFs — switched from Tenor, which Google is discontinuing
+  in 2026 (no new keys from 2026-01-13, service ends 2026-06-30) — and
+  **Freesound** for sounds, **CC0-filtered** so results are safe to redistribute
+  P2P. Each searched clip is fetched once and blob-ified on send.
