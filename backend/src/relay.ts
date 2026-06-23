@@ -4,6 +4,7 @@ import { cors } from 'hono/cors';
 import { addGifRoutes } from './gif';
 import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
+import { addSoundRoutes } from './sound';
 
 interface StoredMessage {
   seq: number;
@@ -51,8 +52,11 @@ export function createRelay(
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
   addSignalingRoutes(app, signalHub);
 
-  // GIF search proxy (Tenor key stays on the relay, never in clients).
+  // GIF search proxy (provider key stays on the relay, never in clients).
   addGifRoutes(app);
+
+  // Sound search proxy (Freesound token stays on the relay; CC0-filtered).
+  addSoundRoutes(app);
 
   // Accept a signed message: verify it, then store it.
   app.post('/messages', async (c) => {

@@ -18,6 +18,7 @@ import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
 import 'media_library.dart';
+import 'sound_search.dart';
 import 'starter_sounds.dart';
 
 /// Relay endpoint for local dev (signalling only).
@@ -288,6 +289,57 @@ class _ChatScreenState extends State<ChatScreen> {
     final emoji = await pickEmoji(context) ?? '🔊';
     final hash = await store.put(bytes);
     await _publish(SoundContent(hash, name.trim(), emoji));
+  }
+
+  /// Searches Freesound (via the relay, CC0-filtered), fetches the chosen clip,
+  /// and posts it with the emoji you pick.
+  Future<void> _searchSound() async {
+    final store = _blobStore;
+    if (store == null) return;
+    final picked = await pickSound(context, widget.relayUrl);
+    if (picked == null) return;
+    try {
+      final res = await http.get(Uri.parse(picked.url));
+      if (res.statusCode != 200) {
+        if (mounted) setState(() => _error = 'could not fetch that sound');
+        return;
+      }
+      if (!mounted) return;
+      final emoji = await pickEmoji(context) ?? '🔊';
+      final hash = await store.put(res.bodyBytes);
+      await _publish(SoundContent(hash, picked.name, emoji));
+    } catch (_) {
+      if (mounted) setState(() => _error = 'could not fetch that sound');
+    }
+  }
+
+  /// Sound button: search the CC0 library, or upload your own file.
+  Future<void> _addSound() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.search),
+              title: const Text('Search sounds'),
+              onTap: () => Navigator.pop(context, 'search'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.upload_file_outlined),
+              title: const Text('Upload your own'),
+              onTap: () => Navigator.pop(context, 'upload'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == 'search') {
+      await _searchSound();
+    } else if (action == 'upload') {
+      await _sendSound();
+    }
   }
 
   /// Plays a soundboard clip if its blob is held locally.
@@ -951,7 +1003,7 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'Sticker',
           ),
           IconButton(
-            onPressed: () => unawaited(_sendSound()),
+            onPressed: () => unawaited(_addSound()),
             icon: const Icon(Icons.library_music_outlined),
             tooltip: 'Sound',
           ),

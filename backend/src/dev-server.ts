@@ -1,3 +1,5 @@
+import 'dotenv/config'; // loads backend/.env (gitignored) into process.env
+
 import { serve } from '@hono/node-server';
 
 import { createRelay } from './relay';
