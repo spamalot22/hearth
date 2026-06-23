@@ -47,15 +47,21 @@ class StickerContent extends Content {
 }
 
 /// A soundboard clip — audio in the blob store, referenced by [blob] hash, with
-/// a display [name] for the soundboard.
+/// a display [name] and an [emoji] icon for the soundboard button.
 class SoundContent extends Content {
-  const SoundContent(this.blob, this.name);
+  const SoundContent(this.blob, this.name, [this.emoji = '🔊']);
 
   final String blob;
   final String name;
+  final String emoji;
 
   @override
-  Map<String, Object?> toJson() => {'t': 'sound', 'blob': blob, 'name': name};
+  Map<String, Object?> toJson() => {
+    't': 'sound',
+    'blob': blob,
+    'name': name,
+    'emoji': emoji,
+  };
 }
 
 /// Parses a payload into [Content], falling back to plain text for unknown or
@@ -75,6 +81,7 @@ Content parseContent(List<int> payload) {
           return SoundContent(
             decoded['blob'] as String? ?? '',
             decoded['name'] as String? ?? 'sound',
+            decoded['emoji'] as String? ?? '🔊',
           );
       }
     }

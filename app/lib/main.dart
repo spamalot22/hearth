@@ -203,9 +203,9 @@ class _ChatScreenState extends State<ChatScreen> {
           if (session.blobOf(blob) != null) {
             await library.add(blob, MediaKind.gif);
           }
-        case SoundContent(:final blob, :final name):
+        case SoundContent(:final blob, :final name, :final emoji):
           if (session.blobOf(blob) != null) {
-            await library.add(blob, MediaKind.sound, name: name);
+            await library.add(blob, MediaKind.sound, name: name, emoji: emoji);
           }
         case TextContent():
           break;
@@ -280,9 +280,10 @@ class _ChatScreenState extends State<ChatScreen> {
       initial: file.name.split('.').first,
       action: 'Add',
     );
-    if (name == null || name.trim().isEmpty) return;
+    if (name == null || name.trim().isEmpty || !mounted) return;
+    final emoji = await pickEmoji(context) ?? '🔊';
     final hash = await store.put(bytes);
-    await _publish(SoundContent(hash, name.trim()));
+    await _publish(SoundContent(hash, name.trim(), emoji));
   }
 
   /// Plays a soundboard clip if its blob is held locally.
@@ -688,7 +689,12 @@ class _ChatScreenState extends State<ChatScreen> {
       TextContent(:final text) => Text(text),
       GifContent(:final blob) => _imageBlobView(session, blob),
       StickerContent(:final blob) => _imageBlobView(session, blob),
-      SoundContent(:final blob, :final name) => _soundView(session, blob, name),
+      SoundContent(:final blob, :final name, :final emoji) => _soundView(
+        session,
+        blob,
+        name,
+        emoji,
+      ),
     };
   }
 
@@ -712,10 +718,15 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// A soundboard clip — tap to play (once its blob is fetched).
-  Widget _soundView(ChannelSession session, String blob, String name) {
+  /// A soundboard clip — emoji icon + name, tap to play (once its blob is in).
+  Widget _soundView(
+    ChannelSession session,
+    String blob,
+    String name,
+    String emoji,
+  ) {
     return ActionChip(
-      avatar: const Icon(Icons.play_arrow, size: 18),
+      avatar: Text(emoji, style: const TextStyle(fontSize: 16)),
       label: Text(name),
       onPressed: () => unawaited(_playSound(session, blob)),
     );
@@ -827,12 +838,21 @@ class _ChatScreenState extends State<ChatScreen> {
       children: [
         for (final item in items)
           ActionChip(
-            avatar: const Icon(Icons.add, size: 18),
+            avatar: Text(
+              item.emoji ?? '🔊',
+              style: const TextStyle(fontSize: 16),
+            ),
             label: Text(item.name ?? 'sound'),
             onPressed: () {
               Navigator.pop(context);
               unawaited(
-                _publish(SoundContent(item.hash, item.name ?? 'sound')),
+                _publish(
+                  SoundContent(
+                    item.hash,
+                    item.name ?? 'sound',
+                    item.emoji ?? '🔊',
+                  ),
+                ),
               );
             },
           ),
@@ -857,7 +877,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     children: [
                       for (final sound in sounds)
                         ActionChip(
-                          avatar: const Icon(Icons.play_arrow),
+                          avatar: Text(
+                            sound.emoji,
+                            style: const TextStyle(fontSize: 16),
+                          ),
                           label: Text(sound.name),
                           onPressed: () =>
                               unawaited(_playSound(session, sound.blob)),

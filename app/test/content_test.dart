@@ -25,11 +25,12 @@ void main() {
 
     test('sound round-trips', () {
       final parsed = parseContent(
-        const SoundContent('1220beef', 'airhorn').encode(),
+        const SoundContent('1220beef', 'airhorn', '📯').encode(),
       );
       expect(parsed, isA<SoundContent>());
       expect((parsed as SoundContent).blob, '1220beef');
       expect(parsed.name, 'airhorn');
+      expect(parsed.emoji, '📯');
     });
 
     test('legacy plain-text payloads fall back to text', () {

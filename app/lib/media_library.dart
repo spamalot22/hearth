@@ -7,11 +7,12 @@ import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 enum MediaKind { sticker, gif, sound }
 
 class MediaItem {
-  const MediaItem(this.hash, this.kind, this.name);
+  const MediaItem(this.hash, this.kind, this.name, this.emoji);
 
   final String hash;
   final MediaKind kind;
   final String? name;
+  final String? emoji;
 }
 
 /// Your personal media cache: every sticker/GIF/sound you've sent or received,
@@ -29,9 +30,17 @@ class MediaLibrary {
   }
 
   /// Records [hash] under [kind] (idempotent — a known hash is left as-is).
-  Future<void> add(String hash, MediaKind kind, {String? name}) async {
+  Future<void> add(
+    String hash,
+    MediaKind kind, {
+    String? name,
+    String? emoji,
+  }) async {
     if (hash.isEmpty || _box.containsKey(hash)) return;
-    await _box.put(hash, jsonEncode({'kind': kind.name, 'name': name}));
+    await _box.put(
+      hash,
+      jsonEncode({'kind': kind.name, 'name': name, 'emoji': emoji}),
+    );
   }
 
   /// Every item of [kind] you hold.
@@ -40,7 +49,14 @@ class MediaLibrary {
     for (final hash in _box.keys.cast<String>()) {
       final raw = jsonDecode(_box.get(hash)!) as Map;
       if (raw['kind'] == kind.name) {
-        items.add(MediaItem(hash, kind, raw['name'] as String?));
+        items.add(
+          MediaItem(
+            hash,
+            kind,
+            raw['name'] as String?,
+            raw['emoji'] as String?,
+          ),
+        );
       }
     }
     return items;
