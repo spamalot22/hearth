@@ -71,6 +71,11 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # Bundled CC0 soundboard clips — drop audio files in here and they load into
+  # every install's media library on startup (see assets/sounds/README.md).
+  assets:
+    - assets/sounds/
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg

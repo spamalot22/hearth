@@ -18,6 +18,7 @@ import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
 import 'media_library.dart';
+import 'starter_sounds.dart';
 
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -149,6 +150,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final registry = widget.autoPoll ? await ChannelRegistry.open() : null;
     final blobStore = widget.autoPoll ? await HiveBlobStore.open() : null;
     final library = widget.autoPoll ? await MediaLibrary.open() : null;
+    if (blobStore != null && library != null) {
+      await loadStarterSounds(blobStore, library);
+    }
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: widget.relayUrl,
