@@ -147,6 +147,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _input = TextEditingController();
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
   ChannelManager? _channels;
   ContactBook? _contacts;
   ChannelRegistry? _registry;
@@ -529,47 +530,142 @@ class _ChatScreenState extends State<ChatScreen> {
     await voice?.leave();
   }
 
-  /// App-bar voice controls: join, or — in a call — a participant count, mute,
-  /// and leave.
-  List<Widget> _voiceActions(ChannelSession session) {
+  /// The right-hand **channel control panel** — channel-scoped actions (invite,
+  /// voice) and, in a call, the participants with live speaking indicators. A
+  /// dedicated home for these controls, with room to grow.
+  Widget _channelPanel(ChannelSession session) {
+    final theme = Theme.of(context);
     final voice = _voice;
-    if (voice == null) {
-      return [
-        IconButton(
-          onPressed: () => unawaited(_joinVoice(session.channelId)),
-          icon: const Icon(Icons.call),
-          tooltip: 'Join voice',
-        ),
-      ];
-    }
-    return [
-      Center(
+    final inCall = voice != null && voice.channelId == session.channelId;
+    return Container(
+      color: theme.colorScheme.surfaceContainerLow,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Row(
+            children: [
+              Icon(
+                session.isDm ? Icons.alternate_email : Icons.tag,
+                size: 18,
+                color: theme.colorScheme.primary,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  _channelTitle(session),
+                  style: theme.textTheme.titleMedium,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          if (!session.isDm) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => unawaited(_shareInvite(session.channelId)),
+              icon: const Icon(Icons.person_add_alt_1),
+              label: const Text('Invite'),
+            ),
+          ],
+          const Divider(height: 28),
+          Text('VOICE', style: theme.textTheme.labelSmall),
+          const SizedBox(height: 8),
+          if (!inCall)
+            FilledButton.icon(
+              onPressed: () => unawaited(_joinVoice(session.channelId)),
+              icon: const Icon(Icons.call),
+              label: const Text('Join voice'),
+            )
+          else ...[
+            Row(
+              children: [
+                IconButton(
+                  onPressed: voice.toggleMute,
+                  icon: Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
+                  tooltip: voice.isMuted ? 'Unmute' : 'Mute',
+                ),
+                IconButton(
+                  onPressed: voice.toggleDeafen,
+                  icon: Icon(
+                    voice.isDeafened ? Icons.headset_off : Icons.headset,
+                  ),
+                  tooltip: voice.isDeafened ? 'Undeafen' : 'Deafen',
+                ),
+                const Spacer(),
+                IconButton(
+                  onPressed: () => unawaited(_leaveVoice()),
+                  icon: const Icon(Icons.call_end),
+                  color: theme.colorScheme.error,
+                  tooltip: 'Leave voice',
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            _participantTile(
+              voice,
+              'self',
+              widget.identity.publicKey,
+              voice.isMuted ? 'You (muted)' : 'You',
+            ),
+            for (final peerHex in voice.peerHexes)
+              _participantTile(
+                voice,
+                peerHex,
+                Uint8List.fromList(hex.decode(peerHex)),
+                _displayName(Uint8List.fromList(hex.decode(peerHex))),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// One voice participant: avatar (green ring when speaking) + name + level
+  /// bar. Tapping a peer opens their volume slider.
+  Widget _participantTile(
+    VoiceSession voice,
+    String key,
+    Uint8List author,
+    String name,
+  ) {
+    final speaking = voice.speaking(key);
+    return InkWell(
+      onTap: key == 'self' ? null : () => unawaited(_peerVolume(key, name)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.graphic_eq, size: 18),
-            const SizedBox(width: 4),
-            Text('${voice.peerCount + 1}'),
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: speaking ? Colors.greenAccent : Colors.transparent,
+                  width: 2,
+                ),
+              ),
+              child: _avatar(author, radius: 14),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                name,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ),
+            SizedBox(
+              width: 44,
+              child: LinearProgressIndicator(
+                value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
+                minHeight: 4,
+                backgroundColor: Colors.white24,
+                color: Colors.greenAccent,
+              ),
+            ),
           ],
         ),
       ),
-      IconButton(
-        onPressed: voice.toggleMute,
-        icon: Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
-        tooltip: voice.isMuted ? 'Unmute' : 'Mute',
-      ),
-      IconButton(
-        onPressed: voice.toggleDeafen,
-        icon: Icon(voice.isDeafened ? Icons.headset_off : Icons.headset),
-        tooltip: voice.isDeafened ? 'Undeafen' : 'Deafen',
-      ),
-      IconButton(
-        onPressed: () => unawaited(_leaveVoice()),
-        icon: const Icon(Icons.call_end),
-        color: Theme.of(context).colorScheme.error,
-        tooltip: 'Leave voice',
-      ),
-    ];
+    );
   }
 
   /// Per-user playback volume (0 mutes just that person).
@@ -607,60 +703,6 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  /// A live strip of who's in the call with speaking indicators — driven by the
-  /// 250ms level poll, so the mic lights + bars move as people talk. Lets you
-  /// verify audio is flowing without speakers.
-  Widget _voiceBar() {
-    final voice = _voice!;
-    final scheme = Theme.of(context).colorScheme;
-    final people = <(String, String)>[
-      ('self', voice.isMuted ? 'You (muted)' : 'You'),
-      for (final peerHex in voice.peerHexes)
-        (peerHex, _displayName(Uint8List.fromList(hex.decode(peerHex)))),
-    ];
-    return Container(
-      width: double.infinity,
-      color: scheme.surfaceContainerHighest,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Wrap(
-        spacing: 16,
-        runSpacing: 8,
-        children: [
-          for (final (key, name) in people)
-            InkWell(
-              onTap: key == 'self'
-                  ? null
-                  : () => unawaited(_peerVolume(key, name)),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.mic,
-                    size: 16,
-                    color: voice.speaking(key)
-                        ? Colors.greenAccent
-                        : scheme.outline,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(name, style: Theme.of(context).textTheme.bodySmall),
-                  const SizedBox(width: 6),
-                  SizedBox(
-                    width: 40,
-                    child: LinearProgressIndicator(
-                      value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
-                      minHeight: 4,
-                      backgroundColor: Colors.white24,
-                      color: Colors.greenAccent,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
       ),
     );
   }
@@ -791,7 +833,12 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final session = _channels?.active;
+    // Wide screens get the channel panel inline (right column); narrow screens
+    // reach it via the end drawer.
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    final panelInline = session != null && wide;
     return Scaffold(
+      key: _scaffoldKey,
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -806,28 +853,32 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          if (session != null) ..._voiceActions(session),
-          if (session != null && !session.isDm)
+          if (session != null && !wide)
             IconButton(
-              onPressed: () => unawaited(_shareInvite(session.channelId)),
-              icon: const Icon(Icons.person_add_alt_1),
-              tooltip: 'Invite',
+              onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+              icon: const Icon(Icons.tune),
+              tooltip: 'Channel controls',
             ),
         ],
         bottom: _error == null ? null : _errorBar(context, _error!),
       ),
       drawer: _drawer(context),
+      endDrawer: (session != null && !wide)
+          ? Drawer(child: SafeArea(child: _channelPanel(session)))
+          : null,
       body: session == null
           ? _emptyState(context)
           : Stack(
               children: [
-                Column(
-                  children: [
-                    if (_voice?.channelId == session.channelId) _voiceBar(),
-                    Expanded(child: _messageList(context, session)),
-                    _composer(context, session),
-                  ],
-                ),
+                if (panelInline)
+                  Row(
+                    children: [
+                      Expanded(child: _chatColumn(session)),
+                      SizedBox(width: 300, child: _channelPanel(session)),
+                    ],
+                  )
+                else
+                  _chatColumn(session),
                 // Hidden 1x1 sinks so the browser plays each remote's audio.
                 for (final renderer
                     in _voice?.remoteRenderers ?? const <RTCVideoRenderer>[])
@@ -842,6 +893,13 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
     );
   }
+
+  Widget _chatColumn(ChannelSession session) => Column(
+    children: [
+      Expanded(child: _messageList(context, session)),
+      _composer(context, session),
+    ],
+  );
 
   Widget _messageList(BuildContext context, ChannelSession session) {
     final messages = session.repository.ordered();
