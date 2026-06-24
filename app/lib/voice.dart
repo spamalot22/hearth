@@ -34,10 +34,17 @@ class VoiceSession {
   StreamSubscription<void>? _sub;
   Timer? _levelTimer;
   final Map<String, double> _levels = {}; // 'self' or peerHex -> 0..1 level
+  final Map<String, MediaStream> _remoteStreams = {}; // peerHex -> their stream
+  final Map<String, double> _volumes = {}; // peerHex -> 0..1 playback volume
   bool _muted = false;
+  bool _deafened = false;
   bool _closed = false;
 
   bool get isMuted => _muted;
+  bool get isDeafened => _deafened;
+
+  /// A peer's playback volume (0..1) — defaults to full.
+  double volumeOf(String peerHex) => _volumes[peerHex] ?? 1.0;
 
   /// How many peers we're hearing.
   int get peerCount => _remotes.length;
@@ -126,6 +133,8 @@ class VoiceSession {
       _remotes[peerHex] = renderer;
     }
     renderer.srcObject = remote;
+    _remoteStreams[peerHex] = remote;
+    await _applyVolume(peerHex); // honour deafen / a prior volume for this peer
     // Cue a join only for peers arriving after the initial mesh-connect burst,
     // so joining a busy call doesn't fire one blip per person already there.
     if (isNew && DateTime.now().difference(_joinedAt).inMilliseconds > 1500) {
@@ -137,6 +146,8 @@ class VoiceSession {
   void _onPeerLeft(String peerHex) {
     final renderer = _remotes.remove(peerHex);
     if (renderer == null) return; // a failed attempt, not an active participant
+    _remoteStreams.remove(peerHex);
+    _volumes.remove(peerHex);
     renderer.srcObject = null;
     unawaited(renderer.dispose());
     unawaited(_playCue(connect: false));
@@ -157,13 +168,46 @@ class VoiceSession {
     }
   }
 
-  /// Mutes/unmutes the mic by toggling the local track.
+  /// Mutes/unmutes your mic.
   void toggleMute() {
     _muted = !_muted;
-    for (final track in _localStream.getAudioTracks()) {
-      track.enabled = !_muted;
+    _applyMic();
+    _onChange();
+  }
+
+  /// Deafens/undeafens: silences everyone (and forces your mic off while
+  /// deafened, Discord-style).
+  void toggleDeafen() {
+    _deafened = !_deafened;
+    _applyMic();
+    for (final peerHex in _remoteStreams.keys) {
+      unawaited(_applyVolume(peerHex));
     }
     _onChange();
+  }
+
+  /// Sets a peer's playback volume (0..1) — 0 mutes just that person.
+  Future<void> setVolume(String peerHex, double volume) async {
+    _volumes[peerHex] = volume;
+    await _applyVolume(peerHex);
+    _onChange();
+  }
+
+  // Your mic is live only when neither muted nor deafened.
+  void _applyMic() {
+    for (final track in _localStream.getAudioTracks()) {
+      track.enabled = !_muted && !_deafened;
+    }
+  }
+
+  Future<void> _applyVolume(String peerHex) async {
+    final stream = _remoteStreams[peerHex];
+    if (stream == null) return;
+    final volume = _deafened ? 0.0 : volumeOf(peerHex);
+    for (final track in stream.getAudioTracks()) {
+      track.enabled = volume > 0; // hard mute at 0 (reliable on the receiver)
+      await Helper.setVolume(volume, track);
+    }
   }
 
   /// Leaves the call: tears down the mesh, releases renderers, stops the mic.

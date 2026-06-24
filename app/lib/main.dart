@@ -541,12 +541,56 @@ class _ChatScreenState extends State<ChatScreen> {
         tooltip: voice.isMuted ? 'Unmute' : 'Mute',
       ),
       IconButton(
+        onPressed: voice.toggleDeafen,
+        icon: Icon(voice.isDeafened ? Icons.headset_off : Icons.headset),
+        tooltip: voice.isDeafened ? 'Undeafen' : 'Deafen',
+      ),
+      IconButton(
         onPressed: () => unawaited(_leaveVoice()),
         icon: const Icon(Icons.call_end),
         color: Theme.of(context).colorScheme.error,
         tooltip: 'Leave voice',
       ),
     ];
+  }
+
+  /// Per-user playback volume (0 mutes just that person).
+  Future<void> _peerVolume(String peerHex, String name) async {
+    final voice = _voice;
+    if (voice == null) return;
+    var volume = voice.volumeOf(peerHex);
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheet) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name, style: Theme.of(context).textTheme.titleSmall),
+                Row(
+                  children: [
+                    const Icon(Icons.volume_mute),
+                    Expanded(
+                      child: Slider(
+                        value: volume,
+                        onChanged: (v) {
+                          setSheet(() => volume = v);
+                          unawaited(voice.setVolume(peerHex, v));
+                        },
+                      ),
+                    ),
+                    const Icon(Icons.volume_up),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// A live strip of who's in the call with speaking indicators — driven by the
@@ -569,29 +613,34 @@ class _ChatScreenState extends State<ChatScreen> {
         runSpacing: 8,
         children: [
           for (final (key, name) in people)
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.mic,
-                  size: 16,
-                  color: voice.speaking(key)
-                      ? Colors.greenAccent
-                      : scheme.outline,
-                ),
-                const SizedBox(width: 4),
-                Text(name, style: Theme.of(context).textTheme.bodySmall),
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 40,
-                  child: LinearProgressIndicator(
-                    value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
-                    minHeight: 4,
-                    backgroundColor: Colors.white24,
-                    color: Colors.greenAccent,
+            InkWell(
+              onTap: key == 'self'
+                  ? null
+                  : () => unawaited(_peerVolume(key, name)),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.mic,
+                    size: 16,
+                    color: voice.speaking(key)
+                        ? Colors.greenAccent
+                        : scheme.outline,
                   ),
-                ),
-              ],
+                  const SizedBox(width: 4),
+                  Text(name, style: Theme.of(context).textTheme.bodySmall),
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    width: 40,
+                    child: LinearProgressIndicator(
+                      value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
+                      minHeight: 4,
+                      backgroundColor: Colors.white24,
+                      color: Colors.greenAccent,
+                    ),
+                  ),
+                ],
+              ),
             ),
         ],
       ),
