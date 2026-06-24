@@ -46,13 +46,31 @@ class HearthApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme =
+        ColorScheme.fromSeed(
+          seedColor: const Color(0xFFF2792B), // ember
+          brightness: Brightness.dark,
+        ).copyWith(
+          // Warm charcoal surfaces for a fireside feel (M3 surfaces run cool).
+          surface: const Color(0xFF1C1714),
+          surfaceContainerLowest: const Color(0xFF120E0B),
+          surfaceContainerLow: const Color(0xFF1C1714),
+          surfaceContainer: const Color(0xFF221B16),
+          surfaceContainerHigh: const Color(0xFF2A221B),
+          surfaceContainerHighest: const Color(0xFF342A21),
+        );
     return MaterialApp(
       title: 'Hearth',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        brightness: Brightness.dark,
-        colorSchemeSeed: const Color(0xFFE25822), // ember orange
+        colorScheme: scheme,
+        scaffoldBackgroundColor: const Color(0xFF16110D),
+        appBarTheme: const AppBarTheme(
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 2,
+        ),
       ),
       home: _Bootstrap(
         keyStore: keyStore,
@@ -838,12 +856,26 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _emptyState(BuildContext context) {
+    final theme = Theme.of(context);
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('No channel open.'),
-          const SizedBox(height: 12),
+          Icon(
+            Icons.local_fire_department,
+            size: 64,
+            color: theme.colorScheme.primary,
+          ),
+          const SizedBox(height: 16),
+          Text('Welcome to Hearth', style: theme.textTheme.headlineSmall),
+          const SizedBox(height: 8),
+          Text(
+            'Create a channel, or join one with an invite.',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 24),
           FilledButton.icon(
             onPressed: () => unawaited(_createChannel()),
             icon: const Icon(Icons.add),
@@ -868,7 +900,9 @@ class _ChatScreenState extends State<ChatScreen> {
     return Drawer(
       child: SafeArea(
         child: ListView(
+          padding: EdgeInsets.zero,
           children: [
+            _brandHeader(),
             _drawerHeader('Channels'),
             for (final s in groups)
               ListTile(
@@ -917,6 +951,48 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _brandHeader() {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            theme.colorScheme.primaryContainer,
+            theme.colorScheme.surfaceContainerLowest,
+          ],
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.local_fire_department,
+            color: theme.colorScheme.primary,
+            size: 28,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Hearth', style: theme.textTheme.titleLarge),
+                Text(
+                  'hearth#${widget.identity.fingerprint}',
+                  style: theme.textTheme.bodySmall,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -1140,6 +1216,30 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// A deterministic warm colour per person, derived from their pubkey.
+  Color _userColor(Uint8List author) {
+    final hue = (author.isNotEmpty ? author[0] : 0) * 360.0 / 256.0;
+    return HSLColor.fromAHSL(1, hue, 0.5, 0.62).toColor();
+  }
+
+  /// A small colour-coded avatar (initial of the display name).
+  Widget _avatar(Uint8List author, {double radius = 16}) {
+    final label = _displayName(author).replaceFirst('hearth#', '');
+    final initial = label.isEmpty ? '?' : label[0].toUpperCase();
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: _userColor(author),
+      child: Text(
+        initial,
+        style: TextStyle(
+          fontSize: radius * 0.85,
+          fontWeight: FontWeight.w600,
+          color: Colors.black87,
+        ),
+      ),
+    );
+  }
+
   Widget _bubble(
     BuildContext context,
     ChannelSession session,
@@ -1147,29 +1247,54 @@ class _ChatScreenState extends State<ChatScreen> {
   ) {
     final mine = listEquals(message.author, widget.identity.publicKey);
     final scheme = Theme.of(context).colorScheme;
-    return Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Card(
-        color: mine ? scheme.primaryContainer : scheme.surfaceContainerHighest,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              GestureDetector(
-                onTap: mine
-                    ? null
-                    : () => unawaited(_peerActions(message.author)),
-                child: Text(
-                  mine ? 'you' : _displayName(message.author),
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-              ),
-              _contentView(context, session, session.contentOf(message)),
-            ],
-          ),
+    const radius = Radius.circular(16);
+    final bubble = Container(
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.of(context).size.width * 0.72,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: mine ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.only(
+          topLeft: radius,
+          topRight: radius,
+          bottomLeft: mine ? radius : Radius.zero,
+          bottomRight: mine ? Radius.zero : radius,
         ),
       ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!mine)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: Text(
+                _displayName(message.author),
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: _userColor(message.author),
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          _contentView(context, session, session.contentOf(message)),
+        ],
+      ),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      child: mine
+          ? Align(alignment: Alignment.centerRight, child: bubble)
+          : Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
+                  onTap: () => unawaited(_peerActions(message.author)),
+                  child: _avatar(message.author),
+                ),
+                const SizedBox(width: 8),
+                Flexible(child: bubble),
+              ],
+            ),
     );
   }
 
