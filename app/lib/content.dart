@@ -64,6 +64,19 @@ class SoundContent extends Content {
   };
 }
 
+/// A signed, self-asserted display name. Not rendered as a message — clients
+/// index it as the *suggested* petname for its author, who can still be named
+/// locally however you like. Self-asserted, so treat it as a suggestion, never
+/// proof of identity (the author's pubkey is the real id).
+class ProfileContent extends Content {
+  const ProfileContent(this.name);
+
+  final String name;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'profile', 'name': name};
+}
+
 /// Parses a payload into [Content], falling back to plain text for unknown or
 /// legacy (pre-envelope) payloads.
 Content parseContent(List<int> payload) {
@@ -83,6 +96,8 @@ Content parseContent(List<int> payload) {
             decoded['name'] as String? ?? 'sound',
             decoded['emoji'] as String? ?? '🔊',
           );
+        case 'profile':
+          return ProfileContent(decoded['name'] as String? ?? '');
       }
     }
   } catch (_) {

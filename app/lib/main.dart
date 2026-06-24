@@ -19,6 +19,7 @@ import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
 import 'media_library.dart';
+import 'profile.dart';
 import 'sound_search.dart';
 import 'starter_sounds.dart';
 import 'voice.dart';
@@ -155,6 +156,10 @@ class _ChatScreenState extends State<ChatScreen> {
   MediaLibrary? _library;
   AudioPlayer? _player;
   VoiceSession? _voice;
+  ProfileStore? _profile;
+  String? _myName;
+  final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
+  final Set<String> _announced = {}; // channels we've published our name into
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
   bool _sending = false;
@@ -173,6 +178,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final registry = widget.autoPoll ? await ChannelRegistry.open() : null;
     final blobStore = widget.autoPoll ? await HiveBlobStore.open() : null;
     final library = widget.autoPoll ? await MediaLibrary.open() : null;
+    final profile = widget.autoPoll ? await ProfileStore.open() : null;
     if (blobStore != null && library != null) {
       await loadStarterSounds(blobStore, library);
     }
@@ -196,6 +202,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _registry = registry;
       _blobStore = blobStore;
       _library = library;
+      _profile = profile;
+      _myName = profile?.name;
       _player = widget.autoPoll ? AudioPlayer() : null;
       _channels = channels;
     });
@@ -211,7 +219,14 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _refresh() async {
     final active = _channels?.active;
     await active?.refreshContent();
-    if (active != null) await _indexLibrary(active);
+    if (active != null) {
+      await _indexLibrary(active);
+      _indexProfiles(active);
+      // Publish our own name into a channel the first time we're active in it.
+      if (_myName != null && _announced.add(active.channelId)) {
+        await _announceName(active);
+      }
+    }
     if (mounted) setState(() {});
   }
 
@@ -236,7 +251,52 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         case TextContent():
           break;
+        case ProfileContent():
+          break;
       }
+    }
+  }
+
+  /// Records each author's latest self-asserted name as a *suggested* petname.
+  void _indexProfiles(ChannelSession session) {
+    for (final message in session.repository.ordered()) {
+      final content = session.contentOf(message);
+      if (content is ProfileContent && content.name.isNotEmpty) {
+        _suggested[hex.encode(message.author)] = content.name;
+      }
+    }
+  }
+
+  /// Publishes our self-asserted name into [session] so members can suggest it.
+  Future<void> _announceName(ChannelSession session) async {
+    final name = _myName;
+    if (name == null) return;
+    final message = await Message.create(
+      author: widget.identity,
+      channel: session.channelId,
+      payload: await session.encodePayload(ProfileContent(name)),
+      prev: session.repository.heads(),
+    );
+    await session.engine.publish(message);
+  }
+
+  /// Sets your display name (a suggestion to others) and re-announces it.
+  Future<void> _setMyName() async {
+    final name = await _promptText(
+      title: 'Your display name',
+      hint: 'what others see (a suggestion they can change)',
+      initial: _myName ?? '',
+      action: 'Save',
+    );
+    if (name == null) return;
+    final trimmed = name.trim();
+    await _profile?.setName(trimmed);
+    _myName = trimmed.isEmpty ? null : trimmed;
+    _announced.clear();
+    if (mounted) setState(() {});
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      if (_myName != null) await _announceName(session);
+      _announced.add(session.channelId);
     }
   }
 
@@ -709,10 +769,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // --- contacts / DMs ---
 
-  /// A peer's petname if you've set one, else their `hearth#fingerprint`.
-  String _displayName(Uint8List author) =>
-      _contacts?.nameFor(hex.encode(author)) ??
-      'hearth#${_fingerprint(author)}';
+  /// What to call someone: your petname, else their self-asserted (suggested)
+  /// name, else their `hearth#fingerprint`.
+  String _displayName(Uint8List author) {
+    final key = hex.encode(author);
+    return _contacts?.nameFor(key) ??
+        _suggested[key] ??
+        'hearth#${_fingerprint(author)}';
+  }
 
   /// Prompts for a local petname for [author] and stores it.
   Future<void> _renameContact(Uint8List author) async {
@@ -720,7 +784,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final name = await _promptText(
       title: 'Name hearth#${_fingerprint(author)}',
       hint: 'petname (only you see this)',
-      initial: _contacts?.nameFor(key) ?? '',
+      initial: _contacts?.nameFor(key) ?? _suggested[key] ?? '',
       action: 'Save',
     );
     if (name == null) return;
@@ -902,7 +966,10 @@ class _ChatScreenState extends State<ChatScreen> {
   );
 
   Widget _messageList(BuildContext context, ChannelSession session) {
-    final messages = session.repository.ordered();
+    final messages = session.repository
+        .ordered()
+        .where((m) => session.contentOf(m) is! ProfileContent)
+        .toList();
     if (messages.isEmpty) {
       return const Center(child: Text('No messages yet — say something.'));
     }
@@ -1015,42 +1082,50 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _brandHeader() {
     final theme = Theme.of(context);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            theme.colorScheme.primaryContainer,
-            theme.colorScheme.surfaceContainerLowest,
+    return InkWell(
+      onTap: () => unawaited(_setMyName()),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              theme.colorScheme.primaryContainer,
+              theme.colorScheme.surfaceContainerLowest,
+            ],
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.local_fire_department,
+              color: theme.colorScheme.primary,
+              size: 28,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Hearth', style: theme.textTheme.titleLarge),
+                  Text(
+                    _myName ?? 'Tap to set your name',
+                    style: theme.textTheme.bodySmall,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              Icons.edit_outlined,
+              size: 16,
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
           ],
         ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.local_fire_department,
-            color: theme.colorScheme.primary,
-            size: 28,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text('Hearth', style: theme.textTheme.titleLarge),
-                Text(
-                  'hearth#${widget.identity.fingerprint}',
-                  style: theme.textTheme.bodySmall,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1076,6 +1151,8 @@ class _ChatScreenState extends State<ChatScreen> {
         name,
         emoji,
       ),
+      // Profile claims aren't shown in the timeline (filtered in _messageList).
+      ProfileContent() => const SizedBox.shrink(),
     };
   }
 

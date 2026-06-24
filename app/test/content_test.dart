@@ -33,6 +33,12 @@ void main() {
       expect(parsed.emoji, '📯');
     });
 
+    test('profile round-trips', () {
+      final parsed = parseContent(const ProfileContent('Alice').encode());
+      expect(parsed, isA<ProfileContent>());
+      expect((parsed as ProfileContent).name, 'Alice');
+    });
+
     test('legacy plain-text payloads fall back to text', () {
       final parsed = parseContent(utf8.encode('just raw text'));
       expect(parsed, isA<TextContent>());
