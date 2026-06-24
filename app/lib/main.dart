@@ -549,6 +549,55 @@ class _ChatScreenState extends State<ChatScreen> {
     ];
   }
 
+  /// A live strip of who's in the call with speaking indicators — driven by the
+  /// 250ms level poll, so the mic lights + bars move as people talk. Lets you
+  /// verify audio is flowing without speakers.
+  Widget _voiceBar() {
+    final voice = _voice!;
+    final scheme = Theme.of(context).colorScheme;
+    final people = <(String, String)>[
+      ('self', voice.isMuted ? 'You (muted)' : 'You'),
+      for (final peerHex in voice.peerHexes)
+        (peerHex, _displayName(Uint8List.fromList(hex.decode(peerHex)))),
+    ];
+    return Container(
+      width: double.infinity,
+      color: scheme.surfaceContainerHighest,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: Wrap(
+        spacing: 16,
+        runSpacing: 8,
+        children: [
+          for (final (key, name) in people)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.mic,
+                  size: 16,
+                  color: voice.speaking(key)
+                      ? Colors.greenAccent
+                      : scheme.outline,
+                ),
+                const SizedBox(width: 4),
+                Text(name, style: Theme.of(context).textTheme.bodySmall),
+                const SizedBox(width: 6),
+                SizedBox(
+                  width: 40,
+                  child: LinearProgressIndicator(
+                    value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
+                    minHeight: 4,
+                    backgroundColor: Colors.white24,
+                    color: Colors.greenAccent,
+                  ),
+                ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
   // --- contacts / DMs ---
 
   /// A peer's petname if you've set one, else their `hearth#fingerprint`.
@@ -707,6 +756,7 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 Column(
                   children: [
+                    if (_voice?.channelId == session.channelId) _voiceBar(),
                     Expanded(child: _messageList(context, session)),
                     _composer(context, session),
                   ],

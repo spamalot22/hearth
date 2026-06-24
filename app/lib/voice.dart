@@ -32,6 +32,8 @@ class VoiceSession {
   // peerHex -> a renderer bound to their remote stream (drives web playback).
   final Map<String, RTCVideoRenderer> _remotes = {};
   StreamSubscription<void>? _sub;
+  Timer? _levelTimer;
+  final Map<String, double> _levels = {}; // 'self' or peerHex -> 0..1 level
   bool _muted = false;
   bool _closed = false;
 
@@ -39,6 +41,15 @@ class VoiceSession {
 
   /// How many peers we're hearing.
   int get peerCount => _remotes.length;
+
+  /// Connected peers, by id, for the participants list.
+  List<String> get peerHexes => _remotes.keys.toList();
+
+  /// Latest mic level (0..1) for a participant — 'self' for you, else a peerHex.
+  double levelOf(String key) => _levels[key] ?? 0;
+
+  /// Whether that participant is speaking right now.
+  bool speaking(String key) => levelOf(key) > 0.02;
 
   /// The remote renderers — the UI mounts a 0-size view per renderer so the
   /// browser actually plays the audio.
@@ -69,8 +80,41 @@ class VoiceSession {
     session = VoiceSession._(channelId, mesh, stream, onChange);
     // The mesh only starts announcing once peerConnected is listened to.
     session._sub = mesh.peerConnected.listen((_) {});
+    session._levelTimer = Timer.periodic(
+      const Duration(milliseconds: 250),
+      (_) => unawaited(session._pollLevels()),
+    );
     unawaited(session._playCue(connect: true)); // you joined
     return session;
+  }
+
+  /// Polls WebRTC stats for each connection's audio level — a remote's level
+  /// from its inbound-rtp report, ours from the media-source report — so the UI
+  /// can show who's speaking.
+  Future<void> _pollLevels() async {
+    if (_closed) return;
+    final next = <String, double>{};
+    var self = 0.0;
+    for (final entry in _mesh.connections.entries) {
+      try {
+        for (final report in await entry.value.getStats()) {
+          final level = report.values['audioLevel'];
+          if (level is! num) continue;
+          if (report.type == 'inbound-rtp') {
+            next[entry.key] = level.toDouble();
+          } else if (report.type == 'media-source') {
+            self = level.toDouble();
+          }
+        }
+      } catch (_) {
+        // A transient stats failure just skips this tick.
+      }
+    }
+    next['self'] = self;
+    _levels
+      ..clear()
+      ..addAll(next);
+    _onChange();
   }
 
   Future<void> _onRemote(String peerHex, MediaStream remote) async {
@@ -127,6 +171,7 @@ class VoiceSession {
     if (_closed) return;
     _closed = true;
     await _sub?.cancel();
+    _levelTimer?.cancel();
     await _mesh.close();
     for (final renderer in _remotes.values) {
       renderer.srcObject = null;

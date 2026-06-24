@@ -92,6 +92,13 @@ class WebRtcMesh {
   /// Peers we currently hold a connection (or attempt) for.
   Iterable<String> get peers => _links.keys;
 
+  /// Connected peers' underlying connections (peerHex → pc) — for reading voice
+  /// audio-level stats.
+  Map<String, RTCPeerConnection> get connections => {
+    for (final entry in _links.entries)
+      if (entry.value.connection != null) entry.key: entry.value.connection!,
+  };
+
   void _start() {
     unawaited(_announce());
     _announceTimer ??= Timer.periodic(
@@ -277,6 +284,9 @@ class _PeerLink implements FrameChannel {
 
   @override
   Stream<SyncFrame> get frames => _frames.stream;
+
+  /// The underlying peer connection — exposed for voice audio-level stats.
+  RTCPeerConnection? get connection => _pc;
 
   @override
   void send(SyncFrame frame) {
