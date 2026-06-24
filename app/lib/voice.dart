@@ -1,0 +1,186 @@
+import 'dart:async';
+import 'dart:math';
+import 'dart:typed_data';
+
+import 'package:audioplayers/audioplayers.dart';
+import 'package:core/core.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+import 'webrtc_mesh.dart';
+
+/// A live voice call in a channel: a second [WebRtcMesh] on a `voice:<channelId>`
+/// signalling namespace, carrying the mic. The mic track is added before the
+/// offer, so audio is in the initial SDP — no renegotiation needed. Gossip's
+/// mesh is untouched.
+///
+/// Join/leave **cues** are played locally by every client when it detects a peer
+/// arriving or leaving (a rising blip / falling blip), so the whole call hears
+/// someone come and go — Discord-style.
+class VoiceSession {
+  VoiceSession._(this.channelId, this._mesh, this._localStream, this._onChange);
+
+  /// The channel this call belongs to.
+  final String channelId;
+
+  final WebRtcMesh _mesh;
+  final MediaStream _localStream;
+  final void Function() _onChange;
+
+  final AudioPlayer _cuePlayer = AudioPlayer();
+  final DateTime _joinedAt = DateTime.now();
+
+  // peerHex -> a renderer bound to their remote stream (drives web playback).
+  final Map<String, RTCVideoRenderer> _remotes = {};
+  StreamSubscription<void>? _sub;
+  bool _muted = false;
+  bool _closed = false;
+
+  bool get isMuted => _muted;
+
+  /// How many peers we're hearing.
+  int get peerCount => _remotes.length;
+
+  /// The remote renderers — the UI mounts a 0-size view per renderer so the
+  /// browser actually plays the audio.
+  Iterable<RTCVideoRenderer> get remoteRenderers => _remotes.values;
+
+  /// Requests the mic and joins [channelId]'s voice mesh. Throws if mic access
+  /// is denied.
+  static Future<VoiceSession> join({
+    required String channelId,
+    required Identity identity,
+    required Uri relayUrl,
+    required void Function() onChange,
+  }) async {
+    final stream = await navigator.mediaDevices.getUserMedia({
+      'audio': true,
+      'video': false,
+    });
+    late final VoiceSession session;
+    final mesh = WebRtcMesh(
+      baseUrl: relayUrl,
+      channel: 'voice:$channelId',
+      identity: identity,
+      localStream: stream,
+      onRemoteStream: (peerHex, remote) =>
+          unawaited(session._onRemote(peerHex, remote)),
+      onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),
+    );
+    session = VoiceSession._(channelId, mesh, stream, onChange);
+    // The mesh only starts announcing once peerConnected is listened to.
+    session._sub = mesh.peerConnected.listen((_) {});
+    unawaited(session._playCue(connect: true)); // you joined
+    return session;
+  }
+
+  Future<void> _onRemote(String peerHex, MediaStream remote) async {
+    if (_closed) return;
+    final isNew = !_remotes.containsKey(peerHex);
+    final renderer = _remotes[peerHex] ?? RTCVideoRenderer();
+    if (isNew) {
+      await renderer.initialize();
+      _remotes[peerHex] = renderer;
+    }
+    renderer.srcObject = remote;
+    // Cue a join only for peers arriving after the initial mesh-connect burst,
+    // so joining a busy call doesn't fire one blip per person already there.
+    if (isNew && DateTime.now().difference(_joinedAt).inMilliseconds > 1500) {
+      unawaited(_playCue(connect: true));
+    }
+    _onChange();
+  }
+
+  void _onPeerLeft(String peerHex) {
+    final renderer = _remotes.remove(peerHex);
+    if (renderer == null) return; // a failed attempt, not an active participant
+    renderer.srcObject = null;
+    unawaited(renderer.dispose());
+    unawaited(_playCue(connect: false));
+    _onChange();
+  }
+
+  Future<void> _playCue({required bool connect}) async {
+    try {
+      await _cuePlayer.stop();
+      await _cuePlayer.play(
+        BytesSource(
+          connect ? _connectTone : _disconnectTone,
+          mimeType: 'audio/wav',
+        ),
+      );
+    } catch (_) {
+      // A missed cue shouldn't disrupt the call.
+    }
+  }
+
+  /// Mutes/unmutes the mic by toggling the local track.
+  void toggleMute() {
+    _muted = !_muted;
+    for (final track in _localStream.getAudioTracks()) {
+      track.enabled = !_muted;
+    }
+    _onChange();
+  }
+
+  /// Leaves the call: tears down the mesh, releases renderers, stops the mic.
+  Future<void> leave() async {
+    if (_closed) return;
+    _closed = true;
+    await _sub?.cancel();
+    await _mesh.close();
+    for (final renderer in _remotes.values) {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    }
+    _remotes.clear();
+    for (final track in _localStream.getTracks()) {
+      await track.stop();
+    }
+    await _localStream.dispose();
+    await _cuePlayer.dispose();
+    _onChange();
+  }
+
+  // Short generated blips so there's no asset to ship — swappable later.
+  static final Uint8List _connectTone = _toneWav(523.25, 784.0); // C5 → G5
+  static final Uint8List _disconnectTone = _toneWav(784.0, 392.0); // G5 → G4
+}
+
+/// A tiny 16-bit-PCM mono WAV that sweeps [startHz]→[endHz] under a smooth
+/// envelope (no clicks). Used for the join/leave blips.
+Uint8List _toneWav(
+  double startHz,
+  double endHz, {
+  int ms = 170,
+  int rate = 44100,
+}) {
+  final n = (rate * ms / 1000).round();
+  final b = BytesBuilder();
+  void str(String s) => b.add(s.codeUnits);
+  void u32(int v) =>
+      b.add([v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]);
+  void u16(int v) => b.add([v & 0xff, (v >> 8) & 0xff]);
+
+  final dataLen = n * 2;
+  str('RIFF');
+  u32(36 + dataLen);
+  str('WAVE');
+  str('fmt ');
+  u32(16);
+  u16(1); // PCM
+  u16(1); // mono
+  u32(rate);
+  u32(rate * 2); // byte rate
+  u16(2); // block align
+  u16(16); // bits/sample
+  str('data');
+  u32(dataLen);
+  for (var i = 0; i < n; i++) {
+    final p = i / n;
+    final freq = startHz + (endHz - startHz) * p;
+    final env = sin(pi * p); // 0 → 1 → 0
+    final sample = (sin(2 * pi * freq * i / rate) * env * 0.35 * 32767).round();
+    u16(sample & 0xffff);
+  }
+  return b.toBytes();
+}

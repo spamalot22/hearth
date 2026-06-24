@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
 import 'blob_store_hive.dart';
@@ -20,6 +21,7 @@ import 'key_store.dart';
 import 'media_library.dart';
 import 'sound_search.dart';
 import 'starter_sounds.dart';
+import 'voice.dart';
 
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -133,6 +135,7 @@ class _ChatScreenState extends State<ChatScreen> {
   BlobStore? _blobStore;
   MediaLibrary? _library;
   AudioPlayer? _player;
+  VoiceSession? _voice;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
   bool _sending = false;
@@ -221,6 +224,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     unawaited(_channels?.close());
+    unawaited(_voice?.leave());
     unawaited(_player?.dispose());
     _input.dispose();
     super.dispose();
@@ -476,6 +480,75 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // --- voice ---
+
+  /// Joins (or switches to) voice in [channelId], requesting the mic.
+  Future<void> _joinVoice(String channelId) async {
+    if (_voice != null) await _leaveVoice();
+    try {
+      _voice = await VoiceSession.join(
+        channelId: channelId,
+        identity: widget.identity,
+        relayUrl: widget.relayUrl,
+        onChange: _voiceChanged,
+      );
+      if (mounted) setState(() {});
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'microphone access is needed for voice');
+      }
+    }
+  }
+
+  void _voiceChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _leaveVoice() async {
+    final voice = _voice;
+    _voice = null;
+    if (mounted) setState(() {});
+    await voice?.leave();
+  }
+
+  /// App-bar voice controls: join, or — in a call — a participant count, mute,
+  /// and leave.
+  List<Widget> _voiceActions(ChannelSession session) {
+    final voice = _voice;
+    if (voice == null) {
+      return [
+        IconButton(
+          onPressed: () => unawaited(_joinVoice(session.channelId)),
+          icon: const Icon(Icons.call),
+          tooltip: 'Join voice',
+        ),
+      ];
+    }
+    return [
+      Center(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.graphic_eq, size: 18),
+            const SizedBox(width: 4),
+            Text('${voice.peerCount + 1}'),
+          ],
+        ),
+      ),
+      IconButton(
+        onPressed: voice.toggleMute,
+        icon: Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
+        tooltip: voice.isMuted ? 'Unmute' : 'Mute',
+      ),
+      IconButton(
+        onPressed: () => unawaited(_leaveVoice()),
+        icon: const Icon(Icons.call_end),
+        color: Theme.of(context).colorScheme.error,
+        tooltip: 'Leave voice',
+      ),
+    ];
+  }
+
   // --- contacts / DMs ---
 
   /// A peer's petname if you've set one, else their `hearth#fingerprint`.
@@ -617,6 +690,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
+          if (session != null) ..._voiceActions(session),
           if (session != null && !session.isDm)
             IconButton(
               onPressed: () => unawaited(_shareInvite(session.channelId)),
@@ -629,10 +703,24 @@ class _ChatScreenState extends State<ChatScreen> {
       drawer: _drawer(context),
       body: session == null
           ? _emptyState(context)
-          : Column(
+          : Stack(
               children: [
-                Expanded(child: _messageList(context, session)),
-                _composer(context, session),
+                Column(
+                  children: [
+                    Expanded(child: _messageList(context, session)),
+                    _composer(context, session),
+                  ],
+                ),
+                // Hidden 1x1 sinks so the browser plays each remote's audio.
+                for (final renderer
+                    in _voice?.remoteRenderers ?? const <RTCVideoRenderer>[])
+                  Positioned(
+                    left: 0,
+                    bottom: 0,
+                    width: 1,
+                    height: 1,
+                    child: RTCVideoView(renderer),
+                  ),
               ],
             ),
     );

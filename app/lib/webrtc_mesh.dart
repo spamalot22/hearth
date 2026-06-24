@@ -26,6 +26,9 @@ class WebRtcMesh {
     required this.baseUrl,
     required this.channel,
     required this.identity,
+    this.localStream,
+    this.onRemoteStream,
+    this.onPeerLeft,
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
@@ -47,6 +50,18 @@ class WebRtcMesh {
 
   /// This node's identity — signs our signalling so peers can authenticate it.
   final Identity identity;
+
+  /// Optional local media (the mic) sent to every peer — set for a voice mesh,
+  /// null for the gossip mesh. Added to each connection *before* the offer, so
+  /// the audio rides in the initial SDP and no renegotiation is needed.
+  final MediaStream? localStream;
+
+  /// Called with each peer's remote stream (their mic), for voice playback.
+  final void Function(String peerHex, MediaStream stream)? onRemoteStream;
+
+  /// Called with a peer's id when its connection drops — for voice, to play a
+  /// disconnect cue and release their audio.
+  final void Function(String peerHex)? onPeerLeft;
 
   /// Our own public key (hex) — our peer id in the mesh.
   late final String selfPubkeyHex = identity.publicKeyHex;
@@ -173,9 +188,14 @@ class WebRtcMesh {
       peerHex: peerHex,
       initiator: initiator,
       iceServers: _iceServers,
+      localStream: localStream,
+      onRemoteStream: onRemoteStream,
       onSignal: (kind, data) => _sendSignal(peerHex, kind, data),
       onOpen: _emitPeer,
-      onClosed: () => _links.remove(peerHex),
+      onClosed: () {
+        _links.remove(peerHex);
+        onPeerLeft?.call(peerHex);
+      },
     );
     _links[peerHex] = link;
     return link;
@@ -234,11 +254,15 @@ class _PeerLink implements FrameChannel {
     required this.onSignal,
     required this.onOpen,
     required this.onClosed,
+    this.localStream,
+    this.onRemoteStream,
   });
 
   final String peerHex;
   final bool initiator;
   final List<Map<String, dynamic>> _iceServers;
+  final MediaStream? localStream;
+  final void Function(String peerHex, MediaStream stream)? onRemoteStream;
   final void Function(String kind, Object? data) onSignal;
   final void Function(_PeerLink link) onOpen;
   final void Function() onClosed;
@@ -281,6 +305,19 @@ class _PeerLink implements FrameChannel {
         unawaited(dispose());
       }
     };
+    // Voice: attach our mic before the offer/answer (so the audio is in the
+    // initial SDP), and surface the peer's remote audio for playback.
+    final stream = localStream;
+    if (stream != null) {
+      for (final track in stream.getTracks()) {
+        await pc.addTrack(track, stream);
+      }
+      pc.onTrack = (event) {
+        if (event.streams.isNotEmpty) {
+          onRemoteStream?.call(peerHex, event.streams.first);
+        }
+      };
+    }
     _pc = pc;
     return pc;
   }
