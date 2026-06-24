@@ -533,3 +533,15 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   in 2026 (no new keys from 2026-01-13, service ends 2026-06-30) — and
   **Freesound** for sounds, **CC0-filtered** so results are safe to redistribute
   P2P. Each searched clip is fetched once and blob-ified on send.
+- **2026-06-24** — **Self-asserted display names → suggested petnames.** Users set
+  their own name, broadcast as signed `ProfileContent` messages (gossiped,
+  never rendered in the timeline); clients index author→latest claim as a
+  *suggestion*. Used as the display name when no petname is set (the pubkey-derived
+  avatar stays the spoof-resistant cue), pre-filled when adding/renaming a contact,
+  and offered in a per-channel **bulk-add** pick-list (members who've shared a name;
+  tick to add). Self-asserted ⇒ a suggestion, never identity — anyone can claim any
+  name, so trust stays on the pubkey + your local petname. **Channel names stay
+  force-adopted from the invite** (creator authoritative, no local rename) —
+  deliberately *unlike* user names. Also: voice chat (per-channel WebRTC audio mesh,
+  mute/deafen/per-user volume, join/leave cues, speaking indicators) and a
+  warm-hearth UI with a right-hand channel control panel shipped this stretch.
