@@ -518,6 +518,13 @@ class _ChatScreenState extends State<ChatScreen> {
     await _registry?.save(channel);
     if (mounted) setState(() => _groups[channel.id] = channel);
     await _channels?.openGroup(channel.id, channel.key);
+    // Once history has had a moment to sync, offer to add known members.
+    Future.delayed(const Duration(seconds: 3), () {
+      final active = _channels?.active;
+      if (mounted && active != null && active.channelId == channel.id) {
+        unawaited(_addMembers(active, auto: true));
+      }
+    });
   }
 
   /// Shows the invite code for a group channel, with a copy button.
@@ -625,6 +632,12 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () => unawaited(_shareInvite(session.channelId)),
               icon: const Icon(Icons.person_add_alt_1),
               label: const Text('Invite'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => unawaited(_addMembers(session)),
+              icon: const Icon(Icons.group_add_outlined),
+              label: const Text('Add members'),
             ),
           ],
           const Divider(height: 28),
@@ -856,6 +869,71 @@ class _ChatScreenState extends State<ChatScreen> {
     if (chosenHex != null) {
       await _channels?.openDm(hex.decode(chosenHex));
     }
+  }
+
+  /// Offers to add the channel's members (those who've shared a name) to
+  /// contacts with their suggested petnames — you tick who; nothing is added
+  /// without confirming. [auto] (used right after joining) stays silent when
+  /// there's no one new yet.
+  Future<void> _addMembers(ChannelSession session, {bool auto = false}) async {
+    final self = hex.encode(widget.identity.publicKey);
+    final members = <String, String>{}; // pubkeyHex -> suggested name
+    for (final message in session.repository.ordered()) {
+      final key = hex.encode(message.author);
+      if (key == self || _contacts?.nameFor(key) != null) continue;
+      final suggested = _suggested[key];
+      if (suggested != null) members[key] = suggested;
+    }
+    if (members.isEmpty) {
+      if (!auto && mounted) {
+        setState(() => _error = 'no new named members to add yet');
+      }
+      return;
+    }
+    final selected = {for (final key in members.keys) key: true};
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheet) => AlertDialog(
+          title: const Text('Add members to contacts'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                for (final entry in members.entries)
+                  CheckboxListTile(
+                    value: selected[entry.key],
+                    onChanged: (v) =>
+                        setSheet(() => selected[entry.key] = v ?? false),
+                    title: Text(entry.value),
+                    subtitle: Text(
+                      'hearth#${_fingerprint(Uint8List.fromList(hex.decode(entry.key)))}',
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Not now'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Add selected'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (confirmed != true) return;
+    for (final entry in members.entries) {
+      if (selected[entry.key] == true) {
+        await _contacts?.setName(entry.key, entry.value);
+      }
+    }
+    if (mounted) setState(() {});
   }
 
   /// A reusable single-field prompt.
