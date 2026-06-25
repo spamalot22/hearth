@@ -20,6 +20,7 @@ import 'group_channel.dart';
 import 'key_store.dart';
 import 'media_library.dart';
 import 'profile.dart';
+import 'settings.dart';
 import 'sound_search.dart';
 import 'starter_sounds.dart';
 import 'voice.dart';
@@ -160,6 +161,8 @@ class _ChatScreenState extends State<ChatScreen> {
   AudioPlayer? _player;
   VoiceSession? _voice;
   ProfileStore? _profile;
+  SettingsStore? _settings;
+  late Uri _relayUrl = widget.relayUrl;
   String? _myName;
   final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
   final Set<String> _announced = {}; // channels we've published our name into
@@ -190,12 +193,21 @@ class _ChatScreenState extends State<ChatScreen> {
     final blobStore = widget.autoPoll ? await HiveBlobStore.open() : null;
     final library = widget.autoPoll ? await MediaLibrary.open() : null;
     final profile = widget.autoPoll ? await ProfileStore.open() : null;
+    final settings = widget.autoPoll ? await SettingsStore.open() : null;
+    _settings = settings;
+    final savedRelay = settings?.relayUrl;
+    if (savedRelay != null) {
+      final parsed = Uri.tryParse(savedRelay);
+      if (parsed != null && parsed.hasScheme && parsed.hasAuthority) {
+        _relayUrl = parsed;
+      }
+    }
     if (blobStore != null && library != null) {
       await loadStarterSounds(blobStore, library);
     }
     final channels = ChannelManager(
       identity: widget.identity,
-      relayUrl: widget.relayUrl,
+      relayUrl: _relayUrl,
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: blobStore,
@@ -473,6 +485,42 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Edits the relay URL (the rendezvous + media-proxy endpoint). Persisted; open
+  /// channels keep using the old one until you restart.
+  Future<void> _setRelayUrl() async {
+    final entered = await _promptText(
+      title: 'Relay server',
+      hint: 'https://relay.example.com',
+      initial: _relayUrl.toString(),
+      action: 'Save',
+    );
+    if (entered == null) return;
+    final trimmed = entered.trim();
+    final parsed = Uri.tryParse(trimmed);
+    if (trimmed.isEmpty ||
+        parsed == null ||
+        !parsed.hasScheme ||
+        !parsed.hasAuthority) {
+      if (mounted) setState(() => _error = 'invalid relay URL');
+      return;
+    }
+    await _settings?.setRelayUrl(trimmed);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Relay saved'),
+        content: Text('Restart Hearth to connect via\n$trimmed'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     unawaited(_channels?.close());
@@ -494,7 +542,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendGif() async {
     final store = _blobStore;
     if (store == null) return;
-    final url = await pickGif(context, widget.relayUrl);
+    final url = await pickGif(context, _relayUrl);
     if (url == null) return;
     try {
       final res = await http.get(Uri.parse(url));
@@ -581,7 +629,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _searchSound() async {
     final store = _blobStore;
     if (store == null) return;
-    final picked = await pickSound(context, widget.relayUrl);
+    final picked = await pickSound(context, _relayUrl);
     if (picked == null) return;
     try {
       final res = await http.get(Uri.parse(picked.url));
@@ -822,7 +870,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _voice = await VoiceSession.join(
         channelId: channelId,
         identity: widget.identity,
-        relayUrl: widget.relayUrl,
+        relayUrl: _relayUrl,
         onChange: _voiceChanged,
       );
       if (mounted) setState(() {});
@@ -1468,6 +1516,20 @@ class _ChatScreenState extends State<ChatScreen> {
               onTap: () {
                 Navigator.pop(context);
                 unawaited(_restoreIdentity());
+              },
+            ),
+            _drawerHeader('Relay'),
+            ListTile(
+              leading: const Icon(Icons.dns_outlined),
+              title: const Text('Relay server'),
+              subtitle: Text(
+                _relayUrl.toString(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_setRelayUrl());
               },
             ),
           ],
