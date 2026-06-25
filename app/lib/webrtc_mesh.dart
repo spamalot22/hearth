@@ -75,6 +75,9 @@ class WebRtcMesh {
   final http.Client _client;
   final List<Map<String, dynamic>> _iceServers;
   final Map<String, _PeerLink> _links = {};
+  // Per-peer reconnect backoff: after a failure, don't re-offer to a peer until
+  // this time, so a flapping peer doesn't thrash the announce loop.
+  final Map<String, DateTime> _backoffUntil = {};
 
   late final StreamController<FrameChannel> _peerConnected =
       StreamController<FrameChannel>.broadcast(onListen: _start);
@@ -166,6 +169,8 @@ class WebRtcMesh {
   void _maybeInitiate(String peerHex) {
     if (_closed || _links.containsKey(peerHex)) return;
     if (selfPubkeyHex.compareTo(peerHex) <= 0) return; // they offer to us
+    final until = _backoffUntil[peerHex];
+    if (until != null && DateTime.now().isBefore(until)) return; // backing off
     final link = _createLink(peerHex, initiator: true);
     unawaited(link.start());
   }
@@ -201,6 +206,9 @@ class WebRtcMesh {
       onOpen: _emitPeer,
       onClosed: () {
         _links.remove(peerHex);
+        _backoffUntil[peerHex] = DateTime.now().add(
+          const Duration(seconds: 10),
+        );
         onPeerLeft?.call(peerHex);
       },
     );
@@ -209,6 +217,7 @@ class WebRtcMesh {
   }
 
   void _emitPeer(_PeerLink link) {
+    _backoffUntil.remove(link.peerHex); // connected — reset its backoff
     if (!_closed && !_peerConnected.isClosed) _peerConnected.add(link);
   }
 
