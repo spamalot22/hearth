@@ -60,9 +60,9 @@ _Status: living document. Last updated: 2026-06-21._
 | Core logic (identity, message DAG, sync) | **Dart**, isolated behind an interface | ✅ decided |
 | Crypto (signing) | **Ed25519** — `cryptography` (Dart client) / `@noble/ed25519` (TS backend) | ✅ decided |
 | Real-time transport (P2P) | **WebRTC** (`flutter_webrtc`) data channels + media | ✅ decided |
-| Backend (rendezvous + push) | **Firebase**: Cloud Functions (**TypeScript**) + **Firestore** + **FCM**, free tier | ✅ decided |
-| Backend framework / tooling | **Hono** in an HTTP Cloud Function · **firebase-admin** · **Firebase CLI** + Emulator Suite | ✅ decided |
-| TURN relay (NAT fallback) | **coturn**, self-hosted **Docker** — optional | ✅ decided |
+| Backend (cold-start rendezvous) | **Self-hosted Hono relay** (TypeScript, Docker, in-memory, no DB) — pubkey signalling mailbox + media proxies; **tunnelled** (Cloudflare Tunnel), not port-forwarded | 🔄 revised — was Firebase (see Rendezvous & Deployment) |
+| Backend framework / tooling | **Hono** · Docker Compose (the IaC) · **GitHub Actions on a version tag → GHCR**, box pulls | ✅ decided |
+| TURN relay (NAT fallback) | **Deferred** — managed (Cloudflare/Metered) or coturn on an isolated VPS when needed; never home-hosted | ✅ decided |
 | E2E encryption (default) | DMs **sealed box** (X25519, next); groups need membership → **MLS (RFC 9420)** for forward secrecy / rotation (likely Rust `openmls`) | 🔜 next |
 | Heavy P2P (DHT, hole-punching) | **libp2p** — deferred; Rust via `flutter_rust_bridge` if/when needed | ⏳ deferred |
 
@@ -112,26 +112,23 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
 │
 └─▶ rendezvous only — never a source of truth
         │
-   backend/  (TypeScript · Firebase Cloud Functions + Firestore + FCM)
-        default:   your Firebase project (free tier)
-        self-host: run the same Hono app as a container, off-Firebase
-        discovery   pubkey → last-seen presence
-        signaling   relays WebRTC offer / answer / ICE
-        relay       offline encrypted message hold
-        push        FCM sender (firebase-admin)
-        ── HTTP contract (pluggable) · Firestore TTL · stores NO chat history ──
+   backend/  (TypeScript · Hono · self-hosted Docker · tunnelled · in-memory)
+        cold-start  pubkey-addressed signalling mailbox (offer/answer/ICE)
+        media       GIF/sound search proxies (server-side API keys)
+        ── only hit on cold start; steady-state presence/peers/msgs are P2P ──
+        ── pluggable URL (rides in invite) · holds NO plaintext / history ──
         │
-   coturn  (Docker · self-hosted · OPTIONAL)
-        TURN relay for the ~15% behind symmetric NAT — not serverless-able
+   TURN  (deferred · managed or isolated VPS · NEVER home-hosted)
+        relays media for the ~15% symmetric-NAT↔symmetric-NAT pairs
 ```
 
 ### Repo layout (polyglot monorepo)
 ```
 /core      Dart package, no Flutter — protocol, identity, DAG (shared by app)
 /app       Flutter app (depends on core)        ── Dart pub workspace ──┘
-/backend   TypeScript — Hono app deployed as a Firebase Cloud Function (HTTP)
-           firebase.json + .firebaserc at repo root · Firestore rules/indexes
-           (coturn lives as a docker-compose + turnserver.conf, added Phase 3)
+/backend   TypeScript — Hono relay; Dockerfile + docker-compose.yml (the IaC),
+           tunnelled (Cloudflare Tunnel); shipped via GitHub Actions on a tag → GHCR
+           (TURN, when needed, is managed/VPS — not in this repo's deploy)
 ```
 
 ### The client/backend relationship (important)
@@ -161,74 +158,87 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
   holder (and for push). Caveat: a carrier still learns it holds a message authored
   by A; hiding the recipient is a later sealed-sender step.
 
-### Relay discovery & resilience (multi-relay)
+### Rendezvous & connectivity (server-minimal, contact-graph)
 
-The relay is a **disposable hint, not the channel.** A channel's identity is
-`{id, key}` + each member's local history — none of it depends on any relay.
-Losing relays never loses a channel; it only makes the rendezvous *pointer* stale
-until refreshed.
+**Principle: the server is a cold-start bootstrap, not a participant.** Once a peer
+has *any* live P2P link, the backend is out of the loop — messages, presence, peer
+discovery and address updates all flow over the mesh. The happy path (any peer
+reachable) touches **no server**; a server outage only blocks the narrow "came
+online and literally nobody is reachable" cold start.
 
-**Two relay roles, chosen differently:**
-- **Signalling (rendezvous)** must be *shared* by a channel's peers, so it belongs
-  to the **channel**: relay URLs ride in the **invite** (`{id, key, name,
-  relays:[…]}`); joiners inherit them; list several for failover (announce on all,
-  connect via whichever brokers the handshake first).
-- **Services (GIF search, push)** are *stateless* calls that needn't match anyone,
-  so they can use **any capable relay**, not just one. The client picks a service
-  relay **trust-ranked**: your **home/trusted relays first**, then other known
-  relays that *advertise* the capability, then degrade (GIF → paste-a-URL). "Which
-  Tenor key" = whichever relay answers — independent of the channel. Caveat:
-  whatever relay you query *sees the query* (search terms), so rank by trust, not
-  just health; could be a user setting ("home relay only" vs "any capable").
+**Identity-addressed, contact-scoped — no channel-wide presence, no strangers.** We
+never broadcast presence to a channel or track strangers; each peer is reached by
+its **pubkey**, and you only care about your **contacts'** presence.
 
-**Fallback ladder** (each rung independently shippable; more rungs = harder to
-strand): invite relays → learned relays (peer-exchange) → app default/seed relays
-→ LAN/mDNS → **DHT (libp2p)** → out-of-band re-invite (re-share the same `{id,key}`
-with a fresh relay). You *cannot* auto-discover a relay you have no pointer to and
-no surviving rendezvous to learn it from — the goal is never having *zero* live
-rungs, not magic.
+**Re-establishing a connection — the ladder, cheapest first:**
+1. **Cached last-known candidates → direct reconnect.** Works for peers with a
+   stable reachable endpoint (static IP / port-forward / non-symmetric NAT with a
+   live mapping). Free, instant, no server. *(Caveat: a NAT port mapping is
+   ephemeral and often symmetric, so a cached address is frequently a dead door —
+   this rung succeeds for the minority, not everyone.)*
+2. **Punch via an online mutual contact.** Once you hold *one* live link, ask that
+   peer for everyone's *current* candidates and coordinate a simultaneous
+   hole-punch (peer-exchange). Reaches the rest of your graph with no server.
+3. **Cold-start mailbox (server)** — only when nothing above is reachable: drop a
+   signed offer in the peer's **pubkey-addressed mailbox** to get your *first* live
+   link, then #1/#2 take over. The only server signalling, and brief — **stop
+   polling once connected; no steady-state heartbeat.**
+4. **TURN** — symmetric-NAT↔symmetric-NAT pairs can't go direct at all; their media
+   must be relayed. Deferred (a minority); managed/VPS-hosted when needed, **never
+   self-hosted at home** (see Deployment).
 
-**Per-relay directory (Phase 3 — build thin; the DHT subsumes much of it):**
-- Each client keeps a local set of known relays — `{relay-id, url(s),
-  lastSeenAlive, health, capabilities, source}` — grown from invites +
-  peer-exchange + relays' own served lists + a bundled seed list. **Capabilities**
-  (`gif`, `push`, …) are advertised by the relay (via `/health` or its signed
-  announcement), so the client knows which relays can serve which service and can
-  use one even when its own home relay can't.
-- **Stable id = an Ed25519 keypair per relay; relays sign their announcements**
-  (mirrors user identity). **De-dup by pubkey, not URL** (union URLs, keep freshest
-  liveness); signing kills spoofed entries.
-- **Relays serve their own relay list** (Bitcoin `addr`-style) with liveness they
-  verified by health-checking each other → connect to one, learn the mesh.
-- **Liveness-gated pruning** (the subtle part): prune on *corroborated relay
-  death*, **never** on "I haven't contacted it lately" — that conflates the relay
-  being down with the *user* being away. Only count failures while you're provably
-  online (you can reach *something* else), ideally corroborated by peers.
-  Soft-demote + keep a long stale tail (dead relays revive); hard-delete only after
-  long + corroborated death. Bound future-dated "last seen" (clock skew).
-- **Poisoning/eclipse:** never trust a single source's list, cap entries per
-  source, prefer relays corroborated by many and verified-alive by you.
+> STUN is still used, but only so each peer learns its *own* current public mapping
+> to advertise — a free public service, not our cost.
 
-### Firebase backend — staying at $0
-Everything lives in **one Firebase project** (Cloud Functions + Firestore + FCM).
-What keeps it free for tens of users:
-1. **Firestore free tier is per-day** (~20K writes/day · 50K reads/day · 1 GiB ·
-   10 GiB egress/mo). This is the **binding limit**, eaten mainly by presence
-   heartbeats — so keep announces low-frequency and gossip presence peer-to-peer
-   once connected. Use **Firestore TTL policies** to auto-expire signalling,
-   presence and relay docs for free.
-2. **Cloud Functions need the Blaze plan (card on file)** but are free within
-   limits (2M invocations/mo · 400K GB-s). Set a **budget alert** → effectively
-   $0 at this scale. (You needed a card for AWS too.)
-3. **FCM is free and unlimited.**
+**Presence & peer-exchange are P2P (steady state):** on coming online you re-enter
+the mesh and "I'm online / here's my address" propagates over existing links +
+gossip; connected peers tell each other about peers + fresh candidates; address
+changes propagate the same way. No server polling.
 
-- **Dev needs no card:** the **Firebase Emulator Suite** runs Functions +
-  Firestore locally for free; Blaze is only required to *deploy* Cloud Functions
-  to the cloud (Phase 2 onward).
-- **Signalling can be push-based for free** via Firestore real-time listeners —
-  no WebSocket infra, no polling. We still front it with an **HTTP contract** so
-  the client stays provider-agnostic and a self-hoster can reimplement off-Firebase.
-- **Verify current Firebase free-tier numbers in the console** — they change.
+**The contact graph stays connected — no islands:** accepting an invite
+**mandatorily adds the inviter as a contact**, and the invite carries the inviter's
+**pubkey** (which doubles as the cold-start bootstrap peer). So a channel's
+connection edges form the **invite tree**, which is by definition connected.
+Bulk-add / new-member prompts densify the tree (resilience if an inviter is
+offline); epidemic gossip + carriers cover offline branches (a delay, not a loss).
+
+**So the server's whole job is:** a tunnelled, pubkey-addressed **cold-start
+signalling mailbox** + the **media-search proxies** (server-side API keys). It holds
+no plaintext, verifies signatures, and is rarely hit. (A **DHT** remains the
+eventual fully-serverless bootstrap — see roadmap — but the contact graph reaches
+the same place via people you already know.)
+
+### Deployment (self-hosted, tunnelled)
+
+Because the server is a thin, rarely-hit bootstrap, it's cheapest *and* most private
+to **self-host** — and a single always-on container on hardware you already run
+(NAS / Proxmox) keeps it dead simple: the relay stays the current **in-memory Hono
+app** — no Firestore, no serverless cold-start-state rewrite, no scale-to-zero
+gymnastics (all of which existed only to dodge *cloud* cost). On your own box,
+polling cost is irrelevant.
+
+**Shape — one Docker Compose stack (this *is* the IaC):**
+- **Relay container** (Hono): the pubkey cold-start mailbox + media-search proxies.
+  HTTP only, in-memory, no DB.
+- **Exposure: a tunnel, not a port-forward.** Behind a **Cloudflare Tunnel** (or
+  Tailscale Funnel) the box dials *out*, so **zero inbound ports**, home IP never
+  exposed, TLS + hostname for free — strictly safer than forwarding a port, and a
+  dynamic home IP becomes a non-issue.
+- **TURN is NOT in this stack and NOT on the home network** — it can't be tunnelled
+  (wide UDP relay range) and a home-exposed relay is an abuse/exposure risk. Defer
+  it; when needed use **managed TURN** (Cloudflare/Metered — pay-per-use, tiny since
+  only stuck pairs) or coturn on an **isolated VPS**, always auth'd with
+  time-limited creds the relay mints, never open.
+
+**CI/CD — IaC + tag-triggered pipeline:** the `docker-compose.yml` (+ relay
+`Dockerfile` + tunnel config) is the infrastructure as code. **GitHub Actions on a
+version tag** (`v*`, that *you* push — not push-to-main) builds the relay image and
+publishes it to **GHCR**; the box **pulls** it (Watchtower / webhook / manual
+`docker compose pull && up -d`). You control the rollout.
+
+**Decentralised by construction:** the relay URL is pluggable and rides in the
+invite; any community self-hosts their own the same way — yours on your NAS is just
+the default bootstrap node.
 
 ---
 
@@ -305,11 +315,20 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       id) in `core`; the app sends encrypted DMs over a derived DM channel and
       carriers relay blind. Independent of group MLS. (Limitation: both parties must
       open the DM — no auto-join/notify yet.)
-- [ ] **Optional always-on relay** (opt-in, not required for P2P): deploy the same
-      Hono app via **Firebase CLI** as a Cloud Function (HTTP) + Firestore **TTL**
-      for transient signalling/presence + encrypted, TTL'd **store-and-forward** for
-      offline peers. Client points at any relay URL. (Cloud deploy needs Blaze.)
-- [ ] coturn (Docker) — optional TURN fallback for symmetric-NAT peers.
+- [ ] **Self-hosted relay deploy** (the cold-start bootstrap, opt-in, not required
+      once peers are connected): dockerise the in-memory Hono relay (pubkey
+      signalling mailbox + media proxies) as a **Compose stack**, exposed via a
+      **Cloudflare Tunnel** (no port-forward, no home-IP exposure); ship via
+      **GitHub Actions on a version tag → GHCR**, box pulls. Client points at any
+      relay URL. (See "Rendezvous & connectivity" + "Deployment".)
+- [ ] **Server-minimal connectivity** — cached-candidate direct reconnect +
+      mutual-contact hole-punch (peer-exchange) + P2P presence/gossip, so the server
+      is touched only on cold start; **stop signalling polling once connected**.
+- [ ] **Invite carries the inviter's pubkey**; accepting mandatorily adds the
+      inviter (bootstrap peer + keeps the invite-tree contact graph connected → no
+      islands).
+- [ ] TURN — **deferred**; managed (Cloudflare/Metered) or isolated-VPS coturn when
+      symmetric-NAT pairs actually need it, never home-hosted.
 
 ### Phase 3 — Groups, voice, and the hard stuff
 - [ ] Group = replicated log + membership-as-messages (capability model).
@@ -324,15 +343,16 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       also the *only* identity **backup/recovery** mechanism; **(b) per-device
       subkeys** certified by a root key — adds per-device revocation. Until this
       ships there is **no identity backup**: clearing storage loses the key.
-- [ ] **Multi-relay** — relay URLs in the invite (per-channel signalling) + a
-      per-user **home relay** setting (services); failover across a channel's
-      relays. (See "Relay discovery & resilience".)
-- [ ] **Relay directory** — signed Ed25519 relay identities, peer + relay gossip
-      of known relays, **liveness-gated pruning** (online-gated + corroborated),
-      de-dup by relay pubkey, **service-capability advertisement** + trust-ranked
-      service-relay selection, poisoning/eclipse mitigations. Build thin.
-- [ ] **DHT (libp2p)** — relay-independent rendezvous keyed by channel id; the
-      "all relays down" endgame. Bigger; likely Rust via `flutter_rust_bridge`.
+- [ ] **Address cache + peer-exchange** — clients cache contacts'/members'
+      last-known WebRTC candidates and gossip current ones over the mesh, so
+      reconnects mostly skip the server (server = cold-start fallback only).
+- [ ] **Pluggable bootstrap relay** — the cold-start relay URL rides in the invite
+      and is swappable; a community self-hosts its own. (Multi-bootstrap failover +
+      a learned-relay list are a later nicety, not core now the contact graph
+      carries connectivity. See "Rendezvous & connectivity".)
+- [ ] **DHT (libp2p)** — relay-independent cold-start bootstrap (keyed by pubkey /
+      channel id); the "no server at all" endgame that subsumes the cold-start
+      mailbox. Bigger; likely Rust via `flutter_rust_bridge`.
 
 ### Phase 4 — Polish / ecosystem
 - [ ] Notifications, per platform:
@@ -545,3 +565,24 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   deliberately *unlike* user names. Also: voice chat (per-channel WebRTC audio mesh,
   mute/deafen/per-user volume, join/leave cues, speaking indicators) and a
   warm-hearth UI with a right-hand channel control panel shipped this stretch.
+- **2026-06-25** — **Rendezvous redesigned (server-minimal, contact-graph) + deploy
+  self-hosted & tunnelled** — supersedes the Firebase/multi-relay framing for the
+  connectivity + deploy story (see "Rendezvous & connectivity" and "Deployment").
+  The backend drops to a **cold-start signalling mailbox + media proxies**: once a
+  peer has any live link, presence / peer-exchange / messages are pure P2P, so the
+  happy path needs no server and an outage only blocks cold-start-with-nobody-
+  reachable. Reconnect ladder: **cached candidates → punch via an online mutual
+  contact → server cold-start mailbox → TURN** (deferred; managed/VPS, never home).
+  Rendezvous is **pubkey-addressed + contact-scoped** (no channel-wide presence, no
+  strangers). The contact graph is kept connected by making **invite-accept add the
+  inviter** (invite carries the inviter pubkey = bootstrap peer) → channel edges form
+  the connected **invite tree** → no islands; bulk-add + gossip add resilience.
+  **Why the pivot:** "no always-on *cloud* server" + self-hosting on an always-on box
+  you already own (NAS/Proxmox) means the relay stays the **simple in-memory Hono
+  container** — deleting the entire serverless/Firestore-durability rewrite (which
+  only existed to dodge cloud scale-to-zero cost). Exposed via **Cloudflare Tunnel**
+  (no port-forward, no home-IP exposure). **TURN stays off the home network** (can't
+  tunnel its UDP range; open relays get abused). IaC = a Docker Compose stack; CI =
+  **GitHub Actions on a version tag → GHCR**, the box pulls. (Caveat acknowledged:
+  cached addresses fail for ephemeral/symmetric NAT mappings — that rung is for the
+  reachable minority; STUN still needed for each peer to learn its own candidate.)
