@@ -160,6 +160,14 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _myName;
   final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
   final Set<String> _announced = {}; // channels we've published our name into
+  final Set<String> _memberBaseline =
+      {}; // channels whose baseline is scheduled
+  final Set<String> _baselined = {}; // channels past their initial settle
+  final Map<String, Set<String>> _seenMembers =
+      {}; // channelId -> known members
+  final Set<String> _promptedNew = {}; // members offered to add this session
+  final List<({String key, String name})> _newMembers = []; // pending prompts
+  bool _promptingMember = false;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
   bool _sending = false;
@@ -222,6 +230,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (active != null) {
       await _indexLibrary(active);
       _indexProfiles(active);
+      _detectNewMembers(active);
       // Publish our own name into a channel the first time we're active in it.
       if (_myName != null && _announced.add(active.channelId)) {
         await _announceName(active);
@@ -298,6 +307,62 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_myName != null) await _announceName(session);
       _announced.add(session.channelId);
     }
+  }
+
+  /// Members (by id) who've posted in [session], excluding you.
+  Set<String> _membersOf(ChannelSession session) {
+    final self = hex.encode(widget.identity.publicKey);
+    return {
+      for (final message in session.repository.ordered())
+        if (hex.encode(message.author) != self) hex.encode(message.author),
+    };
+  }
+
+  /// Prompts you to add a member who joins *after* you're settled in a channel
+  /// (joining yourself doesn't flood you — the bulk-add covers existing members).
+  /// On first sight of a channel we baseline its members silently after a short
+  /// settle, then offer to add anyone new who's shared a name.
+  void _detectNewMembers(ChannelSession session) {
+    final channel = session.channelId;
+    if (_memberBaseline.add(channel)) {
+      Timer(const Duration(seconds: 4), () {
+        _seenMembers[channel] = _membersOf(session);
+        _baselined.add(channel);
+      });
+      return;
+    }
+    if (!_baselined.contains(channel)) return; // still settling
+    final seen = _seenMembers[channel] ??= {};
+    for (final key in _membersOf(session)) {
+      if (!seen.add(key)) continue; // already known here
+      if (_contacts?.nameFor(key) != null) continue; // already a contact
+      final suggested = _suggested[key];
+      if (suggested == null) continue; // hasn't shared a name → don't nag
+      if (!_promptedNew.add(key)) continue; // offered already this session
+      _newMembers.add((key: key, name: suggested));
+    }
+    if (_newMembers.isNotEmpty) unawaited(_processNewMembers());
+  }
+
+  /// Shows the "add this new member?" prompts one at a time — accept their name
+  /// or type your own; Cancel skips.
+  Future<void> _processNewMembers() async {
+    if (_promptingMember) return;
+    _promptingMember = true;
+    while (_newMembers.isNotEmpty && mounted) {
+      final next = _newMembers.removeAt(0);
+      final name = await _promptText(
+        title: '${next.name} joined',
+        hint: 'add as a contact (only you see this name)',
+        initial: next.name,
+        action: 'Add',
+      );
+      if (name != null && name.trim().isNotEmpty) {
+        await _contacts?.setName(next.key, name.trim());
+      }
+    }
+    _promptingMember = false;
+    if (mounted) setState(() {});
   }
 
   @override
@@ -891,6 +956,12 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     final selected = {for (final key in members.keys) key: true};
+    // One editable petname field per member, pre-filled with their suggestion —
+    // so you can amend any name before adding.
+    final names = {
+      for (final entry in members.entries)
+        entry.key: TextEditingController(text: entry.value),
+    };
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -901,14 +972,27 @@ class _ChatScreenState extends State<ChatScreen> {
             child: ListView(
               shrinkWrap: true,
               children: [
-                for (final entry in members.entries)
-                  CheckboxListTile(
-                    value: selected[entry.key],
-                    onChanged: (v) =>
-                        setSheet(() => selected[entry.key] = v ?? false),
-                    title: Text(entry.value),
-                    subtitle: Text(
-                      'hearth#${_fingerprint(Uint8List.fromList(hex.decode(entry.key)))}',
+                for (final key in members.keys)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: Row(
+                      children: [
+                        Checkbox(
+                          value: selected[key],
+                          onChanged: (v) =>
+                              setSheet(() => selected[key] = v ?? false),
+                        ),
+                        Expanded(
+                          child: TextField(
+                            controller: names[key],
+                            decoration: InputDecoration(
+                              isDense: true,
+                              labelText:
+                                  'hearth#${_fingerprint(Uint8List.fromList(hex.decode(key)))}',
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
               ],
@@ -927,13 +1011,18 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       ),
     );
-    if (confirmed != true) return;
-    for (final entry in members.entries) {
-      if (selected[entry.key] == true) {
-        await _contacts?.setName(entry.key, entry.value);
+    if (confirmed == true) {
+      for (final key in members.keys) {
+        final name = names[key]!.text.trim();
+        if (selected[key] == true && name.isNotEmpty) {
+          await _contacts?.setName(key, name);
+        }
       }
+      if (mounted) setState(() {});
     }
-    if (mounted) setState(() {});
+    for (final controller in names.values) {
+      controller.dispose();
+    }
   }
 
   /// A reusable single-field prompt.
