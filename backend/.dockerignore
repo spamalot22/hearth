@@ -1,0 +1,11 @@
+# Keep the build context (and image) lean + secret-free.
+node_modules
+.env
+.env.*
+**/*.test.ts
+.git
+.gitignore
+Dockerfile
+.dockerignore
+docker-compose.yml
+*.log

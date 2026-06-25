@@ -1,0 +1,65 @@
+# Build + publish the relay image to GHCR on a version tag *you* push:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Then on the NAS: `docker compose pull && docker compose up -d`.
+# Not triggered by pushes to main — only by tags.
+name: deploy-relay
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # lets GITHUB_TOKEN push to ghcr.io/<owner>/* — no PAT needed
+    steps:
+      - uses: actions/checkout@v4
+
+      # Gate the publish on the backend tests/typecheck (mirrors the Dockerfile's
+      # esbuild build-script workaround).
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+      - name: Install + test (backend)
+        working-directory: backend
+        run: |
+          pnpm install --frozen-lockfile || true
+          pnpm rebuild esbuild
+          pnpm typecheck
+          pnpm test
+
+      # Multi-arch so the image runs on amd64 (most NAS/Proxmox) or arm64.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags + labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/hearth-relay
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64

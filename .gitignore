@@ -20,6 +20,7 @@ dist/
 # Env / secrets — never commit these
 .env
 .env.*
+!.env.example
 *.pem
 *.p8
 serviceAccount*.json

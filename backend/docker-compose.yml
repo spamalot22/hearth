@@ -1,0 +1,31 @@
+# Hearth relay stack — the self-hosted cold-start bootstrap. This file IS the IaC.
+#
+#   cp .env.example .env     # then fill in the media keys + tunnel token
+#   docker compose up -d     # builds + runs the relay behind a Cloudflare Tunnel
+#
+# Nothing is published to the host or router: the tunnel dials *out* to Cloudflare,
+# so there are no inbound ports to forward or expose. On a NAS you'd
+# `docker compose pull` the CI-built image instead of building locally.
+services:
+  relay:
+    build: .
+    image: ghcr.io/spamalot22/hearth-relay:${TAG:-latest}
+    restart: unless-stopped
+    environment:
+      PORT: 8787
+      # Media-search proxy keys — search degrades gracefully if unset.
+      GIPHY_KEY: ${GIPHY_KEY:-}
+      FREESOUND_KEY: ${FREESOUND_KEY:-}
+    expose:
+      - "8787" # reachable only inside the compose network (by the tunnel)
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # Token for a named tunnel created in the Cloudflare Zero Trust dashboard;
+      # its public hostname is routed there to http://relay:8787.
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - relay
