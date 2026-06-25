@@ -321,12 +321,14 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       **Cloudflare Tunnel** (no port-forward, no home-IP exposure); ship via
       **GitHub Actions on a version tag → GHCR**, box pulls. Client points at any
       relay URL. (See "Rendezvous & connectivity" + "Deployment".)
-- [ ] **Server-minimal connectivity** — cached-candidate direct reconnect +
+- [x] **Stop polling once connected** — adaptive signalling: fast poll (700ms/5s)
+      only while a handshake's in flight or peerless, idle (15s/30s) once settled.
+- [ ] **Server-minimal connectivity (rest)** — cached-candidate direct reconnect +
       mutual-contact hole-punch (peer-exchange) + P2P presence/gossip, so the server
-      is touched only on cold start; **stop signalling polling once connected**.
-- [ ] **Invite carries the inviter's pubkey**; accepting mandatorily adds the
-      inviter (bootstrap peer + keeps the invite-tree contact graph connected → no
-      islands).
+      is touched *only* on cold start.
+- [x] **Invite carries the inviter's pubkey**; accepting mandatorily adds the
+      inviter (keeps the invite-tree contact graph connected → no islands). Still to
+      wire: the mesh actually *using* the inviter as the first cold-start target.
 - [ ] TURN — **deferred**; managed (Cloudflare/Metered) or isolated-VPS coturn when
       symmetric-NAT pairs actually need it, never home-hosted.
 

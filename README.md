@@ -9,9 +9,9 @@ channels, voice — is **end-to-end encrypted by default**. An optional relay ex
 only to introduce peers to each other (and to courier messages to people who are
 offline); it can verify that a message is authentic but can never read it.
 
-> **Status:** early, fast-moving work in progress. The crypto, message sync, P2P
-> mesh, channels, media and voice work locally today; it does not yet run off
-> `localhost` (no cloud relay deployed) and there is no identity backup yet. See
+> **Status:** early, fast-moving work in progress. Crypto, message sync, P2P mesh,
+> channels, media, voice, and identity backup/restore work locally today; it does
+> not yet run off `localhost` (the relay isn't deployed). See
 > [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the living plan and the
 > decisions log.
 
@@ -133,15 +133,14 @@ cues every client plays locally, and live speaking indicators driven by WebRTC
 `audioLevel` stats.
 
 ### The relay (backend)
-[`backend/`](backend) is a small **Hono** app. It's a *dumb relay*: it verifies
-each message's signature before storing it (so it can't be spammed with garbage)
-but **never decrypts or owns history**. It provides signalling + presence
-(`/announce`, `/peers`, `/signal`, keyed per `(channel, pubkey)` with a TTL), a
-best-effort offline courier (`/messages`, `/poll`), and the media-search proxies.
-It's optional and swappable — the client points at any relay URL — and is designed
-to wrap as a **Firebase Cloud Function + Firestore** for the hosted default (not
-yet deployed; see the plan). Longer term, relays become disposable hints behind a
-DHT (see *Relay discovery & resilience* in the plan).
+[`backend/`](backend) is a small **Hono** app, and a *dumb relay*: it verifies each
+message's signature but **never decrypts or owns history**. It's reduced to a
+**cold-start bootstrap** — a pubkey-addressed signalling mailbox — plus the
+media-search proxies; once peers have a live link, presence/peers/messages flow
+pure P2P, so the happy path needs no server. It's optional and swappable (the
+client points at any relay URL), and is designed to **self-host** as a single
+in-memory Docker container behind a tunnel (no port-forward) — not deployed yet;
+see *Rendezvous & connectivity* and *Deployment* in the plan.
 
 ---
 
@@ -152,8 +151,8 @@ core/      Pure-Dart, platform-agnostic engine (no Flutter):
            identity, message DAG, encryption, blobs, sync/gossip, frames.
 app/       Flutter client (web + mobile/desktop): UI, WebRTC mesh, voice,
            Hive storage, media library, channel/contact management.
-backend/   TypeScript Hono relay: signalling, offline courier, media-search
-           proxies. In-memory for dev; wraps as a Firebase Cloud Function.
+backend/   TypeScript Hono relay: cold-start signalling mailbox + media-search
+           proxies. In-memory; self-hosted as a Docker container (tunnelled).
 IMPLEMENTATION_PLAN.md   Living plan, architecture decisions log, roadmap.
 ```
 
@@ -164,7 +163,8 @@ IMPLEMENTATION_PLAN.md   Living plan, architecture decisions log, roadmap.
 - **Crypto:** the `cryptography` package — Ed25519, X25519, ChaCha20-Poly1305,
   HKDF-SHA256.
 - **Backend:** TypeScript, [Hono](https://hono.dev), run with `tsx`; **pnpm**.
-  Targets Firebase Cloud Functions + Firestore + FCM.
+  Self-hosted as a Docker container, tunnelled (Cloudflare Tunnel); shipped via
+  GitHub Actions on a version tag → GHCR.
 - **Quality:** `flutter analyze` + Dart/TS tests (`vitest`), `lefthook` pre-commit
   (format + analyze + typecheck).
 
@@ -229,16 +229,16 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
   with, and (for media search) your search terms — proxying hides your IP from the
   GIF/sound provider, but the relay sees the query. Hiding *who a message is for*
   (sealed sender) and not depending on a relay at all (DHT) are on the roadmap.
-- **No identity backup yet:** clearing local storage loses your key. Export/import
-  and multi-device are planned (Phase 3).
+- **Identity backup:** export/import a recovery code (the seed) backs up your key —
+  clearing storage without it still loses the identity. Multi-device is planned.
 
 ## Roadmap
 
-Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): deploy the
-relay to Firebase (get off `localhost`), multi-relay discovery + a relay directory
-→ DHT, identity backup + multi-device, MLS-style group key management, and richer
-media. The plan also keeps a dated **decisions log** explaining *why* each choice
-was made.
+Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): self-host the
+relay (Docker + Cloudflare Tunnel) to get off `localhost`, server-minimal
+contact-graph rendezvous (cached addresses + mutual-contact peer-exchange) → DHT,
+multi-device identity, MLS-style group key management, and richer media. The plan
+also keeps a dated **decisions log** explaining *why* each choice was made.
 
 ## License
 
