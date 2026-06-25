@@ -1,4 +1,5 @@
-# pnpm reads project settings from here. esbuild backs tsx + vitest; allow its
-# post-install build so pnpm stops blocking `pnpm run`.
+# pnpm reads project settings from here. esbuild backs tsx + vitest; approve its
+# post-install build (pnpm 10+ blocks build scripts by default, so a fresh install
+# would otherwise fail with ERR_PNPM_IGNORED_BUILDS).
 allowBuilds:
   esbuild: true

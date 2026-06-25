@@ -68,6 +68,19 @@ describe('relay', () => {
     expect((await post(app, wire)).status).toBe(400);
   });
 
+  it('rejects a malformed body with 400, not 500', async () => {
+    const app = createRelay();
+    // Valid JSON but missing the signed fields — verifyWire throws on these; the
+    // relay must treat that as unverifiable (400), not crash into a 500.
+    const res = await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ hello: 'world' }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
   it('returns only messages newer than `since`', async () => {
     const app = createRelay();
     await post(app, await makeWire('m1'));

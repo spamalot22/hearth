@@ -12,8 +12,8 @@ interface StoredMessage {
 }
 
 /**
- * In-memory channel store. Phase 1 only — this is the seam where Firestore
- * slots in later (same interface, durable + shared).
+ * In-memory channel store for the offline-courier endpoints. Self-hosted and
+ * in-memory; a durable store can slot in behind the same interface later.
  */
 export class RelayStore {
   private readonly byChannel = new Map<string, StoredMessage[]>();
@@ -33,10 +33,10 @@ export class RelayStore {
 }
 
 /**
- * The rendezvous relay as a portable Hono app. Hosted on plain Node now, this
- * same app wraps as a Firebase Cloud Function later. It is a *dumb relay*: it
- * verifies each message's signature + id (so it can't be spammed with garbage)
- * but never decrypts or owns history — the clients are the source of truth.
+ * The rendezvous relay as a portable Hono app — self-hosted (Docker, tunnelled).
+ * It is a *dumb relay*: it verifies each message's signature + id (so it can't be
+ * spammed with garbage) but never decrypts or owns history — the clients are the
+ * source of truth.
  */
 export function createRelay(
   store: RelayStore = new RelayStore(),
@@ -66,9 +66,15 @@ export function createRelay(
     } catch {
       return c.json({ error: 'invalid json' }, 400);
     }
-    if (!(await verifyWire(body))) {
-      return c.json({ error: 'verification failed' }, 400);
+    // A malformed-but-valid-JSON body (missing/non-base64 fields) makes verifyWire
+    // throw — treat that as unverifiable (400), not a 500.
+    let ok = false;
+    try {
+      ok = await verifyWire(body);
+    } catch {
+      ok = false;
     }
+    if (!ok) return c.json({ error: 'verification failed' }, 400);
     return c.json({ ok: true, seq: store.append(body) });
   });
 
@@ -76,7 +82,8 @@ export function createRelay(
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
     if (!channel) return c.json({ error: 'channel required' }, 400);
-    const since = Number(c.req.query('since') ?? '0');
+    const sinceRaw = Number(c.req.query('since') ?? '0');
+    const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
     const fresh = store.since(channel, since);
     const messages = fresh.map((m) => ({ seq: m.seq, ...m.message }));
     const seq = fresh.length ? fresh[fresh.length - 1]!.seq : since;

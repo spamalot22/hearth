@@ -8,13 +8,11 @@ RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 
 WORKDIR /app
 
-# Dependencies first — this layer caches unless the lockfile changes. pnpm 10+
-# refuses post-install scripts unless approved; the policy exits non-zero but still
-# populates node_modules, so we install then build esbuild (which tsx needs)
-# explicitly. A genuine install failure still surfaces at the rebuild step.
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile || true
-RUN pnpm rebuild esbuild
+# Dependencies first — this layer caches unless the lockfile changes. esbuild's
+# post-install (tsx needs it) is approved via pnpm-workspace.yaml's
+# onlyBuiltDependencies, so a plain install succeeds.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 
 # App source (tests + .env excluded via .dockerignore — no secrets in the image).
 COPY tsconfig.json ./
