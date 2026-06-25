@@ -228,7 +228,7 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 - **What the relay still learns:** that a peer is online, who they're signalling
   with, and (for media search) your search terms — proxying hides your IP from the
   GIF/sound provider, but the relay sees the query. Hiding *who a message is for*
-  (sealed sender) and not depending on a relay at all (DHT) are on the roadmap.
+  (sealed sender) is on the roadmap.
 - **Identity backup:** export/import a recovery code (the seed) backs up your key —
   clearing storage without it still loses the identity. Multi-device is planned.
 
@@ -236,8 +236,9 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 
 Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): self-host the
 relay (Docker + Cloudflare Tunnel) to get off `localhost`, server-minimal
-contact-graph rendezvous (cached addresses + mutual-contact peer-exchange) → DHT,
-multi-device identity, MLS-style group key management, and richer media. The plan
+contact-graph rendezvous (cached addresses + mutual-contact peer-exchange), a Dart
+relay-fallback for symmetric-NAT pairs (no coturn), multi-device identity, MLS-style
+group key management, and richer media. The plan
 also keeps a dated **decisions log** explaining *why* each choice was made.
 
 ## License

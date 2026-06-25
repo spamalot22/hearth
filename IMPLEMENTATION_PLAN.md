@@ -15,7 +15,7 @@ _Status: living document. Last updated: 2026-06-21._
   2-person channel) are the *same* primitive; only membership scope + encryption
   differ.
 - **Text now; voice next** — text chat works today. Real-time **voice, video, and
-  screen-share** come via WebRTC (Phase 3), with coturn for NAT traversal.
+  screen-share** come via WebRTC (Phase 3); symmetric-NAT pairs use a relay-fallback (not coturn).
 - **End-to-end encrypted by default — everything.** Signed today, encrypted next —
   the payload is opaque bytes (and messages carry a `v` version), so encryption
   slots in with no breaking change. **Decided:** **DMs *and* group channels are
@@ -62,9 +62,9 @@ _Status: living document. Last updated: 2026-06-21._
 | Real-time transport (P2P) | **WebRTC** (`flutter_webrtc`) data channels + media | ✅ decided |
 | Backend (cold-start rendezvous) | **Self-hosted Hono relay** (TypeScript, Docker, in-memory, no DB) — pubkey signalling mailbox + media proxies; **tunnelled** (Cloudflare Tunnel), not port-forwarded | 🔄 revised — was Firebase (see Rendezvous & Deployment) |
 | Backend framework / tooling | **Hono** · Docker Compose (the IaC) · **GitHub Actions on a version tag → GHCR**, box pulls | ✅ decided |
-| TURN relay (NAT fallback) | **Deferred** — managed (Cloudflare/Metered) or coturn on an isolated VPS when needed; never home-hosted | ✅ decided |
+| NAT fallback (symmetric NAT) | **App-level encrypted relay** through the tunnelled relay — no coturn, no UDP, no port-forward; hole-punching (WebRTC ICE) handles every other pair | ✅ decided |
 | E2E encryption (default) | DMs **sealed box** (X25519, next); groups need membership → **MLS (RFC 9420)** for forward secrecy / rotation (likely Rust `openmls`) | 🔜 next |
-| Heavy P2P (DHT, hole-punching) | **libp2p** — deferred; Rust via `flutter_rust_bridge` if/when needed | ⏳ deferred |
+| Heavy P2P (DHT / libp2p) | **Decided against** (2026-06-25) — doesn't reach zero-servers (media proxies + bootstrap remain) and costs a full Rust integration; the no-coturn goal is met in Dart | ❌ dropped |
 
 ### Target platforms (priority order)
 1. **Windows + Android** — the primary targets. Iterate locally on **Android**
@@ -87,12 +87,11 @@ returns only if/when we ship iOS.
 ### Why not a Rust core from day one?
 - It triples build complexity (FFI + building for 6 targets) for a prototype
   that may still pivot.
-- The only places Dart is genuinely weak (libp2p, MLS) are Phase 3+ concerns.
+- The only place Dart is genuinely weak (MLS group crypto) is a Phase 3+ concern.
 - **Mitigation:** keep `core/` free of UI and Flutter imports so it can become a
   Rust module later with the UI untouched.
 
 ### The escape hatch (when we'd reach for Rust)
-- We need a real DHT / NAT hole-punching beyond WebRTC's reach → libp2p (Rust).
 - We implement MLS for scalable group key rotation → `openmls` (Rust).
 - Profiling shows DAG merge / crypto is a hot path in Dart (unlikely early).
 
@@ -118,8 +117,8 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
         ── only hit on cold start; steady-state presence/peers/msgs are P2P ──
         ── pluggable URL (rides in invite) · holds NO plaintext / history ──
         │
-   TURN  (deferred · managed or isolated VPS · NEVER home-hosted)
-        relays media for the ~15% symmetric-NAT↔symmetric-NAT pairs
+   relay-fallback  (same relay, app-level · no coturn · no UDP)
+        forwards opaque ciphertext for the ~15% symmetric-NAT↔symmetric pairs
 ```
 
 ### Repo layout (polyglot monorepo)
@@ -140,11 +139,11 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
   the *same* backend to their own Firebase project, or run the Hono app as a
   plain container off-Firebase — no separate server codebase.
 - **The rendezvous endpoint is pluggable in the client** (point at any backend
-  URL). That is what keeps it decentralised: your Firebase project is just the
-  default bootstrap node, like a DHT seed — replaceable, not authoritative.
-- **Cold-start caveat:** two peers who've *never* connected need a rendezvous
-  point (a backend, LAN/mDNS, or a DHT) for the first handshake. Fully serverless
-  first contact is the Phase 3 DHT/libp2p case.
+  URL). That is what keeps it decentralised: your self-hosted relay is just the
+  default bootstrap node — replaceable, not authoritative.
+- **Cold-start caveat:** two peers who've *never* connected need a rendezvous point
+  (the self-hosted relay, or LAN/mDNS) for the first handshake. Fully serverless first
+  contact would need a DHT, which we've decided against — the relay stays.
 - **Single point of failure is limited to *new* connections:** if the backend is
   down, existing P2P sessions keep working.
 - **Offline delivery is epidemic, not routed.** Every message is signed +
@@ -183,9 +182,9 @@ its **pubkey**, and you only care about your **contacts'** presence.
    signed offer in the peer's **pubkey-addressed mailbox** to get your *first* live
    link, then #1/#2 take over. The only server signalling, and brief — **stop
    polling once connected; no steady-state heartbeat.**
-4. **TURN** — symmetric-NAT↔symmetric-NAT pairs can't go direct at all; their media
-   must be relayed. Deferred (a minority); managed/VPS-hosted when needed, **never
-   self-hosted at home** (see Deployment).
+4. **Relay-fallback** — symmetric-NAT↔symmetric-NAT pairs can't go direct at all, so
+   the tunnelled relay forwards their (already-encrypted) traffic app-level. No
+   coturn, no UDP, no port-forward — a minority case (see Deployment).
 
 > STUN is still used, but only so each peer learns its *own* current public mapping
 > to advertise — a free public service, not our cost.
@@ -204,9 +203,9 @@ offline); epidemic gossip + carriers cover offline branches (a delay, not a loss
 
 **So the server's whole job is:** a tunnelled, pubkey-addressed **cold-start
 signalling mailbox** + the **media-search proxies** (server-side API keys). It holds
-no plaintext, verifies signatures, and is rarely hit. (A **DHT** remains the
-eventual fully-serverless bootstrap — see roadmap — but the contact graph reaches
-the same place via people you already know.)
+no plaintext, verifies signatures, and is rarely hit. (Fully-serverless first contact
+would need a DHT, which we've **decided against**, so the self-hosted bootstrap node
+stays — the contact graph keeps it rarely-needed.)
 
 ### Deployment (self-hosted, tunnelled)
 
@@ -224,11 +223,10 @@ polling cost is irrelevant.
   Tailscale Funnel) the box dials *out*, so **zero inbound ports**, home IP never
   exposed, TLS + hostname for free — strictly safer than forwarding a port, and a
   dynamic home IP becomes a non-issue.
-- **TURN is NOT in this stack and NOT on the home network** — it can't be tunnelled
-  (wide UDP relay range) and a home-exposed relay is an abuse/exposure risk. Defer
-  it; when needed use **managed TURN** (Cloudflare/Metered — pay-per-use, tiny since
-  only stuck pairs) or coturn on an **isolated VPS**, always auth'd with
-  time-limited creds the relay mints, never open.
+- **No coturn, no TURN box, ever.** The symmetric-NAT minority is handled by an
+  **app-level encrypted relay-fallback through this same tunnelled relay** — it
+  forwards opaque ciphertext between two stuck peers. No UDP, no port-forward,
+  nothing extra to run.
 
 **CI/CD — IaC + tag-triggered pipeline:** the `docker-compose.yml` (+ relay
 `Dockerfile` + tunnel config) is the infrastructure as code. **GitHub Actions on a
@@ -329,8 +327,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - [x] **Invite carries the inviter's pubkey**; accepting mandatorily adds the
       inviter (keeps the invite-tree contact graph connected → no islands). Still to
       wire: the mesh actually *using* the inviter as the first cold-start target.
-- [ ] TURN — **deferred**; managed (Cloudflare/Metered) or isolated-VPS coturn when
-      symmetric-NAT pairs actually need it, never home-hosted.
+- [ ] **Relay-fallback for symmetric-NAT pairs** — the tunnelled relay forwards their
+      already-encrypted traffic app-level (no coturn, no UDP, no port-forward). Pure
+      Dart; only needed once real users hit a symmetric↔symmetric pair.
 
 ### Phase 3 — Groups, voice, and the hard stuff
 - [ ] Group = replicated log + membership-as-messages (capability model).
@@ -352,9 +351,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       and is swappable; a community self-hosts its own. (Multi-bootstrap failover +
       a learned-relay list are a later nicety, not core now the contact graph
       carries connectivity. See "Rendezvous & connectivity".)
-- [ ] **DHT (libp2p)** — relay-independent cold-start bootstrap (keyed by pubkey /
-      channel id); the "no server at all" endgame that subsumes the cold-start
-      mailbox. Bigger; likely Rust via `flutter_rust_bridge`.
+- [x] ~~DHT (libp2p)~~ — **decided against** (2026-06-25): doesn't reach zero-servers
+      and costs a full Rust integration; the self-hosted tunnelled relay is the
+      accepted bootstrap node.
 
 ### Phase 4 — Polish / ecosystem
 - [ ] Notifications, per platform:
@@ -588,3 +587,15 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   **GitHub Actions on a version tag → GHCR**, the box pulls. (Caveat acknowledged:
   cached addresses fail for ephemeral/symmetric NAT mappings — that rung is for the
   reachable minority; STUN still needed for each peer to learn its own candidate.)
+- **2026-06-25** — **Dropped libp2p; replaced coturn with a Dart relay-fallback.**
+  Considered libp2p (Circuit Relay v2 + DCUtR + Kademlia DHT) for NAT traversal /
+  zero-servers. Rejected: it doesn't actually reach zero servers for our use case (the
+  **media-search proxies need server-side keys**, the DHT needs bootstrap nodes, and
+  browsers/mobile can't be relay/DHT servers), and even partial adoption costs a full
+  **rust-libp2p + flutter_rust_bridge** integration. Crucially the goal that motivated
+  it — **no coturn, no UDP port-forward** — is reachable in pure Dart: WebRTC ICE
+  already hole-punches every non-symmetric pair, and the symmetric↔symmetric minority
+  can be relayed **app-level (opaque ciphertext) through the existing tunnelled
+  relay**. So: **no libp2p, no coturn, no DHT**; the self-hosted tunnelled relay stays
+  the accepted bootstrap node + relay-fallback. WebRTC stays behind the `FrameChannel`
+  seam, so libp2p remains a clean future swap if that ever changes.
