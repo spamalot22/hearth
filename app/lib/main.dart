@@ -712,13 +712,27 @@ class _ChatScreenState extends State<ChatScreen> {
       action: 'Join',
     );
     if (code == null || code.trim().isEmpty) return;
-    final channel = GroupChannel.fromInvite(code.trim());
-    if (channel == null) {
+    final parsed = GroupChannel.fromInvite(code.trim());
+    if (parsed == null) {
       if (mounted) setState(() => _error = 'invalid invite code');
       return;
     }
+    final channel = parsed.channel;
     await _registry?.save(channel);
     if (mounted) setState(() => _groups[channel.id] = channel);
+    // Mandatorily add the inviter as a contact — guarantees you have at least one
+    // edge into the channel (the invite-tree stays connected; they're your
+    // cold-start bootstrap peer).
+    final inviter = parsed.inviterPubkey;
+    if (inviter != null &&
+        inviter != widget.identity.publicKeyHex &&
+        _contacts?.nameFor(inviter) == null) {
+      await _contacts?.setName(
+        inviter,
+        parsed.inviterName ??
+            'hearth#${_fingerprint(Uint8List.fromList(hex.decode(inviter)))}',
+      );
+    }
     await _channels?.openGroup(channel.id, channel.key);
     // Once history has had a moment to sync, offer to add known members.
     Future.delayed(const Duration(seconds: 3), () {
@@ -733,7 +747,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _shareInvite(String channelId) async {
     final channel = _groups[channelId];
     if (channel == null) return;
-    final invite = channel.invite();
+    final invite = channel.invite(
+      inviterPubkeyHex: widget.identity.publicKeyHex,
+      inviterName: _myName,
+    );
     await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(

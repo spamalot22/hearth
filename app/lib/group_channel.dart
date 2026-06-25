@@ -26,12 +26,13 @@ class GroupChannel {
   }
 
   /// The invite string others paste to join — carries id + key + a suggested
-  /// name. Anyone holding it can join and read, so share it carefully.
-  String invite() =>
-      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'n': name})))}';
+  /// name, plus the **inviter's pubkey** (a mandatory contact on accept + the
+  /// cold-start bootstrap peer). Anyone holding it can join and read.
+  String invite({required String inviterPubkeyHex, String? inviterName}) =>
+      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'n': name, 'inv': inviterPubkeyHex, if (inviterName != null && inviterName.isNotEmpty) 'in': inviterName})))}';
 
-  /// Parses an [invite] string, or null if malformed.
-  static GroupChannel? fromInvite(String invite) {
+  /// Parses an [invite] string into the channel + inviter, or null if malformed.
+  static Invite? fromInvite(String invite) {
     try {
       final body = invite.trim().replaceFirst('hearth:', '');
       final json = (jsonDecode(utf8.decode(base64Url.decode(body))) as Map)
@@ -39,12 +40,19 @@ class GroupChannel {
       final id = json['id'] as String?;
       final k = json['k'] as String?;
       if (id == null || k == null || id.isEmpty) return null;
-      return GroupChannel(
-        id: id,
-        key: base64Url.decode(k),
-        name: (json['n'] as String?)?.trim().isNotEmpty == true
-            ? json['n']! as String
-            : id,
+      String? nonEmpty(String key) {
+        final v = json[key] as String?;
+        return (v != null && v.trim().isNotEmpty) ? v : null;
+      }
+
+      return Invite(
+        channel: GroupChannel(
+          id: id,
+          key: base64Url.decode(k),
+          name: nonEmpty('n') ?? id,
+        ),
+        inviterPubkey: nonEmpty('inv'),
+        inviterName: nonEmpty('in'),
       );
     } catch (_) {
       return null;
@@ -67,6 +75,17 @@ class GroupChannel {
     bytes,
     (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
   ).join();
+}
+
+/// A parsed invite: the [channel] to join plus the inviter — added as a mandatory
+/// contact on accept (keeping the invite-tree contact graph connected) and used as
+/// the cold-start bootstrap peer. [inviterPubkey] is null for older invites.
+class Invite {
+  Invite({required this.channel, this.inviterPubkey, this.inviterName});
+
+  final GroupChannel channel;
+  final String? inviterPubkey; // hex
+  final String? inviterName;
 }
 
 /// On-device list of the group channels you've created or joined (Hive), so they
