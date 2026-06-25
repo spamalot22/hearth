@@ -33,6 +33,16 @@ void main() {
       expect(parsed.emoji, '📯');
     });
 
+    test('file round-trips', () {
+      final parsed = parseContent(
+        const FileContent('1220f11e', 'notes.pdf', 'application/pdf').encode(),
+      );
+      expect(parsed, isA<FileContent>());
+      expect((parsed as FileContent).blob, '1220f11e');
+      expect(parsed.name, 'notes.pdf');
+      expect(parsed.mime, 'application/pdf');
+    });
+
     test('profile round-trips', () {
       final parsed = parseContent(const ProfileContent('Alice').encode());
       expect(parsed, isA<ProfileContent>());

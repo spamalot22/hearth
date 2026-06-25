@@ -123,6 +123,7 @@ class _BootstrapState extends State<_Bootstrap> {
         return ChatScreen(
           identity: snapshot.data!,
           relayUrl: widget.relayUrl,
+          keyStore: widget.keyStore,
           autoPoll: widget.autoPoll,
         );
       },
@@ -134,12 +135,14 @@ class ChatScreen extends StatefulWidget {
   const ChatScreen({
     required this.identity,
     required this.relayUrl,
+    required this.keyStore,
     this.autoPoll = true,
     super.key,
   });
 
   final Identity identity;
   final Uri relayUrl;
+  final KeyStore keyStore;
   final bool autoPoll;
 
   @override
@@ -262,6 +265,8 @@ class _ChatScreenState extends State<ChatScreen> {
           break;
         case ProfileContent():
           break;
+        case FileContent():
+          break; // one-off attachment, not a re-usable library item
       }
     }
   }
@@ -365,6 +370,109 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) setState(() {});
   }
 
+  // --- identity backup ---
+
+  /// Shows your recovery code (the seed) to back up. Anyone with it *is* you, so
+  /// it's display-only with a warning.
+  Future<void> _backupIdentity() async {
+    final code = hex.encode(await widget.identity.extractSeed());
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Back up your identity'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Save this recovery code somewhere safe. Anyone who has it can '
+              'become you — never share it. It is the only way to restore your '
+              'identity if you lose this device.',
+            ),
+            const SizedBox(height: 12),
+            SelectableText(
+              code,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: code));
+              Navigator.pop(context);
+            },
+            icon: const Icon(Icons.copy),
+            label: const Text('Copy'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Restores an identity from a recovery code, replacing this device's.
+  Future<void> _restoreIdentity() async {
+    final code = await _promptText(
+      title: 'Restore identity',
+      hint: 'paste your recovery code',
+      action: 'Restore',
+    );
+    if (code == null || code.trim().isEmpty) return;
+    Uint8List? seed;
+    try {
+      final bytes = Uint8List.fromList(hex.decode(code.trim()));
+      if (bytes.length == 32) seed = bytes;
+    } catch (_) {
+      seed = null;
+    }
+    if (seed == null) {
+      if (mounted) setState(() => _error = 'invalid recovery code');
+      return;
+    }
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Replace this identity?'),
+        content: const Text(
+          'This device will switch to the restored identity. Your current one '
+          'is lost unless you backed it up.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await widget.keyStore.writeSeed(seed);
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Identity restored'),
+        content: const Text('Restart Hearth to use the restored identity.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     unawaited(_channels?.close());
@@ -414,6 +522,35 @@ class _ChatScreenState extends State<ChatScreen> {
     if (bytes == null) return;
     final hash = await store.put(bytes);
     await _publish(StickerContent(hash));
+  }
+
+  /// Picks any file and sends it as an attachment (image inline, else a chip).
+  Future<void> _sendFile() async {
+    final store = _blobStore;
+    if (store == null) return;
+    final result = await FilePicker.platform.pickFiles(withData: true);
+    final file = result?.files.single;
+    final bytes = file?.bytes;
+    if (file == null || bytes == null) return;
+    final hash = await store.put(bytes);
+    await _publish(FileContent(hash, file.name, _mimeFor(file.extension)));
+  }
+
+  /// A coarse MIME from a file extension (enough to render images inline).
+  String _mimeFor(String? extension) {
+    switch (extension?.toLowerCase()) {
+      case 'png':
+        return 'image/png';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'gif':
+        return 'image/gif';
+      case 'webp':
+        return 'image/webp';
+      default:
+        return 'application/octet-stream';
+    }
   }
 
   /// Picks an audio file, lets you name it, and posts it as a soundboard clip.
@@ -631,6 +768,34 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Leaves a group channel: confirm, drop it from the registry, close it.
+  Future<void> _leaveChannel(String channelId) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Leave channel?'),
+        content: const Text(
+          "You'll stop receiving its messages and need a new invite to rejoin.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _registry?.remove(channelId);
+    _groups.remove(channelId);
+    await _channels?.leave(channelId);
+    if (mounted) setState(() {});
+  }
+
   // --- voice ---
 
   /// Joins (or switches to) voice in [channelId], requesting the mic.
@@ -752,6 +917,36 @@ class _ChatScreenState extends State<ChatScreen> {
                 Uint8List.fromList(hex.decode(peerHex)),
                 _displayName(Uint8List.fromList(hex.decode(peerHex))),
               ),
+          ],
+          const Divider(height: 28),
+          Text('MEMBERS', style: theme.textTheme.labelSmall),
+          for (final key in _membersOf(session))
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
+              title: Text(
+                _displayName(Uint8List.fromList(hex.decode(key))),
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () =>
+                  unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
+            ),
+          if (_membersOf(session).isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Text('Just you so far.', style: theme.textTheme.bodySmall),
+            ),
+          if (!session.isDm) ...[
+            const Divider(height: 28),
+            TextButton.icon(
+              onPressed: () => unawaited(_leaveChannel(session.channelId)),
+              icon: const Icon(Icons.logout, size: 18),
+              label: const Text('Leave channel'),
+              style: TextButton.styleFrom(
+                foregroundColor: theme.colorScheme.error,
+              ),
+            ),
           ],
         ],
       ),
@@ -1241,6 +1436,23 @@ class _ChatScreenState extends State<ChatScreen> {
                   Navigator.pop(context);
                 },
               ),
+            _drawerHeader('Identity'),
+            ListTile(
+              leading: const Icon(Icons.key_outlined),
+              title: const Text('Back up identity'),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_backupIdentity());
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.restore),
+              title: const Text('Restore identity'),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_restoreIdentity());
+              },
+            ),
           ],
         ),
       ),
@@ -1318,10 +1530,20 @@ class _ChatScreenState extends State<ChatScreen> {
         name,
         emoji,
       ),
+      FileContent(:final blob, :final name, :final mime) =>
+        mime.startsWith('image/')
+            ? _imageBlobView(session, blob)
+            : _fileChip(name),
       // Profile claims aren't shown in the timeline (filtered in _messageList).
       ProfileContent() => const SizedBox.shrink(),
     };
   }
+
+  /// A non-image file attachment shown as a labelled chip.
+  Widget _fileChip(String name) => Chip(
+    avatar: const Icon(Icons.insert_drive_file_outlined, size: 18),
+    label: Text(name),
+  );
 
   /// An image blob — sticker or GIF — once fetched (spinner until then).
   /// Image.memory animates GIFs.
@@ -1579,6 +1801,19 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           _contentView(context, session, session.contentOf(message)),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                _time(message.timestampMs),
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontSize: 10,
+                ),
+              ),
+            ),
+          ),
         ],
       ),
     );
@@ -1619,6 +1854,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => unawaited(_sendSticker()),
             icon: const Icon(Icons.image_outlined),
             tooltip: 'Sticker',
+          ),
+          IconButton(
+            onPressed: () => unawaited(_sendFile()),
+            icon: const Icon(Icons.attach_file),
+            tooltip: 'Attach file',
           ),
           IconButton(
             onPressed: () => unawaited(_addSound(session)),
@@ -1666,3 +1906,10 @@ class _ChatScreenState extends State<ChatScreen> {
 /// First 4 bytes of a public key as hex — the short author label.
 String _fingerprint(Uint8List key) =>
     key.sublist(0, 4).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+/// A message's local send time as `HH:mm`.
+String _time(int millis) {
+  final t = DateTime.fromMillisecondsSinceEpoch(millis).toLocal();
+  return '${t.hour.toString().padLeft(2, '0')}:'
+      '${t.minute.toString().padLeft(2, '0')}';
+}

@@ -64,6 +64,24 @@ class SoundContent extends Content {
   };
 }
 
+/// A one-off file attachment — any file stored as a content-addressed blob,
+/// with its [name] and [mime]. Images render inline; other files show as a chip.
+class FileContent extends Content {
+  const FileContent(this.blob, this.name, this.mime);
+
+  final String blob;
+  final String name;
+  final String mime;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'file',
+    'blob': blob,
+    'name': name,
+    'mime': mime,
+  };
+}
+
 /// A signed, self-asserted display name. Not rendered as a message — clients
 /// index it as the *suggested* petname for its author, who can still be named
 /// locally however you like. Self-asserted, so treat it as a suggestion, never
@@ -98,6 +116,12 @@ Content parseContent(List<int> payload) {
           );
         case 'profile':
           return ProfileContent(decoded['name'] as String? ?? '');
+        case 'file':
+          return FileContent(
+            decoded['blob'] as String? ?? '',
+            decoded['name'] as String? ?? 'file',
+            decoded['mime'] as String? ?? '',
+          );
       }
     }
   } catch (_) {

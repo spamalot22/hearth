@@ -160,8 +160,10 @@ class ChannelSession {
   /// Loads a referenced blob from the store, or asks peers for it once.
   Future<void> _ensureBlob(Content content) async {
     final hash = switch (content) {
+      GifContent(:final blob) => blob,
       StickerContent(:final blob) => blob,
       SoundContent(:final blob) => blob,
+      FileContent(:final blob) => blob,
       _ => null,
     };
     final store = blobStore;
@@ -257,6 +259,18 @@ class ChannelManager {
       _activeId = channelId;
       onUpdate();
     }
+  }
+
+  /// Closes and forgets one channel, switching the active channel to another (or
+  /// none). Callers also drop it from the registry.
+  Future<void> leave(String channelId) async {
+    final session = _sessions.remove(channelId);
+    if (session == null) return;
+    if (_activeId == channelId) {
+      _activeId = _sessions.keys.isEmpty ? null : _sessions.keys.first;
+    }
+    await session.close();
+    onUpdate();
   }
 
   Future<void> close() async {
