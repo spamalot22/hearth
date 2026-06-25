@@ -32,6 +32,8 @@ class WebRtcMesh {
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
+    this.idleAnnounceInterval = const Duration(seconds: 30),
+    this.idleSignalInterval = const Duration(seconds: 15),
     List<Map<String, dynamic>>? iceServers,
   }) : _client = client ?? http.Client(),
        _iceServers =
@@ -72,6 +74,11 @@ class WebRtcMesh {
   /// How often we drain our signal mailbox.
   final Duration signalPollInterval;
 
+  /// Slow rates used once we're settled (connected, no handshake in flight), so
+  /// the server is barely touched in steady state.
+  final Duration idleAnnounceInterval;
+  final Duration idleSignalInterval;
+
   final http.Client _client;
   final List<Map<String, dynamic>> _iceServers;
   final Map<String, _PeerLink> _links = {};
@@ -87,6 +94,7 @@ class WebRtcMesh {
   bool _announcing = false;
   bool _pollingSignals = false;
   bool _closed = false;
+  bool _started = false;
 
   /// Emits a [FrameChannel] each time a peer's data channel opens; the app wires
   /// a [SyncEngine] session onto each.
@@ -103,16 +111,47 @@ class WebRtcMesh {
   };
 
   void _start() {
+    if (_started) return;
+    _started = true;
     unawaited(_announce());
-    _announceTimer ??= Timer.periodic(
-      announceInterval,
-      (_) => unawaited(_announce()),
-    );
-    _signalTimer ??= Timer.periodic(
-      signalPollInterval,
-      (_) => unawaited(_pollSignals()),
-    );
+    _scheduleAnnounce();
+    _scheduleSignalPoll();
   }
+
+  // Announce often while connecting or peerless, rarely once settled.
+  void _scheduleAnnounce() {
+    if (_closed) return;
+    final delay = (_handshaking || !_connected)
+        ? announceInterval
+        : idleAnnounceInterval;
+    _announceTimer = Timer(delay, () {
+      unawaited(_announce());
+      _scheduleAnnounce();
+    });
+  }
+
+  // Drain the signal mailbox fast only while a handshake is in flight.
+  void _scheduleSignalPoll() {
+    if (_closed) return;
+    final delay = _handshaking ? signalPollInterval : idleSignalInterval;
+    _signalTimer = Timer(delay, () {
+      unawaited(_pollSignals());
+      _scheduleSignalPoll();
+    });
+  }
+
+  // A handshake just started — reschedule the next poll soon for its replies.
+  void _bumpSignalPoll() {
+    if (_closed || _signalTimer == null) return;
+    _signalTimer!.cancel();
+    _scheduleSignalPoll();
+  }
+
+  /// A handshake is in flight (some link not yet open).
+  bool get _handshaking => _links.values.any((link) => !link.open);
+
+  /// We hold at least one open connection.
+  bool get _connected => _links.values.any((link) => link.open);
 
   /// Announce presence, then start offering to any peer we don't yet have.
   Future<void> _announce() async {
@@ -213,6 +252,7 @@ class WebRtcMesh {
       },
     );
     _links[peerHex] = link;
+    _bumpSignalPoll(); // a handshake just started — poll fast for its replies
     return link;
   }
 
@@ -296,6 +336,9 @@ class _PeerLink implements FrameChannel {
 
   /// The underlying peer connection — exposed for voice audio-level stats.
   RTCPeerConnection? get connection => _pc;
+
+  /// Whether this link's data channel is open (handshake complete).
+  bool get open => _opened;
 
   @override
   void send(SyncFrame frame) {
