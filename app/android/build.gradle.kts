@@ -17,6 +17,15 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(":app")
+    // file_picker (and some transitive plugins) hardcode an older compileSdk than a
+    // dependency of theirs requires, failing the AAR-metadata check. Force every
+    // Android module to compileSdk 36.
+    afterEvaluate {
+        val androidExt = project.extensions.findByName("android")
+        if (androidExt is com.android.build.gradle.BaseExtension) {
+            androidExt.compileSdkVersion(36)
+        }
+    }
 }
 
 tasks.register<Delete>("clean") {
