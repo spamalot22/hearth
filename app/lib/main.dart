@@ -766,6 +766,20 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     final channel = parsed.channel;
+    // Adopt the invite's relay if we're still on the bundled default, so a new
+    // joiner never types a URL. (Won't override a relay you've set yourself.)
+    String? adoptedRelay;
+    final inviteRelay = parsed.relayUrl;
+    if (inviteRelay != null &&
+        inviteRelay != _relayUrl.toString() &&
+        _relayUrl.toString() == kRelayUrl.toString()) {
+      final relay = Uri.tryParse(inviteRelay);
+      if (relay != null && relay.hasScheme && relay.hasAuthority) {
+        await _settings?.setRelayUrl(inviteRelay);
+        _relayUrl = relay;
+        adoptedRelay = inviteRelay;
+      }
+    }
     await _registry?.save(channel);
     if (mounted) setState(() => _groups[channel.id] = channel);
     // Mandatorily add the inviter as a contact — guarantees you have at least one
@@ -789,6 +803,23 @@ class _ChatScreenState extends State<ChatScreen> {
         unawaited(_addMembers(active, auto: true));
       }
     });
+    if (adoptedRelay != null && mounted) {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Relay set from invite'),
+          content: Text(
+            'Restart Hearth to connect to this channel via\n$adoptedRelay',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   /// Shows the invite code for a group channel, with a copy button.
@@ -798,6 +829,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final invite = channel.invite(
       inviterPubkeyHex: widget.identity.publicKeyHex,
       inviterName: _myName,
+      relayUrl: _relayUrl.toString(),
     );
     await showDialog<void>(
       context: context,

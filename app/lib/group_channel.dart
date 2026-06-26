@@ -26,10 +26,15 @@ class GroupChannel {
   }
 
   /// The invite string others paste to join — carries id + key + a suggested
-  /// name, plus the **inviter's pubkey** (a mandatory contact on accept + the
-  /// cold-start bootstrap peer). Anyone holding it can join and read.
-  String invite({required String inviterPubkeyHex, String? inviterName}) =>
-      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'n': name, 'inv': inviterPubkeyHex, if (inviterName != null && inviterName.isNotEmpty) 'in': inviterName})))}';
+  /// name, the **inviter's pubkey** (a mandatory contact on accept + the cold-start
+  /// bootstrap peer), and the **relay URL** (so a new joiner auto-adopts it and
+  /// never has to type one). Anyone holding it can join and read.
+  String invite({
+    required String inviterPubkeyHex,
+    String? inviterName,
+    String? relayUrl,
+  }) =>
+      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'n': name, 'inv': inviterPubkeyHex, if (inviterName != null && inviterName.isNotEmpty) 'in': inviterName, if (relayUrl != null && relayUrl.isNotEmpty) 'r': relayUrl})))}';
 
   /// Parses an [invite] string into the channel + inviter, or null if malformed.
   static Invite? fromInvite(String invite) {
@@ -53,6 +58,7 @@ class GroupChannel {
         ),
         inviterPubkey: nonEmpty('inv'),
         inviterName: nonEmpty('in'),
+        relayUrl: nonEmpty('r'),
       );
     } catch (_) {
       return null;
@@ -77,15 +83,22 @@ class GroupChannel {
   ).join();
 }
 
-/// A parsed invite: the [channel] to join plus the inviter — added as a mandatory
-/// contact on accept (keeping the invite-tree contact graph connected) and used as
-/// the cold-start bootstrap peer. [inviterPubkey] is null for older invites.
+/// A parsed invite: the [channel] to join, the inviter (added as a mandatory
+/// contact on accept — keeping the invite-tree contact graph connected — and used
+/// as the cold-start bootstrap peer), and the [relayUrl] the channel uses (a new
+/// joiner adopts it). Fields are null for older invites that omit them.
 class Invite {
-  Invite({required this.channel, this.inviterPubkey, this.inviterName});
+  Invite({
+    required this.channel,
+    this.inviterPubkey,
+    this.inviterName,
+    this.relayUrl,
+  });
 
   final GroupChannel channel;
   final String? inviterPubkey; // hex
   final String? inviterName;
+  final String? relayUrl;
 }
 
 /// On-device list of the group channels you've created or joined (Hive), so they

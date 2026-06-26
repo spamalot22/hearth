@@ -14,10 +14,14 @@ void main() {
       expect(GroupChannel.create('x').id, isNot(GroupChannel.create('x').id));
     });
 
-    test('an invite round-trips channel + inviter', () {
+    test('an invite round-trips channel + inviter + relay', () {
       final c = GroupChannel.create('Games');
       final back = GroupChannel.fromInvite(
-        c.invite(inviterPubkeyHex: 'abcd', inviterName: 'Alice'),
+        c.invite(
+          inviterPubkeyHex: 'abcd',
+          inviterName: 'Alice',
+          relayUrl: 'https://relay.example.com',
+        ),
       );
       expect(back, isNotNull);
       expect(back!.channel.id, c.id);
@@ -25,6 +29,7 @@ void main() {
       expect(back.channel.name, 'Games');
       expect(back.inviterPubkey, 'abcd');
       expect(back.inviterName, 'Alice');
+      expect(back.relayUrl, 'https://relay.example.com');
     });
 
     test('a malformed invite returns null', () {
