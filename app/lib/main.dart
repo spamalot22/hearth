@@ -163,6 +163,8 @@ class _ChatScreenState extends State<ChatScreen> {
   ProfileStore? _profile;
   SettingsStore? _settings;
   late Uri _relayUrl = widget.relayUrl;
+  bool? _relayUp; // null = not checked yet
+  bool _checkingRelay = false;
   String? _myName;
   final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
   final Set<String> _announced = {}; // channels we've published our name into
@@ -202,6 +204,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _relayUrl = parsed;
       }
     }
+    if (widget.autoPoll) unawaited(_checkRelay());
     if (blobStore != null && library != null) {
       await loadStarterSounds(blobStore, library);
     }
@@ -482,6 +485,55 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  /// Pings the relay's `/health` to show whether it's actually reachable and
+  /// responding (so you can tell if a friend would be able to connect).
+  Future<void> _checkRelay() async {
+    if (!mounted || _checkingRelay) return;
+    setState(() => _checkingRelay = true);
+    bool up;
+    try {
+      final res = await http
+          .get(_relayUrl.replace(path: '/health'))
+          .timeout(const Duration(seconds: 5));
+      up = res.statusCode == 200 && res.body.contains('"ok":true');
+    } catch (_) {
+      up = false;
+    }
+    if (mounted) {
+      setState(() {
+        _relayUp = up;
+        _checkingRelay = false;
+      });
+    }
+  }
+
+  /// A coloured dot + label for the relay's reachability.
+  Widget _relayStatus() {
+    final Color color;
+    final String label;
+    if (_checkingRelay) {
+      (color, label) = (Colors.grey, 'checking…');
+    } else if (_relayUp == null) {
+      (color, label) = (Colors.grey, 'not checked');
+    } else if (_relayUp!) {
+      (color, label) = (Colors.green, 'responding');
+    } else {
+      (color, label) = (Colors.red, 'unreachable');
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(label, style: TextStyle(color: color, fontSize: 12)),
+      ],
     );
   }
 
@@ -1385,6 +1437,9 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
         bottom: _error == null ? null : _errorBar(context, _error!),
       ),
+      onDrawerChanged: (open) {
+        if (open) unawaited(_checkRelay());
+      },
       drawer: _drawer(context),
       endDrawer: (session != null && !wide)
           ? Drawer(child: SafeArea(child: _channelPanel(session)))
@@ -1554,10 +1609,23 @@ class _ChatScreenState extends State<ChatScreen> {
             ListTile(
               leading: const Icon(Icons.dns_outlined),
               title: const Text('Relay server'),
-              subtitle: Text(
-                _relayUrl.toString(),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _relayUrl.toString(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  _relayStatus(),
+                ],
+              ),
+              trailing: IconButton(
+                tooltip: 'Re-check relay',
+                icon: const Icon(Icons.refresh),
+                onPressed: _checkingRelay
+                    ? null
+                    : () => unawaited(_checkRelay()),
               ),
               onTap: () {
                 Navigator.pop(context);
