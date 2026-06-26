@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:chat_app/mesh_control.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -30,16 +28,23 @@ void main() {
       expect(s.data['sig'], 'deadbeef');
     });
 
-    test('gossip frames are tagged and pass through untouched', () {
-      final syncBytes = utf8.encode('a-sync-frame');
-      final split = splitFrame(wrapGossip(syncBytes));
+    test('gossip frames are tagged and unwrap to the original text', () {
+      const sync = '{"t":"have","ids":["a"]}';
+      final split = splitFrame(wrapGossip(sync));
       expect(split.isControl, isFalse);
-      expect(split.body, syncBytes);
+      expect(split.body, sync);
+    });
+
+    test('an untagged legacy JSON frame is treated as gossip, intact', () {
+      const legacy = '{"t":"have"}'; // starts with '{', not a tag char
+      final split = splitFrame(legacy);
+      expect(split.isControl, isFalse);
+      expect(split.body, legacy);
     });
 
     test('a malformed control body decodes to null, not a throw', () {
-      expect(MeshControl.decodeBody(utf8.encode('not json {')), isNull);
-      expect(MeshControl.decodeBody(utf8.encode('{"t":"unknown"}')), isNull);
+      expect(MeshControl.decodeBody('not json {'), isNull);
+      expect(MeshControl.decodeBody('{"t":"unknown"}'), isNull);
     });
   });
 }

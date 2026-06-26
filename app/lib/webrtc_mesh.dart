@@ -5,6 +5,7 @@ import 'package:core/core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import 'mesh_control.dart';
 import 'signal_auth.dart';
 
 /// A peer-to-peer WebRTC mesh that surfaces each connected peer to the gossip
@@ -29,6 +30,7 @@ class WebRtcMesh {
     this.localStream,
     this.onRemoteStream,
     this.onPeerLeft,
+    this.onControl,
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
@@ -64,6 +66,10 @@ class WebRtcMesh {
   /// Called with a peer's id when its connection drops — for voice, to play a
   /// disconnect cue and release their audio.
   final void Function(String peerHex)? onPeerLeft;
+
+  /// Called when a peer sends a mesh control message (peer-exchange / relayed
+  /// signalling) over the data channel. Null until track A wires a handler.
+  final void Function(String peerHex, MeshControl control)? onControl;
 
   /// Our own public key (hex) — our peer id in the mesh.
   late final String selfPubkeyHex = identity.publicKeyHex;
@@ -241,6 +247,7 @@ class WebRtcMesh {
       iceServers: _iceServers,
       localStream: localStream,
       onRemoteStream: onRemoteStream,
+      onControl: onControl,
       onSignal: (kind, data) => _sendSignal(peerHex, kind, data),
       onOpen: _emitPeer,
       onClosed: () {
@@ -312,6 +319,7 @@ class _PeerLink implements FrameChannel {
     required this.onClosed,
     this.localStream,
     this.onRemoteStream,
+    this.onControl,
   });
 
   final String peerHex;
@@ -322,6 +330,7 @@ class _PeerLink implements FrameChannel {
   final void Function(String kind, Object? data) onSignal;
   final void Function(_PeerLink link) onOpen;
   final void Function() onClosed;
+  final void Function(String peerHex, MeshControl control)? onControl;
 
   final StreamController<SyncFrame> _frames = StreamController<SyncFrame>();
   RTCPeerConnection? _pc;
@@ -344,7 +353,17 @@ class _PeerLink implements FrameChannel {
   void send(SyncFrame frame) {
     final channel = _channel;
     if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
-      unawaited(channel!.send(RTCDataChannelMessage(frame.encode())));
+      unawaited(
+        channel!.send(RTCDataChannelMessage(wrapGossip(frame.encode()))),
+      );
+    }
+  }
+
+  /// Sends a mesh control message (peer-exchange / relayed signalling) to this peer.
+  void sendControl(MeshControl control) {
+    final channel = _channel;
+    if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
+      unawaited(channel!.send(RTCDataChannelMessage(control.encode())));
     }
   }
 
@@ -442,7 +461,13 @@ class _PeerLink implements FrameChannel {
     _channel = channel;
     channel.onMessage = (message) {
       if (message.isBinary) return;
-      final frame = SyncFrame.decode(message.text);
+      final split = splitFrame(message.text);
+      if (split.isControl) {
+        final control = MeshControl.decodeBody(split.body);
+        if (control != null) onControl?.call(peerHex, control);
+        return;
+      }
+      final frame = SyncFrame.decode(split.body);
       if (frame != null && !_frames.isClosed) _frames.add(frame);
     };
     channel.onDataChannelState = (state) {
