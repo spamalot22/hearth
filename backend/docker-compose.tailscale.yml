@@ -1,0 +1,63 @@
+# Hearth relay — a self-contained Tailscale-Funnel stack, deployable as a Portainer
+# stack (or `docker compose -f docker-compose.tailscale.yml up -d`). It pulls the
+# published relay image and exposes it publicly via Tailscale Funnel: no domain, no
+# port-forward, no Cloudflare. The relay shares the Tailscale container's network, so
+# Funnel reaches it on localhost and nothing else can.
+#
+# Set these as stack environment variables (Portainer → Environment) or in a .env:
+#   TS_AUTHKEY    — a reusable, non-ephemeral Tailscale auth key (admin console → Keys)
+#   GIPHY_KEY     — optional, GIF search
+#   FREESOUND_KEY — optional, sound search
+#   TAG           — relay image tag (default: latest)
+#
+# Kernel networking needs /dev/net/tun. In a Proxmox LXC, pass it through on the host
+# (/etc/pve/lxc/<id>.conf), or set TS_USERSPACE=true (and drop devices/cap_add) to
+# avoid TUN entirely — userspace mode is enough for Funnel's inbound proxy.
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY to a Tailscale auth key}
+      TS_HOSTNAME: hearth-relay        # → https://hearth-relay.<your-tailnet>.ts.net
+      TS_STATE_DIR: /var/lib/tailscale # persisted so it stays authed across restarts
+      TS_SERVE_CONFIG: /config/funnel.json
+      TS_USERSPACE: "false"            # "true" avoids needing /dev/net/tun
+    configs:
+      - source: ts-funnel
+        target: /config/funnel.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun      # remove if TS_USERSPACE=true
+    cap_add:
+      - NET_ADMIN                      # remove if TS_USERSPACE=true
+    restart: unless-stopped
+
+  relay:
+    image: ghcr.io/spamalot22/hearth-relay:${TAG:-latest}
+    environment:
+      PORT: 8787
+      GIPHY_KEY: ${GIPHY_KEY:-}
+      FREESOUND_KEY: ${FREESOUND_KEY:-}
+    network_mode: service:tailscale    # share Tailscale's netns; Funnel → localhost:8787
+    depends_on:
+      - tailscale
+    restart: unless-stopped
+
+# Funnel config handed to the Tailscale container. $${TS_CERT_DOMAIN} is escaped so
+# Compose emits it literally; Tailscale fills in the node's FQDN at runtime.
+configs:
+  ts-funnel:
+    content: |
+      {
+        "TCP": { "443": { "HTTPS": true } },
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": {
+            "Handlers": { "/": { "Proxy": "http://127.0.0.1:8787" } }
+          }
+        },
+        "AllowFunnel": { "$${TS_CERT_DOMAIN}:443": true }
+      }
+
+volumes:
+  tailscale-state:
