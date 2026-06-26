@@ -1,11 +1,14 @@
 # Hearth relay stack — the self-hosted cold-start bootstrap. This file IS the IaC.
 #
-#   cp .env.example .env     # then fill in the media keys + tunnel token
-#   docker compose up -d     # builds + runs the relay behind a Cloudflare Tunnel
+#   cp .env.example .env       # media keys optional; TUNNEL_TOKEN only for cloudflare
+#   docker compose up -d --build
 #
-# Nothing is published to the host or router: the tunnel dials *out* to Cloudflare,
-# so there are no inbound ports to forward or expose. On a NAS you'd
-# `docker compose pull` the CI-built image instead of building locally.
+# By default this runs ONLY the relay, published to the box's loopback
+# (127.0.0.1:8787) — nothing on the LAN or public internet. You expose it with a
+# tunnel running on the box:
+#   • Tailscale (no domain):  tailscale funnel --bg 8787   (public HTTPS)
+#                             tailscale serve  --bg 8787   (tailnet-only)
+#   • Cloudflare (domain + token):  docker compose --profile cloudflare up -d
 services:
   relay:
     build: .
@@ -16,16 +19,20 @@ services:
       # Media-search proxy keys — search degrades gracefully if unset.
       GIPHY_KEY: ${GIPHY_KEY:-}
       FREESOUND_KEY: ${FREESOUND_KEY:-}
-    expose:
-      - "8787" # reachable only inside the compose network (by the tunnel)
+    # Loopback only: reachable by a tunnel/funnel on the box, never the LAN. (Still
+    # reachable as `relay:8787` inside the compose network, e.g. by cloudflared.)
+    ports:
+      - "127.0.0.1:8787:8787"
 
+  # Opt-in Cloudflare path: `docker compose --profile cloudflare up -d`. Routes a
+  # named tunnel's public hostname to http://relay:8787 (set TUNNEL_TOKEN in .env).
   tunnel:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
     command: tunnel --no-autoupdate run
     environment:
-      # Token for a named tunnel created in the Cloudflare Zero Trust dashboard;
-      # its public hostname is routed there to http://relay:8787.
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
     depends_on:
       - relay
+    profiles:
+      - cloudflare
