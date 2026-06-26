@@ -1,36 +1,39 @@
-# Hearth relay — a self-contained Tailscale-Funnel stack, deployable as a Portainer
-# stack (or `docker compose -f docker-compose.tailscale.yml up -d`). It pulls the
-# published relay image and exposes it publicly via Tailscale Funnel: no domain, no
-# port-forward, no Cloudflare. The relay shares the Tailscale container's network, so
-# Funnel reaches it on localhost and nothing else can.
+# Hearth relay — a self-contained, public Tailscale-Funnel stack. Deploy it as a
+# Portainer stack (Git repo or web editor) or `docker compose -f docker-compose.tailscale.yml up -d`.
+# Anyone can run it: it pulls the published relay image and exposes it publicly via
+# Tailscale Funnel — no domain, no port-forward, no Cloudflare. The relay shares the
+# Tailscale container's network namespace, so Funnel reaches it on localhost and the
+# relay is never otherwise exposed.
 #
-# Set these as stack environment variables (Portainer → Environment) or in a .env:
-#   TS_AUTHKEY    — a reusable, non-ephemeral Tailscale auth key (admin console → Keys)
-#   GIPHY_KEY     — optional, GIF search
-#   FREESOUND_KEY — optional, sound search
-#   TAG           — relay image tag (default: latest)
-#
-# Kernel networking needs /dev/net/tun. In a Proxmox LXC, pass it through on the host
-# (/etc/pve/lxc/<id>.conf), or set TS_USERSPACE=true (and drop devices/cap_add) to
-# avoid TUN entirely — userspace mode is enough for Funnel's inbound proxy.
+# Everything is configured with environment variables (Portainer → Stack → Environment):
+#   TS_AUTHKEY     (required) reusable, non-ephemeral Tailscale auth key (admin console → Keys)
+#   TS_HOSTNAME    node name → https://<TS_HOSTNAME>.<your-tailnet>.ts.net   (default: hearth-relay)
+#   TS_USERSPACE   "true" (default) needs no TUN device or privileges — works on Synology /
+#                  locked-down hosts. Set "false" for kernel mode, then also uncomment the
+#                  devices:/cap_add: lines below and provide /dev/net/tun on the host.
+#   GIPHY_KEY      (optional) GIF-search proxy key
+#   FREESOUND_KEY  (optional) sound-search proxy key
+#   TAG            (optional) relay image tag (default: latest)
 services:
   tailscale:
     image: tailscale/tailscale:latest
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY to a Tailscale auth key}
-      TS_HOSTNAME: hearth-relay        # → https://hearth-relay.<your-tailnet>.ts.net
-      TS_STATE_DIR: /var/lib/tailscale # persisted so it stays authed across restarts
+      TS_HOSTNAME: ${TS_HOSTNAME:-hearth-relay}
+      TS_USERSPACE: ${TS_USERSPACE:-true}
+      TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/funnel.json
-      TS_USERSPACE: "false"            # "true" avoids needing /dev/net/tun
     configs:
       - source: ts-funnel
         target: /config/funnel.json
     volumes:
       - tailscale-state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun      # remove if TS_USERSPACE=true
-    cap_add:
-      - NET_ADMIN                      # remove if TS_USERSPACE=true
+    # Kernel mode only (TS_USERSPACE=false): uncomment these and provide /dev/net/tun
+    # on the host (Synology: load the `tun` module; Proxmox LXC: lxc.mount.entry).
+    # devices:
+    #   - /dev/net/tun:/dev/net/tun
+    # cap_add:
+    #   - NET_ADMIN
     restart: unless-stopped
 
   relay:
@@ -39,13 +42,13 @@ services:
       PORT: 8787
       GIPHY_KEY: ${GIPHY_KEY:-}
       FREESOUND_KEY: ${FREESOUND_KEY:-}
-    network_mode: service:tailscale    # share Tailscale's netns; Funnel → localhost:8787
+    network_mode: service:tailscale # share Tailscale's netns; Funnel → localhost:8787
     depends_on:
       - tailscale
     restart: unless-stopped
 
-# Funnel config handed to the Tailscale container. $${TS_CERT_DOMAIN} is escaped so
-# Compose emits it literally; Tailscale fills in the node's FQDN at runtime.
+# Funnel config for the Tailscale container. $${TS_CERT_DOMAIN} is escaped so Compose
+# passes it through literally; Tailscale fills in the node's FQDN at runtime.
 configs:
   ts-funnel:
     content: |
