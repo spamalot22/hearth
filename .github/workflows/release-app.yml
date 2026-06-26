@@ -89,6 +89,9 @@ jobs:
 
   release:
     needs: [android, windows, web]
+    # Release whatever built, even if one platform failed, so a flaky native build
+    # on one OS doesn't block shipping the others.
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

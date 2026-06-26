@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.example.chat_app"
-    compileSdk = flutter.compileSdkVersion
+    // A plugin pulled in by file_picker (flutter_plugin_android_lifecycle) requires
+    // compileSdk 36; Flutter's default is still lower, so pin it explicitly.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
