@@ -9,7 +9,8 @@ name: deploy-relay
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' # e.g. v0.1.0
+      - '[0-9]*' # e.g. 0.1.0 (bare semver)
 
 jobs:
   build-push:
