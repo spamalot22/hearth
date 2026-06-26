@@ -94,4 +94,32 @@ describe('relay', () => {
 
     expect(second.messages).toHaveLength(1);
   });
+
+  it('rejects an oversized body with 413', async () => {
+    const app = createRelay();
+    const body = 'x'.repeat(70 * 1024); // > MAX_BODY_BYTES (64 KiB)
+    const res = await app.request('/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(body.length),
+      },
+      body,
+    });
+
+    expect(res.status).toBe(413);
+  });
+
+  it('rate-limits the media-search proxy', async () => {
+    const app = createRelay();
+    let limited = false;
+    for (let i = 0; i < 40; i++) {
+      if ((await app.request('/gif/search?q=x')).status === 429) {
+        limited = true;
+        break;
+      }
+    }
+
+    expect(limited).toBe(true);
+  });
 });

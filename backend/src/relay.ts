@@ -1,7 +1,14 @@
-import { Hono } from 'hono';
+import { Hono, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 
 import { addGifRoutes } from './gif';
+import {
+  MAX_BODY_BYTES,
+  MAX_CHANNEL_MESSAGES,
+  RateLimiter,
+  SEARCH_RATE_LIMIT,
+  SEARCH_RATE_WINDOW_MS,
+} from './limits';
 import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
 import { addSoundRoutes } from './sound';
@@ -23,6 +30,9 @@ export class RelayStore {
     const list = this.byChannel.get(message.channel) ?? [];
     const stored: StoredMessage = { seq: ++this.seq, message };
     list.push(stored);
+    if (list.length > MAX_CHANNEL_MESSAGES) {
+      list.splice(0, list.length - MAX_CHANNEL_MESSAGES);
+    }
     this.byChannel.set(message.channel, list);
     return stored.seq;
   }
@@ -47,10 +57,32 @@ export function createRelay(
   // Allow the web app (served from a different localhost port) to call us.
   app.use('/*', cors());
 
+  // Reject oversized bodies early — signals and messages are tiny.
+  app.use('/*', async (c, next) => {
+    const len = Number(c.req.header('content-length') ?? '0');
+    if (Number.isFinite(len) && len > MAX_BODY_BYTES) {
+      return c.json({ error: 'payload too large' }, 413);
+    }
+    await next();
+  });
+
   app.get('/health', (c) => c.json({ ok: true }));
 
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
   addSignalingRoutes(app, signalHub);
+
+  // Cap the media-search proxies relay-wide so a stranger can't drain the provider
+  // quota (these calls carry no identity to key on). Registered before the routes
+  // so it runs ahead of them.
+  const searchLimiter = new RateLimiter(SEARCH_RATE_LIMIT, SEARCH_RATE_WINDOW_MS);
+  const limitSearch: MiddlewareHandler = async (c, next) => {
+    if (!searchLimiter.allow('search', Date.now())) {
+      return c.json({ error: 'rate limited' }, 429);
+    }
+    await next();
+  };
+  app.use('/gif/*', limitSearch);
+  app.use('/sound/*', limitSearch);
 
   // GIF search proxy (provider key stays on the relay, never in clients).
   addGifRoutes(app);
