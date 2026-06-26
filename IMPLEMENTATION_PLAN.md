@@ -313,12 +313,12 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       id) in `core`; the app sends encrypted DMs over a derived DM channel and
       carriers relay blind. Independent of group MLS. (Limitation: both parties must
       open the DM — no auto-join/notify yet.)
-- [ ] **Self-hosted relay deploy** (the cold-start bootstrap, opt-in, not required
-      once peers are connected): dockerise the in-memory Hono relay (pubkey
-      signalling mailbox + media proxies) as a **Compose stack**, exposed via a
-      **Cloudflare Tunnel** (no port-forward, no home-IP exposure); ship via
-      **GitHub Actions on a version tag → GHCR**, box pulls. Client points at any
-      relay URL. (See "Rendezvous & connectivity" + "Deployment".)
+- [x] **Self-hosted relay deploy** — DONE. Dockerised in-memory Hono relay shipped
+      via GitHub Actions (version tag → GHCR), deployed as a **Portainer stack** on a
+      Synology NAS, exposed public-HTTPS via a **Tailscale Funnel sidecar** (no
+      domain, no port-forward; the tailnet node is the container, not the NAS). The
+      app's relay URL is configurable. Funnel needs **kernel mode** (TUN device).
+      Cloudflare Tunnel kept as an alt profile. See `backend/DEPLOY.md`.
 - [x] **Stop polling once connected** — adaptive signalling: fast poll (700ms/5s)
       only while a handshake's in flight or peerless, idle (15s/30s) once settled.
 - [ ] **Server-minimal connectivity (rest)** — cached-candidate direct reconnect +
@@ -587,6 +587,18 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   **GitHub Actions on a version tag → GHCR**, the box pulls. (Caveat acknowledged:
   cached addresses fail for ephemeral/symmetric NAT mappings — that rung is for the
   reachable minority; STUN still needed for each peer to learn its own candidate.)
+- **2026-06-26** — **Relay deployed off `localhost`** (Synology NAS, Portainer). The
+  relay ships as a GHCR image (GH Actions on a version tag) and runs as a Portainer
+  stack with an official **Tailscale Funnel sidecar** for public HTTPS — no domain, no
+  port-forward, and the **tailnet node is the container**, not the NAS (it shares a
+  netns only with the relay, so nothing else on the host is exposed). Hard-won gotchas,
+  captured in `backend/DEPLOY.md`: Funnel **requires kernel mode** (a real `/dev/net/tun`
+  + `NET_ADMIN`) — userspace mode configures Funnel but never receives inbound traffic
+  (silent 502); the **Funnel ACL `nodeAttrs` grant** is needed because the container's
+  `TS_SERVE_CONFIG` bypasses the CLI's interactive enable; and `NXDOMAIN` on the funnel
+  name is usually just stale negative-DNS-cache, not a real failure. The app gained a
+  configurable relay-URL setting. (Cloudflare Tunnel remains an alt profile — userspace,
+  no TUN, needs a domain.)
 - **2026-06-25** — **Dropped libp2p; replaced coturn with a Dart relay-fallback.**
   Considered libp2p (Circuit Relay v2 + DCUtR + Kademlia DHT) for NAT traversal /
   zero-servers. Rejected: it doesn't actually reach zero servers for our use case (the
