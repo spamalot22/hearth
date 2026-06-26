@@ -8,9 +8,9 @@
 # Everything is configured with environment variables (Portainer → Stack → Environment):
 #   TS_AUTHKEY     (required) reusable, non-ephemeral Tailscale auth key (admin console → Keys)
 #   TS_HOSTNAME    node name → https://<TS_HOSTNAME>.<your-tailnet>.ts.net   (default: hearth-relay)
-#   TS_USERSPACE   "true" (default) needs no TUN device or privileges — works on Synology /
-#                  locked-down hosts. Set "false" for kernel mode, then also uncomment the
-#                  devices:/cap_add: lines below and provide /dev/net/tun on the host.
+#   TS_USERSPACE   "false" (default) = kernel mode, REQUIRED for Funnel — userspace mode
+#                  configures Funnel but never receives inbound public traffic (you get a
+#                  502). Needs /dev/net/tun on the host (Synology: load the `tun` module).
 #   GIPHY_KEY      (optional) GIF-search proxy key
 #   FREESOUND_KEY  (optional) sound-search proxy key
 #   TAG            (optional) relay image tag (default: latest)
@@ -20,7 +20,7 @@ services:
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY to a Tailscale auth key}
       TS_HOSTNAME: ${TS_HOSTNAME:-hearth-relay}
-      TS_USERSPACE: ${TS_USERSPACE:-true}
+      TS_USERSPACE: ${TS_USERSPACE:-false}
       TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/funnel.json
     configs:
@@ -28,12 +28,12 @@ services:
         target: /config/funnel.json
     volumes:
       - tailscale-state:/var/lib/tailscale
-    # Kernel mode only (TS_USERSPACE=false): uncomment these and provide /dev/net/tun
-    # on the host (Synology: load the `tun` module; Proxmox LXC: lxc.mount.entry).
-    # devices:
-    #   - /dev/net/tun:/dev/net/tun
-    # cap_add:
-    #   - NET_ADMIN
+    # Funnel needs kernel mode → a real TUN device. The host must provide /dev/net/tun
+    # (Synology: load the `tun` module first; Proxmox LXC: lxc.mount.entry).
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
     restart: unless-stopped
 
   relay:
