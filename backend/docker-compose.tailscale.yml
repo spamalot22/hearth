@@ -17,6 +17,8 @@
 services:
   tailscale:
     image: tailscale/tailscale:latest
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY to a Tailscale auth key}
       TS_HOSTNAME: ${TS_HOSTNAME:-hearth-relay}
@@ -38,6 +40,8 @@ services:
 
   relay:
     image: ghcr.io/spamalot22/hearth-relay:${TAG:-latest}
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     environment:
       PORT: 8787
       GIPHY_KEY: ${GIPHY_KEY:-}

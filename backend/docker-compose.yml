@@ -13,6 +13,8 @@ services:
   relay:
     build: .
     image: ghcr.io/spamalot22/hearth-relay:${TAG:-latest}
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     restart: unless-stopped
     environment:
       PORT: 8787

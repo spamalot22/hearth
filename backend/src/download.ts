@@ -22,14 +22,12 @@ export function addDownloadRoutes(
       return c.json({ error: 'version and asset required' }, 400);
     }
     const { repo, token } = getConfig();
-    if (!repo || !token) {
+    if (!repo) {
       return c.json({ error: 'downloads not configured' }, 503);
     }
 
-    const gh = {
-      authorization: `Bearer ${token}`,
-      'user-agent': 'hearth-relay',
-    };
+    const gh: Record<string, string> = { 'user-agent': 'hearth-relay' };
+    if (token) gh['authorization'] = `Bearer ${token}`;
 
     // Resolve the release by tag, then find the asset by name.
     const relRes = await fetch(
