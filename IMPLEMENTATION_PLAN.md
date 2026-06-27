@@ -315,8 +315,8 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       open the DM — no auto-join/notify yet.)
 - [x] **Self-hosted relay deploy** — DONE. Dockerised in-memory Hono relay shipped
       via GitHub Actions (version tag → GHCR), deployed as a **Portainer stack** on a
-      Synology NAS, exposed public-HTTPS via a **Tailscale Funnel sidecar** (no
-      domain, no port-forward; the tailnet node is the container, not the NAS). The
+      small always-on host, exposed public-HTTPS via a **Tailscale Funnel sidecar** (no
+      domain, no port-forward; the tailnet node is the container, not the host). The
       app's relay URL is configurable. Funnel needs **kernel mode** (TUN device).
       Cloudflare Tunnel kept as an alt profile. See `backend/DEPLOY.md`.
 - [x] **Stop polling once connected** — adaptive signalling: fast poll (700ms/5s)
@@ -596,7 +596,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   **GitHub Actions on a version tag → GHCR**, the box pulls. (Caveat acknowledged:
   cached addresses fail for ephemeral/symmetric NAT mappings — that rung is for the
   reachable minority; STUN still needed for each peer to learn its own candidate.)
-- **2026-06-26** — **Relay deployed off `localhost`** (Synology NAS, Portainer). The
+- **2026-06-26** — **Relay deployed off `localhost`** (self-hosted, Portainer). The
   relay ships as a GHCR image (GH Actions on a version tag) and runs as a Portainer
   stack with an official **Tailscale Funnel sidecar** for public HTTPS — no domain, no
   port-forward, and the **tailnet node is the container**, not the NAS (it shares a

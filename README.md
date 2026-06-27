@@ -12,7 +12,7 @@ offline); it can verify that a message is authentic but can never read it.
 > **Status:** early, fast-moving work in progress. Crypto, message sync, P2P mesh,
 > channels, media, voice, identity backup/restore, signed auto-updates, P2P version
 > enforcement, relay tunnel fallback, and peer-exchange all work today. The relay is
-> deployed (Synology NAS + Tailscale Funnel). See
+> deployed (self-hosted behind a Tailscale Funnel). See
 > [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the living plan and the
 > decisions log.
 
@@ -155,7 +155,7 @@ media-search proxies; once peers have a live link, presence/peers/messages flow
 pure P2P, so the happy path needs no server. It's optional and swappable (the
 client points at any relay URL), and is designed to **self-host** as a single
 in-memory Docker container behind a tunnel (no port-forward). Deployed on a
-Synology NAS via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
+small always-on host via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
 
 When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
 (`/tunnel`) forwards opaque ciphertext between the stuck peers — same E2E

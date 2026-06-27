@@ -138,10 +138,11 @@ jobs:
             echo "RELEASE_PRIVATE_KEY / RELAY_URL not set — skipping manifest publish."
             exit 0
           fi
+          echo "::add-mask::$RELAY_URL"   # keep the relay URL out of public Actions logs
           SEQ=$(date +%s)
           pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
             android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip > manifest.json
-          echo "Publishing manifest (seq $SEQ) to $RELAY_URL"
+          echo "Publishing manifest (seq $SEQ) to the relay"
           curl -fsS -X POST "$RELAY_URL/version" \
             -H "authorization: Bearer $RELEASE_SECRET" \
             -H "content-type: application/json" \

@@ -10,7 +10,7 @@
 #   TS_HOSTNAME    node name → https://<TS_HOSTNAME>.<your-tailnet>.ts.net   (default: hearth-relay)
 #   TS_USERSPACE   "false" (default) = kernel mode, REQUIRED for Funnel — userspace mode
 #                  configures Funnel but never receives inbound public traffic (you get a
-#                  502). Needs /dev/net/tun on the host (Synology: load the `tun` module).
+#                  502). Needs /dev/net/tun on the host (load the `tun` kernel module if missing).
 #   GIPHY_KEY      (optional) GIF-search proxy key
 #   FREESOUND_KEY  (optional) sound-search proxy key
 #   TAG            (optional) relay image tag (default: latest)
@@ -29,7 +29,7 @@ services:
     volumes:
       - tailscale-state:/var/lib/tailscale
     # Funnel needs kernel mode → a real TUN device. The host must provide /dev/net/tun
-    # (Synology: load the `tun` module first; Proxmox LXC: lxc.mount.entry).
+    # (load the `tun` kernel module on the host if missing; Proxmox LXC: lxc.mount.entry).
     devices:
       - /dev/net/tun:/dev/net/tun
     cap_add:

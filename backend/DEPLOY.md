@@ -59,13 +59,13 @@ is the *container*, not your NAS.
 ### Kernel mode + /dev/net/tun
 Funnel needs **kernel networking** (a real TUN interface), so the stack maps
 `/dev/net/tun` and grants `NET_ADMIN`. The host must provide that device:
-- Many hosts already have it (Synology DSM x86 does) — the container just works.
+- Many hosts already have it (most x86 NAS/desktop kernels do) — the container just works.
 - If the container errors with *"no such device"*, load the module on the host:
   ```
   sudo modprobe tun         # then, only if /dev/net/tun is still missing:
   sudo mkdir -p /dev/net && sudo mknod /dev/net/tun c 10 200 && sudo chmod 600 /dev/net/tun
   ```
-  Persist it across reboots (Synology: Task Scheduler → boot-up task → `modprobe tun`).
+  Persist it across reboots (e.g. a boot-time task that runs `modprobe tun`).
 
 `NET_ADMIN` + `/dev/net/tun` is the standard minimal grant every VPN container uses —
 scoped to the container's own network namespace, **not** privileged mode, no host or
