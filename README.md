@@ -147,6 +147,16 @@ gossip-critical mesh. Includes mute, deafen, per-user volume, generated join/lea
 cues every client plays locally, and live speaking indicators driven by WebRTC
 `audioLevel` stats.
 
+### AI bot (local LLM, decentralised hosting)
+[`app/lib/inference_bot.dart`](app/lib/inference_bot.dart) provides an **@bot**
+you can mention in any channel. The bot runs a GGUF model locally on whichever
+peer has one installed — inference is **not distributed** across devices (the full
+model runs on one machine), but hosting is **decentralised**: there's no AI server,
+any peer can volunteer by downloading a model in Settings → AI. Requests are
+broadcast via the mesh; the first available peer responds. Uses llama.cpp under
+the hood (via fllama FFI); runs on CPU by default, with automatic GPU offload on
+macOS (Metal) and Linux/Windows (CUDA if available).
+
 ### The relay (backend)
 [`backend/`](backend) is a small **Hono** app, and a *dumb relay*: it verifies each
 message's signature but **never decrypts or owns history**. It's reduced to a

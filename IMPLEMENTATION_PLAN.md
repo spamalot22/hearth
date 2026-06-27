@@ -704,3 +704,14 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - **2026-06-27** — **Deafen reflects on mute.** `isMuted` getter now returns
   true when deafened, so the mute button's visual state matches the mic's
   actual state (Discord parity — undeafen restores prior mute state).
+- **2026-06-28** — **AI bot (not distributed inference).** Added `@bot` mention →
+  local LLM inference via fllama (llama.cpp FFI). The model runs entirely on ONE
+  peer's device — originally explored true distributed inference (splitting layers
+  across mesh peers) but llama.cpp has no partial-layer API, and WebRTC latency
+  (~20-80ms per hop × 32 layers) makes it impractical (~2-3s per token). Instead:
+  decentralised *hosting* — any peer with a model volunteers, requests are broadcast,
+  first responder wins. Model picker in Settings → AI downloads GGUF files from
+  HuggingFace (TinyLlama 1.1B / Phi-3 3.8B / Mistral 7B). Runs on CPU by default;
+  `numGpuLayers: 99` enables Metal (macOS) or CUDA (Linux/Windows) offload
+  automatically when available. Easy to rip out: inference_bot.dart + control
+  frames + ~30 lines in main.dart.

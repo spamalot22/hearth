@@ -61,8 +61,12 @@ dependencies:
   path_provider: ^2.1.0
   # Open the source-code repo link (AGPL: let users of a hosted instance find it).
   url_launcher: ^6.3.0
-  system_tray: ^2.0.3
   flutter_inappwebview: ^6.1.5
+  tray_manager: ^0.5.3
+  fllama:
+    git:
+      url: https://github.com/Telosnex/fllama.git
+      ref: main
 
 dev_dependencies:
   flutter_test:

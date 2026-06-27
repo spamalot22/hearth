@@ -8,7 +8,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   flutter_secure_storage_windows
   flutter_webrtc
   screen_retriever_windows
-  system_tray
+  tray_manager
   url_launcher_windows
   window_manager
 )

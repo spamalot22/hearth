@@ -114,6 +114,7 @@ class ChannelSession {
     void Function(String fromHex, List<String> peers)? onContactsOnline,
     void Function(Map<String, Object?> manifest)? onVersionControl,
     void Function(String peerHex, bool typing)? onTyping,
+    void Function(String fromHex, MeshControl control)? onInference,
   }) async {
     final storage = live
         ? await HiveMessageStorage.open(channelId)
@@ -146,6 +147,9 @@ class ChannelSession {
             onVersionControl?.call(control.manifest);
           } else if (control is TypingControl) {
             onTyping?.call(fromHex, control.typing);
+          } else if (control is InferenceRequest ||
+              control is InferenceResponse) {
+            onInference?.call(fromHex, control);
           }
         },
       );
@@ -200,6 +204,15 @@ class ChannelSession {
     if (mesh == null) return;
     for (final peerHex in mesh.connections.keys) {
       mesh.sendControlTo(peerHex, TypingControl(typing: typing));
+    }
+  }
+
+  /// Broadcasts a control frame to all connected peers in this channel.
+  void broadcast(MeshControl control) {
+    final mesh = _mesh;
+    if (mesh == null) return;
+    for (final peerHex in mesh.connections.keys) {
+      mesh.sendControlTo(peerHex, control);
     }
   }
 
@@ -267,6 +280,9 @@ class ChannelSession {
     await _relayCourier?.close();
     await engine.close();
   }
+
+  /// Forces the mesh to re-announce to the relay (e.g. after relay recovery).
+  void reconnect() => _mesh?.forceAnnounce();
 }
 
 /// Owns every open [ChannelSession] and tracks which one is active. Channels are
@@ -282,6 +298,7 @@ class ChannelManager {
     this.candidateCache,
     this.onBackgroundMessage,
     this.onForceUpdate,
+    this.onInference,
   });
 
   final Identity identity;
@@ -297,6 +314,9 @@ class ChannelManager {
   /// Fired when a peer provides a valid signed manifest proving a newer version
   /// exists. The app should show the update gate.
   final void Function(UpdateInfo info)? onForceUpdate;
+
+  /// Fired when an inference request or response arrives from any channel's mesh.
+  final void Function(String fromHex, MeshControl control)? onInference;
 
   final Map<String, ChannelSession> _sessions = {};
   String? _activeId;
@@ -412,6 +432,7 @@ class ChannelManager {
         onContactsOnline: _handleContactsOnline,
         onVersionControl: _handleVersionControl,
         onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
+        onInference: onInference,
       );
     }
     _activeId = id;
@@ -436,6 +457,7 @@ class ChannelManager {
         onContactsOnline: _handleContactsOnline,
         onVersionControl: _handleVersionControl,
         onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
+        onInference: onInference,
       );
     }
     _activeId = id;
@@ -473,6 +495,13 @@ class ChannelManager {
       await session.close();
     }
     _sessions.clear();
+  }
+
+  /// Kicks all sessions to re-announce to the relay (e.g. after relay recovers).
+  void reconnect() {
+    for (final session in _sessions.values) {
+      session.reconnect();
+    }
   }
 }
 

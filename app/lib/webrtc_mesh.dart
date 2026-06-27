@@ -204,6 +204,12 @@ class WebRtcMesh {
 
   String? _authToken;
 
+  /// Forces an immediate re-announce (e.g. after relay recovery).
+  void forceAnnounce() {
+    _announceTimer?.cancel();
+    unawaited(_announce());
+  }
+
   /// Announce presence, then start offering to any peer we don't yet have.
   Future<void> _announce() async {
     if (_announcing || _closed) return;
@@ -396,6 +402,10 @@ class WebRtcMesh {
         break; // Handled by the external onControl callback (voice layer).
       case YoutubeControl():
         break; // Handled by the external onControl callback (voice layer).
+      case InferenceRequest():
+        break; // Handled by the external onControl callback (app layer).
+      case InferenceResponse():
+        break; // Handled by the external onControl callback (app layer).
     }
   }
 

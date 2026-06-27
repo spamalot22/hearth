@@ -37,10 +37,15 @@ class _ScreenSharePickerState extends State<_ScreenSharePicker> {
     _sources = _load();
   }
 
-  Future<List<DesktopCapturerSource>> _load() => desktopCapturer.getSources(
-    types: const [SourceType.Screen, SourceType.Window],
-    thumbnailSize: ThumbnailSize(320, 180),
-  );
+  Future<List<DesktopCapturerSource>> _load() async {
+    // Brief delay lets the OS release the previous capture session so
+    // thumbnails are available again (Windows clears them mid-capture).
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    return desktopCapturer.getSources(
+      types: const [SourceType.Screen, SourceType.Window],
+      thumbnailSize: ThumbnailSize(320, 180),
+    );
+  }
 
   void _refresh() => setState(() => _sources = _load());
 

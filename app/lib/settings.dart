@@ -35,4 +35,13 @@ class SettingsStore {
 
   Future<void> setNoiseSuppression(bool enabled) =>
       _box.put(_noiseKey, enabled.toString());
+
+  static const _computeKey = 'contributeCompute';
+
+  /// Whether this device serves as an AI bot for peers (on by default).
+  /// The model runs locally on this device's CPU (and GPU if available via Metal/CUDA).
+  bool get contributeCompute => _box.get(_computeKey) != 'false';
+
+  Future<void> setContributeCompute(bool enabled) =>
+      _box.put(_computeKey, enabled.toString());
 }

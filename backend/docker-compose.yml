@@ -15,7 +15,7 @@ services:
     image: ghcr.io/spamalot22/hearth-relay:${TAG:-latest}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-    restart: unless-stopped
+    restart: always
     environment:
       PORT: 8787
       # Media-search proxy keys — search degrades gracefully if unset.
@@ -34,7 +34,7 @@ services:
   # named tunnel's public hostname to http://relay:8787 (set TUNNEL_TOKEN in .env).
   tunnel:
     image: cloudflare/cloudflared:latest
-    restart: unless-stopped
+    restart: always
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}

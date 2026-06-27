@@ -55,6 +55,14 @@ sealed class MeshControl {
           playing: json['playing'] as bool? ?? false,
           position: (json['pos'] as num?)?.toDouble() ?? 0,
         ),
+        'infer_req' => InferenceRequest(
+          id: json['id'] as String? ?? '',
+          prompt: json['prompt'] as String? ?? '',
+        ),
+        'infer_res' => InferenceResponse(
+          id: json['id'] as String? ?? '',
+          text: json['text'] as String? ?? '',
+        ),
         _ => null,
       };
     } catch (_) {
@@ -216,6 +224,35 @@ class YoutubeControl extends MeshControl {
     'playing': playing,
     'pos': position,
   };
+}
+
+/// "Can someone run this prompt?" — broadcast to all peers. The first peer
+/// with a model and available capacity responds with [InferenceResponse].
+class InferenceRequest extends MeshControl {
+  const InferenceRequest({required this.id, required this.prompt});
+
+  /// Unique request id so the response can be correlated.
+  final String id;
+
+  /// The user's prompt text.
+  final String prompt;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'infer_req', 'id': id, 'prompt': prompt};
+}
+
+/// "Here's the LLM response" — sent back to the requester.
+class InferenceResponse extends MeshControl {
+  const InferenceResponse({required this.id, required this.text});
+
+  /// Matches the request id.
+  final String id;
+
+  /// The generated text.
+  final String text;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'infer_res', 'id': id, 'text': text};
 }
 
 /// Tags a gossip frame's text for the data channel.

@@ -36,7 +36,7 @@ services:
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
-    restart: unless-stopped
+    restart: always
 
   relay:
     image: ghcr.io/spamalot22/hearth-relay:${TAG:-latest}
@@ -49,7 +49,7 @@ services:
     network_mode: service:tailscale # share Tailscale's netns; Funnel → localhost:8787
     depends_on:
       - tailscale
-    restart: unless-stopped
+    restart: always
 
 # Funnel config for the Tailscale container. $${TS_CERT_DOMAIN} is escaped so Compose
 # passes it through literally; Tailscale fills in the node's FQDN at runtime.

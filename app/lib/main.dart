@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -14,7 +15,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     hide Message;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
-import 'package:system_tray/system_tray.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -26,6 +28,7 @@ import 'content.dart';
 import 'emoji_picker.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
+import 'inference_bot.dart';
 import 'key_store.dart';
 import 'media_library.dart';
 import 'mesh_control.dart';
@@ -45,20 +48,78 @@ import 'youtube_share.dart';
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
 
+/// Held for process lifetime to enforce single-instance.
+// ignore: unused_element
+RandomAccessFile? _instanceLock;
+
 /// Public source repository — shown in the drawer so users of a hosted instance
 /// can find the source (AGPL-3.0).
 const String kSourceUrl = 'https://github.com/spamalot22/hearth';
 
+class _ModelInfo {
+  const _ModelInfo(this.id, this.name, this.size, this.description, this.url);
+  final String id;
+  final String name;
+  final String size;
+  final String description;
+  final String url;
+}
+
+const _kAvailableModels = [
+  _ModelInfo(
+    'tinyllama',
+    'TinyLlama 1.1B',
+    '~637 MB',
+    'Fast, lightweight. Good for testing.',
+    'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+  ),
+  _ModelInfo(
+    'phi3',
+    'Phi-3 Mini 3.8B',
+    '~2.3 GB',
+    'Good balance of quality and speed.',
+    'https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf',
+  ),
+  _ModelInfo(
+    'mistral7b',
+    'Mistral 7B',
+    '~4.1 GB',
+    'High quality. Needs 8 GB+ RAM.',
+    'https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf',
+  ),
+];
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Desktop: minimize to tray instead of closing.
+  // Single-instance guard: if another instance is running, show it and exit.
   if (!kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.windows ||
           defaultTargetPlatform == TargetPlatform.linux ||
           defaultTargetPlatform == TargetPlatform.macOS)) {
+    final lockFile = File(
+      '${(await getApplicationDocumentsDirectory()).path}/.hearth.lock',
+    );
+    try {
+      final lock = await lockFile.open(mode: FileMode.write);
+      await lock.lock(FileLock.exclusive);
+      _instanceLock = lock; // held for process lifetime
+    } on FileSystemException {
+      // Another instance holds the lock — bring it to front via window_manager
+      // (best-effort; the other instance's tray click handler is the primary path).
+      // Then exit this duplicate.
+      exit(0);
+    }
+
     await windowManager.ensureInitialized();
     await windowManager.setPreventClose(true);
-    windowManager.addListener(_HearthWindowListener());
+    // Restore last window state (maximised).
+    final stateFile = File(
+      '${(await getApplicationDocumentsDirectory()).path}/.hearth.window',
+    );
+    if (stateFile.existsSync() && stateFile.readAsStringSync().contains('max')) {
+      await windowManager.maximize();
+    }
+    windowManager.addListener(_HearthWindowListener(stateFile));
     await _initSystemTray();
   }
   // Init local notifications for background message toasts.
@@ -103,48 +164,65 @@ Future<void> showLocalNotification(String title, String body) async {
 }
 
 class _HearthWindowListener extends WindowListener {
+  _HearthWindowListener(this._stateFile);
+  final File _stateFile;
+
   @override
   void onWindowClose() async {
-    // Minimize to tray instead of exiting.
     await windowManager.hide();
   }
+
+  @override
+  void onWindowMaximize() => _stateFile.writeAsStringSync('max');
+
+  @override
+  void onWindowUnmaximize() => _stateFile.writeAsStringSync('');
 }
 
 Future<void> _initSystemTray() async {
-  final tray = SystemTray();
-  await tray.initSystemTray(
-    iconPath: defaultTargetPlatform == TargetPlatform.windows
-        ? 'assets/app_icon.ico'
-        : 'assets/app_icon.png',
-    title: 'Hearth',
-    toolTip: 'Hearth',
-  );
-  final menu = Menu();
-  await menu.buildFrom([
-    MenuItemLabel(
-      label: 'Show',
-      onClicked: (_) async {
+  final tray = TrayManager.instance;
+  // tray_manager needs a filesystem path, not a Flutter asset key.
+  // On Windows the icon is bundled next to the exe; on macOS it's in the app bundle.
+  String iconPath;
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    iconPath = '$exeDir/data/flutter_assets/assets/app_icon.ico';
+  } else {
+    iconPath = 'assets/app_icon.png';
+  }
+  await tray.setIcon(iconPath);
+  await tray.setToolTip('Hearth');
+  await tray.setContextMenu(Menu(items: [
+    MenuItem(key: 'show', label: 'Show'),
+    MenuItem.separator(),
+    MenuItem(key: 'quit', label: 'Quit'),
+  ]));
+  tray.addListener(_HearthTrayListener());
+}
+
+class _HearthTrayListener extends TrayListener {
+  @override
+  void onTrayIconMouseDown() async {
+    await windowManager.show();
+    await windowManager.focus();
+  }
+
+  @override
+  void onTrayIconRightMouseDown() async {
+    await TrayManager.instance.popUpContextMenu();
+  }
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) async {
+    switch (menuItem.key) {
+      case 'show':
         await windowManager.show();
         await windowManager.focus();
-      },
-    ),
-    MenuSeparator(),
-    MenuItemLabel(
-      label: 'Quit',
-      onClicked: (_) async {
+      case 'quit':
         await windowManager.setPreventClose(false);
         await windowManager.close();
-      },
-    ),
-  ]);
-  await tray.setContextMenu(menu);
-  tray.registerSystemTrayEventHandler((event) async {
-    if (event == kSystemTrayEventClick ||
-        event == kSystemTrayEventDoubleClick) {
-      await windowManager.show();
-      await windowManager.focus();
     }
-  });
+  }
 }
 
 class HearthApp extends StatelessWidget {
@@ -317,7 +395,16 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _promptingMember = false;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
+  Timer? _errorTimer;
   bool _sending = false;
+
+  void _setError(String msg) {
+    _errorTimer?.cancel();
+    setState(() => _error = msg);
+    _errorTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _error = null);
+    });
+  }
   UpdateInfo? _updateInfo;
   bool _relayBlocked = false; // released build can't reach the relay to verify
   bool _checkingBlock = false;
@@ -327,6 +414,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // Track recent send timestamps for the composer flame effect.
   final List<int> _recentSendTimes = [];
   final Set<AudioPlayer> _soundPlayers = {};
+  InferenceBot? _bot;
   bool _composerOnFire = false;
   Timer? _fireTimer;
   bool _typingLocally = false;
@@ -378,6 +466,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _settings = settings;
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
     if (widget.autoPoll) await initRecentGifs();
+    if (widget.autoPoll && (settings?.contributeCompute ?? true)) {
+      _bot = await InferenceBot.tryCreate();
+    }
     final savedRelay = settings?.relayUrl;
     if (savedRelay != null) {
       final parsed = Uri.tryParse(savedRelay);
@@ -406,6 +497,7 @@ class _ChatScreenState extends State<ChatScreen> {
       onForceUpdate: (info) {
         if (mounted) setState(() => _updateInfo = info);
       },
+      onInference: _handleInference,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -452,6 +544,60 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     // Also fire a local OS notification (visible when app is in tray/background).
     unawaited(showLocalNotification('Hearth', 'New message in #$name'));
+  }
+
+  // --- inference (P2P AI bot) ---
+
+  final Map<String, Completer<String?>> _pendingInference = {};
+
+  /// Broadcasts an inference request to all connected peers.
+  void _requestInference(String prompt) {
+    final id = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+    final completer = Completer<String?>();
+    _pendingInference[id] = completer;
+    // Capture the session now — response should post here even if user switches.
+    final session = _channels?.active;
+    if (session == null) return;
+    session.broadcast(InferenceRequest(id: id, prompt: prompt));
+    // Also try locally if we have a model.
+    if (_bot != null) {
+      unawaited(_bot!.generate(prompt).then((text) {
+        if (text != null && !completer.isCompleted) {
+          completer.complete(text);
+        }
+      }));
+    }
+    // Timeout after 60s.
+    completer.future.timeout(const Duration(seconds: 60), onTimeout: () => null).then((text) {
+      _pendingInference.remove(id);
+      if (text != null && text.isNotEmpty && mounted) {
+        unawaited(_publishTo(session, TextContent('🤖 $text')));
+      } else if (mounted) {
+        _setError('No AI peer responded (is anyone running a model?)');
+      }
+    });
+  }
+
+  /// Handles incoming inference controls from peers.
+  void _handleInference(String fromHex, MeshControl control) {
+    if (control is InferenceRequest) {
+      // A peer wants inference — respond if we have a model and compute is on.
+      final bot = _bot;
+      if (bot == null || bot.busy) return;
+      unawaited(bot.generate(control.prompt).then((text) {
+        if (text == null || text.isEmpty) return;
+        // Respond on whichever session the request came from.
+        for (final s in _channels?.sessions ?? const <ChannelSession>[]) {
+          s.broadcast(InferenceResponse(id: control.id, text: text));
+        }
+      }));
+    } else if (control is InferenceResponse) {
+      // A peer responded to our request.
+      final completer = _pendingInference[control.id];
+      if (completer != null && !completer.isCompleted) {
+        completer.complete(control.text);
+      }
+    }
   }
 
   /// Decrypts the active channel's new messages, indexes any media into your
@@ -688,7 +834,7 @@ class _ChatScreenState extends State<ChatScreen> {
       seed = null;
     }
     if (seed == null) {
-      if (mounted) setState(() => _error = 'invalid recovery code');
+      if (mounted) _setError('invalid recovery code');
       return;
     }
     if (!mounted) return;
@@ -745,10 +891,15 @@ class _ChatScreenState extends State<ChatScreen> {
       up = false;
     }
     if (mounted) {
+      final wasDown = _relayUp == false || _relayUp == null;
       setState(() {
         _relayUp = up;
         _checkingRelay = false;
       });
+      // If the relay just came back, kick all sessions to re-announce.
+      if (up && wasDown) {
+        _channels?.reconnect();
+      }
     }
   }
 
@@ -780,6 +931,37 @@ class _ChatScreenState extends State<ChatScreen> {
     return all.length;
   }
 
+  Widget _connectionIndicator() {
+    final peers = _totalPeerCount();
+    final Color color;
+    final String label;
+    if (_relayUp == true && peers > 0) {
+      color = Colors.green;
+      label = 'Connected';
+    } else if (_relayUp == true) {
+      color = Colors.green;
+      label = 'Relay only';
+    } else if (peers > 0) {
+      color = Colors.amber;
+      label = 'Peers only';
+    } else {
+      color = Colors.red;
+      label = 'Offline';
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: TextStyle(fontSize: 10, color: color)),
+      ],
+    );
+  }
+
   /// Opens the public source repo (AGPL etiquette — let users find the source).
   Future<void> _openSourceCode() async {
     final ok = await launchUrl(
@@ -798,7 +980,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (context) => Dialog(
         child: DefaultTabController(
-          length: 3,
+          length: 4,
           child: SizedBox(
             width: 400,
             height: 480,
@@ -825,11 +1007,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     Tab(text: 'Audio'),
                     Tab(text: 'Identity'),
                     Tab(text: 'Network'),
+                    Tab(text: 'AI'),
                   ],
                 ),
                 Expanded(
                   child: TabBarView(
-                    children: [_audioTab(), _identityTab(), _networkTab()],
+                    children: [_audioTab(), _identityTab(), _networkTab(), _aiTab()],
                   ),
                 ),
               ],
@@ -1030,6 +1213,132 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _aiTab() {
+    return StatefulBuilder(
+      builder: (context, setTabState) {
+        return FutureBuilder<String?>(
+          future: InferenceBot.modelPath(),
+          builder: (context, snap) {
+            final hasModel = snap.data != null;
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: ListView(
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('AI bot'),
+                    subtitle: const Text(
+                      'Respond to @bot requests from other peers using your local model',
+                    ),
+                    value: _settings?.contributeCompute ?? true,
+                    onChanged: (v) {
+                      unawaited(_settings?.setContributeCompute(v));
+                      setTabState(() {});
+                    },
+                  ),
+                  const Divider(height: 24),
+                  Text('Model', style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(height: 8),
+                  if (hasModel)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.check_circle, color: Colors.green),
+                      title: const Text('Model installed'),
+                      subtitle: Text(
+                        snap.data!.split('/').last,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    )
+                  else
+                    const ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.warning_amber, color: Colors.orange),
+                      title: Text('No model installed'),
+                      subtitle: Text('@bot will not work until a model is downloaded'),
+                    ),
+                  const SizedBox(height: 8),
+                  Text('Pick a model to download:', style: Theme.of(context).textTheme.bodySmall),
+                  const SizedBox(height: 8),
+                  for (final model in _kAvailableModels)
+                    Card(
+                      child: ListTile(
+                        title: Text(model.name),
+                        subtitle: Text('${model.size} · ${model.description}'),
+                        trailing: _downloadingModel == model.id
+                            ? const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : IconButton(
+                                icon: const Icon(Icons.download),
+                                onPressed: () => unawaited(
+                                    _downloadModel(model, setTabState)),
+                              ),
+                      ),
+                    ),
+                  if (_downloadProgress != null) ...[
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(value: _downloadProgress),
+                    Text(
+                      '${(_downloadProgress! * 100).toStringAsFixed(0)}%',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String? _downloadingModel;
+  double? _downloadProgress;
+
+  Future<void> _downloadModel(_ModelInfo model, void Function(void Function()) setTabState) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/${InferenceBot.kModelFilename}');
+    setTabState(() {
+      _downloadingModel = model.id;
+      _downloadProgress = 0;
+    });
+    try {
+      final request = await HttpClient().getUrl(Uri.parse(model.url));
+      final response = await request.close();
+      final total = response.contentLength;
+      var received = 0;
+      final sink = file.openWrite();
+      await for (final chunk in response) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (total > 0) {
+          setTabState(() => _downloadProgress = received / total);
+        }
+      }
+      await sink.close();
+      // Reinitialise the bot with the new model.
+      _bot = await InferenceBot.tryCreate();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${model.name} installed ✓')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Download failed: $e')),
+        );
+      }
+    } finally {
+      setTabState(() {
+        _downloadingModel = null;
+        _downloadProgress = null;
+      });
+    }
+  }
+
   /// Edits the relay URL (the rendezvous + media-proxy endpoint). Persisted; open
   /// channels keep using the old one until you restart.
   Future<void> _setRelayUrl() async {
@@ -1046,7 +1355,7 @@ class _ChatScreenState extends State<ChatScreen> {
         parsed == null ||
         !parsed.hasScheme ||
         !parsed.hasAuthority) {
-      if (mounted) setState(() => _error = 'invalid relay URL');
+      if (mounted) _setError('invalid relay URL');
       return;
     }
     await _settings?.setRelayUrl(trimmed);
@@ -1097,6 +1406,13 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     await _publish(TextContent(text));
     _composerFocus.requestFocus();
+    // @bot trigger — broadcast an inference request to the mesh.
+    if (text.startsWith('@bot ')) {
+      final prompt = text.substring(5).trim();
+      if (prompt.isNotEmpty) {
+        _requestInference(prompt);
+      }
+    }
     // Fire effect: if 4+ messages in 5 seconds, ignite the composer.
     final now = DateTime.now().millisecondsSinceEpoch;
     _recentSendTimes.add(now);
@@ -1145,13 +1461,13 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final res = await http.get(Uri.parse(url));
       if (res.statusCode != 200) {
-        if (mounted) setState(() => _error = 'could not fetch that GIF');
+        if (mounted) _setError('could not fetch that GIF');
         return;
       }
       final hash = await store.put(res.bodyBytes);
       await _publish(GifContent(hash));
     } catch (_) {
-      if (mounted) setState(() => _error = 'could not fetch that GIF');
+      if (mounted) _setError('could not fetch that GIF');
     }
   }
 
@@ -1180,7 +1496,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (file == null || bytes == null) return;
     final danger = _fileDanger(file.name, bytes);
     if (danger != null) {
-      if (mounted) setState(() => _error = danger);
+      if (mounted) _setError(danger);
       return;
     }
     final hash = await store.put(bytes);
@@ -1312,7 +1628,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       final res = await http.get(Uri.parse(picked.url));
       if (res.statusCode != 200) {
-        if (mounted) setState(() => _error = 'could not fetch that sound');
+        if (mounted) _setError('could not fetch that sound');
         return;
       }
       if (!mounted) return;
@@ -1320,7 +1636,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final hash = await store.put(res.bodyBytes);
       await _publish(SoundContent(hash, picked.name, emoji));
     } catch (_) {
-      if (mounted) setState(() => _error = 'could not fetch that sound');
+      if (mounted) _setError('could not fetch that sound');
     }
   }
 
@@ -1356,9 +1672,24 @@ class _ChatScreenState extends State<ChatScreen> {
       // Persist + gossip to peers; the updates stream re-renders it.
       await session.publish(message);
     } catch (_) {
-      if (mounted) setState(() => _error = 'send failed');
+      if (mounted) _setError('send failed');
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  /// Publishes to a specific session (used when the target may differ from active).
+  Future<void> _publishTo(ChannelSession session, Content content) async {
+    try {
+      final message = await Message.create(
+        author: widget.identity,
+        channel: session.channelId,
+        payload: await session.encodePayload(content),
+        prev: session.repository.heads(),
+      );
+      await session.publish(message);
+    } catch (_) {
+      // Best-effort; inference responses failing silently is acceptable.
     }
   }
 
@@ -1409,7 +1740,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (code == null || code.trim().isEmpty) return;
     final parsed = GroupChannel.fromInvite(code.trim());
     if (parsed == null) {
-      if (mounted) setState(() => _error = 'invalid invite code');
+      if (mounted) _setError('invalid invite code');
       return;
     }
     final channel = parsed.channel;
@@ -1576,7 +1907,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() {});
     } catch (_) {
       if (mounted) {
-        setState(() => _error = 'microphone access is needed for voice');
+        _setError('microphone access is needed for voice');
       }
     }
   }
@@ -1648,7 +1979,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _sharedTo = voice.peerHexes.toSet();
       setState(() {});
     } catch (e) {
-      if (mounted) setState(() => _error = 'screen share failed: $e');
+      if (mounted) _setError('screen share failed: $e');
     }
   }
 
@@ -1748,7 +2079,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (raw == null || !mounted) return;
     final id = parseYoutubeId(raw);
     if (id == null) {
-      setState(() => _error = "couldn't read that YouTube link");
+      _setError("couldn't read that YouTube link");
       return;
     }
     _ytController ??= _newYtController();
@@ -2344,7 +2675,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (members.isEmpty) {
       if (!auto && mounted) {
-        setState(() => _error = 'no new named members to add yet');
+        _setError('no new named members to add yet');
       }
       return;
     }
@@ -3131,6 +3462,7 @@ class _ChatScreenState extends State<ChatScreen> {
               subtitle: Text(
                 'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
               ),
+              trailing: _connectionIndicator(),
               onTap: () => unawaited(_openSourceCode()),
             ),
           ],
