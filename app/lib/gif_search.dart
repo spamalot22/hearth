@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 
 /// GIF search goes through the relay's `/gif/search` proxy, so the Tenor API key
@@ -22,6 +23,40 @@ class _GifResult {
 
   final List<_Gif> gifs;
   final String? unavailable;
+}
+
+/// Recently sent GIFs (persisted via Hive, most recent first).
+final List<_Gif> _recentGifs = [];
+const int _maxRecentGifs = 12;
+Box<String>? _recentBox;
+
+/// Load recent GIFs from disk. Call once at startup.
+Future<void> initRecentGifs() async {
+  _recentBox = await Hive.openBox<String>('hearth.recent_gifs');
+  final raw = _recentBox?.get('list');
+  if (raw != null) {
+    try {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      _recentGifs
+        ..clear()
+        ..addAll(list.map((g) => _Gif(g['url'] as String, g['preview'] as String)));
+    } catch (_) {}
+  }
+}
+
+void _saveRecents() {
+  _recentBox?.put(
+    'list',
+    jsonEncode(_recentGifs.map((g) => {'url': g.url, 'preview': g.preview}).toList()),
+  );
+}
+
+/// Records a sent GIF as recent.
+void recordGifSent(String url, [String? preview]) {
+  _recentGifs.removeWhere((g) => g.url == url);
+  _recentGifs.insert(0, _Gif(url, preview ?? url));
+  if (_recentGifs.length > _maxRecentGifs) _recentGifs.removeLast();
+  _saveRecents();
 }
 
 Future<_GifResult> _search(Uri relayUrl, String query) async {
@@ -143,7 +178,10 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
   Widget _body() {
     final results = _results;
     if (results == null) {
-      return const Center(child: Text('Search for a GIF'));
+      if (_recentGifs.isEmpty) {
+        return const Center(child: Text('Search for a GIF'));
+      }
+      return _gifGrid(_recentGifs);
     }
     return FutureBuilder<_GifResult>(
       future: results,
@@ -157,30 +195,37 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
         if (result.gifs.isEmpty) {
           return const Center(child: Text('No results'));
         }
-        return GridView.count(
-          crossAxisCount: 3,
-          padding: const EdgeInsets.all(8),
-          mainAxisSpacing: 6,
-          crossAxisSpacing: 6,
-          children: [
-            for (final gif in result.gifs)
-              GestureDetector(
-                onTap: () => Navigator.pop(context, gif.url),
-                child: Image.network(
-                  gif.preview,
-                  fit: BoxFit.cover,
-                  loadingBuilder: (context, child, progress) => progress == null
-                      ? child
-                      : const ColoredBox(color: Colors.black12),
-                  errorBuilder: (context, error, stack) => const ColoredBox(
-                    color: Colors.black26,
-                    child: Icon(Icons.broken_image_outlined),
-                  ),
-                ),
-              ),
-          ],
-        );
+        return _gifGrid(result.gifs);
       },
+    );
+  }
+
+  Widget _gifGrid(List<_Gif> gifs) {
+    return GridView.count(
+      crossAxisCount: 3,
+      padding: const EdgeInsets.all(8),
+      mainAxisSpacing: 6,
+      crossAxisSpacing: 6,
+      children: [
+        for (final gif in gifs)
+          GestureDetector(
+            onTap: () {
+              recordGifSent(gif.url, gif.preview);
+              Navigator.pop(context, gif.url);
+            },
+            child: Image.network(
+              gif.preview,
+              fit: BoxFit.cover,
+              loadingBuilder: (context, child, progress) => progress == null
+                  ? child
+                  : const ColoredBox(color: Colors.black12),
+              errorBuilder: (context, error, stack) => const ColoredBox(
+                color: Colors.black26,
+                child: Icon(Icons.broken_image_outlined),
+              ),
+            ),
+          ),
+      ],
     );
   }
 

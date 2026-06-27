@@ -56,6 +56,7 @@ dependencies:
   path_provider: ^2.1.0
   # Open the source-code repo link (AGPL: let users of a hosted instance find it).
   url_launcher: ^6.3.0
+  system_tray: ^2.0.3
 
 dev_dependencies:
   flutter_test:
@@ -83,6 +84,8 @@ flutter:
   # every install's media library on startup (see assets/sounds/README.md).
   assets:
     - assets/sounds/
+    - assets/app_icon.ico
+    - assets/app_icon.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

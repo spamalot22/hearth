@@ -11,6 +11,7 @@ class SettingsStore {
   final Box<String> _box;
 
   static const _relayKey = 'relayUrl';
+  static const _noiseKey = 'noiseSuppression';
 
   static Future<SettingsStore> open() async {
     await Hive.initFlutter();
@@ -28,4 +29,10 @@ class SettingsStore {
   Future<void> setRelayUrl(String? url) => (url == null || url.trim().isEmpty)
       ? _box.delete(_relayKey)
       : _box.put(_relayKey, url.trim());
+
+  /// Whether enhanced noise suppression is enabled (off by default).
+  bool get noiseSuppression => _box.get(_noiseKey) == 'true';
+
+  Future<void> setNoiseSuppression(bool enabled) =>
+      _box.put(_noiseKey, enabled.toString());
 }

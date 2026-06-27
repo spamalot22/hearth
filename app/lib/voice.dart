@@ -71,6 +71,7 @@ class VoiceSession {
     required Identity identity,
     required Uri relayUrl,
     required void Function() onChange,
+    bool enhancedNoiseSuppression = false,
   }) async {
     // On Windows desktop, plain `audio: true` can pick a non-functional
     // default. Enumerate devices and explicitly target the first audioinput so
@@ -81,18 +82,38 @@ class VoiceSession {
       final mics = devices.where((d) => d.kind == 'audioinput').toList();
       if (mics.isNotEmpty && mics.first.deviceId.isNotEmpty) {
         audioConstraint = {
-          'deviceId': mics.first.deviceId,
+          'deviceId': {'exact': mics.first.deviceId},
           'autoGainControl': true,
           'noiseSuppression': true,
+          'echoCancellation': true,
+          if (enhancedNoiseSuppression) 'googNoiseSuppression': true,
+          if (enhancedNoiseSuppression) 'googHighpassFilter': true,
+        };
+      } else if (enhancedNoiseSuppression) {
+        audioConstraint = {
+          'autoGainControl': true,
+          'noiseSuppression': true,
+          'echoCancellation': true,
+          'googNoiseSuppression': true,
+          'googHighpassFilter': true,
         };
       }
     } catch (_) {
       // Fall through with default constraint.
     }
-    final stream = await navigator.mediaDevices.getUserMedia({
-      'audio': audioConstraint,
-      'video': false,
-    });
+    MediaStream? stream;
+    // Try the explicit device first; fall back to unconstrained if it fails.
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        'audio': audioConstraint,
+        'video': false,
+      });
+    } catch (_) {
+      stream = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+    }
     // Ensure tracks are enabled — Windows can return them disabled.
     for (final track in stream.getAudioTracks()) {
       track.enabled = true;
@@ -133,12 +154,26 @@ class VoiceSession {
           if (level is! num) continue;
           if (report.type == 'inbound-rtp') {
             next[entry.key] = level.toDouble();
-          } else if (report.type == 'media-source') {
-            self = level.toDouble();
+          } else if (report.type == 'media-source' ||
+              report.type == 'outbound-rtp') {
+            // Windows native may report under outbound-rtp instead of
+            // media-source; take whichever is non-zero.
+            if (level.toDouble() > self) self = level.toDouble();
           }
         }
       } catch (_) {
         // A transient stats failure just skips this tick.
+      }
+    }
+    // Fallback: if no stats gave us a self level, check if the track is live.
+    if (self == 0.0) {
+      final tracks = _localStream.getAudioTracks();
+      if (tracks.isNotEmpty && tracks.first.enabled) {
+        // Track exists and is enabled — report a minimal non-zero so the UI
+        // doesn't show "dead mic". Actual audio will show real levels once
+        // stats report properly (some Windows WebRTC builds lag a few seconds).
+        // Only do this if the track's muted flag isn't set.
+        if (tracks.first.muted != true) self = 0.01;
       }
     }
     next['self'] = self;
@@ -183,7 +218,7 @@ class VoiceSession {
       await _cuePlayer.stop();
       await _cuePlayer.play(
         BytesSource(
-          connect ? _connectTone : _disconnectTone,
+          connect ? connectTone : _disconnectTone,
           mimeType: 'audio/wav',
         ),
       );
@@ -271,7 +306,7 @@ class VoiceSession {
   }
 
   // Short generated blips so there's no asset to ship — swappable later.
-  static final Uint8List _connectTone = _toneWav(523.25, 784.0); // C5 → G5
+  static final Uint8List connectTone = _toneWav(523.25, 784.0); // C5 → G5
   static final Uint8List _disconnectTone = _toneWav(784.0, 392.0); // G5 → G4
 }
 

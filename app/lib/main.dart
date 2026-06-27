@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:convert/convert.dart';
@@ -13,6 +14,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     hide Message;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:system_tray/system_tray.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -54,6 +56,7 @@ void main() async {
     await windowManager.ensureInitialized();
     await windowManager.setPreventClose(true);
     windowManager.addListener(_HearthWindowListener());
+    await _initSystemTray();
   }
   // Init local notifications for background message toasts.
   await _initNotifications();
@@ -102,6 +105,37 @@ class _HearthWindowListener extends WindowListener {
     // Minimize to tray instead of exiting.
     await windowManager.hide();
   }
+}
+
+Future<void> _initSystemTray() async {
+  final tray = SystemTray();
+  await tray.initSystemTray(
+    iconPath: defaultTargetPlatform == TargetPlatform.windows
+        ? 'assets/app_icon.ico'
+        : 'assets/app_icon.png',
+    title: 'Hearth',
+    toolTip: 'Hearth',
+  );
+  final menu = Menu();
+  await menu.buildFrom([
+    MenuItemLabel(label: 'Show', onClicked: (_) async {
+      await windowManager.show();
+      await windowManager.focus();
+    }),
+    MenuSeparator(),
+    MenuItemLabel(label: 'Quit', onClicked: (_) async {
+      await windowManager.setPreventClose(false);
+      await windowManager.close();
+    }),
+  ]);
+  await tray.setContextMenu(menu);
+  tray.registerSystemTrayEventHandler((event) async {
+    if (event == kSystemTrayEventClick ||
+        event == kSystemTrayEventDoubleClick) {
+      await windowManager.show();
+      await windowManager.focus();
+    }
+  });
 }
 
 class HearthApp extends StatelessWidget {
@@ -226,6 +260,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _input = TextEditingController();
   final FocusNode _composerFocus = FocusNode();
   final ScrollController _scroll = ScrollController();
+  bool _showScrollDown = false;
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   ChannelManager? _channels;
   ContactBook? _contacts;
@@ -260,8 +295,11 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _updateProgress;
   bool _installing = false;
   String? _installError;
-  // Track recent message timestamps per author for the "on fire" effect.
-  final Map<String, List<int>> _recentMsgTimes = {};
+  // Track recent send timestamps for the composer flame effect.
+  final List<int> _recentSendTimes = [];
+  final Set<AudioPlayer> _soundPlayers = {};
+  bool _composerOnFire = false;
+  Timer? _fireTimer;
   bool _typingLocally = false;
   Timer? _typingTimer;
 
@@ -269,7 +307,15 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _input.addListener(_onInputChanged);
+    _scroll.addListener(_onScroll);
     unawaited(_init());
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pos = _scroll.position;
+    final far = pos.maxScrollExtent - pos.pixels > 200;
+    if (far != _showScrollDown) setState(() => _showScrollDown = far);
   }
 
   void _onInputChanged() {
@@ -302,6 +348,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final settings = widget.autoPoll ? await SettingsStore.open() : null;
     _settings = settings;
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
+    if (widget.autoPoll) await initRecentGifs();
     final savedRelay = settings?.relayUrl;
     if (savedRelay != null) {
       final parsed = Uri.tryParse(savedRelay);
@@ -388,7 +435,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _indexProfiles(active);
       _detectNewMembers(active);
       _markRead(active);
-      _refreshFireState();
       // Publish our own name into a channel the first time we're active in it.
       if (_myName != null && _announced.add(active.channelId)) {
         await _announceName(active);
@@ -718,6 +764,235 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _openSettings() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog(
+        child: DefaultTabController(
+          length: 3,
+          child: SizedBox(
+            width: 400,
+            height: 480,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                  child: Row(
+                    children: [
+                      Text(
+                        'Settings',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                ),
+                const TabBar(
+                  tabs: [
+                    Tab(text: 'Audio'),
+                    Tab(text: 'Identity'),
+                    Tab(text: 'Network'),
+                  ],
+                ),
+                Expanded(
+                  child: TabBarView(
+                    children: [
+                      _audioTab(),
+                      _identityTab(),
+                      _networkTab(),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _audioTab() {
+    return StatefulBuilder(
+      builder: (context, setTabState) {
+        return FutureBuilder<List<MediaDeviceInfo>>(
+          future: navigator.mediaDevices.enumerateDevices(),
+          builder: (context, snapshot) {
+            final devices = snapshot.data ?? [];
+            final mics =
+                devices.where((d) => d.kind == 'audioinput').toList();
+            final speakers =
+                devices.where((d) => d.kind == 'audiooutput').toList();
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: ListView(
+                children: [
+                  Text('Microphone',
+                      style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(height: 4),
+                  if (mics.isEmpty)
+                    const Text('No microphones found')
+                  else
+                    for (final mic in mics)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.mic, size: 20),
+                        title: Text(
+                          mic.label.isNotEmpty
+                              ? mic.label
+                              : 'Microphone ${mics.indexOf(mic) + 1}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: TextButton(
+                          child: const Text('Test'),
+                          onPressed: () async {
+                            try {
+                              final stream =
+                                  await navigator.mediaDevices.getUserMedia({
+                                'audio': {
+                                  'deviceId': {'exact': mic.deviceId}
+                                },
+                                'video': false,
+                              });
+                              // Record briefly then stop — proves it works.
+                              await Future<void>.delayed(
+                                  const Duration(milliseconds: 500));
+                              for (final t in stream.getTracks()) {
+                                await t.stop();
+                              }
+                              await stream.dispose();
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                        '✓ ${mic.label.isNotEmpty ? mic.label : "Mic"} is working'),
+                                  ),
+                                );
+                              }
+                            } catch (e) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                        '✗ ${mic.label.isNotEmpty ? mic.label : "Mic"} failed: $e'),
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                        ),
+                      ),
+                  const Divider(height: 24),
+                  Text('Speaker',
+                      style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(height: 4),
+                  if (speakers.isEmpty)
+                    const Text('No speakers found')
+                  else
+                    for (final spk in speakers)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: const Icon(Icons.volume_up, size: 20),
+                        title: Text(
+                          spk.label.isNotEmpty
+                              ? spk.label
+                              : 'Speaker ${speakers.indexOf(spk) + 1}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: TextButton(
+                          child: const Text('Test'),
+                          onPressed: () async {
+                            final player = AudioPlayer();
+                            await player.play(
+                                BytesSource(VoiceSession.connectTone));
+                            await Future<void>.delayed(
+                                const Duration(milliseconds: 300));
+                            await player.dispose();
+                          },
+                        ),
+                      ),
+                  const Divider(height: 24),
+                  Text('Processing',
+                      style: Theme.of(context).textTheme.labelLarge),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Noise suppression'),
+                    subtitle: const Text(
+                        'Reduces background noise in voice chat'),
+                    value: _settings?.noiseSuppression ?? false,
+                    onChanged: (v) {
+                      unawaited(_settings?.setNoiseSuppression(v));
+                      setTabState(() {});
+                    },
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _identityTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.key_outlined),
+            title: const Text('Back up identity'),
+            subtitle: const Text('Export your recovery code'),
+            onTap: () {
+              Navigator.pop(context);
+              unawaited(_backupIdentity());
+            },
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.restore),
+            title: const Text('Restore identity'),
+            subtitle: const Text('Import a recovery code'),
+            onTap: () {
+              Navigator.pop(context);
+              unawaited(_restoreIdentity());
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _networkTab() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          NetworkStatus(
+            relayUp: _relayUp,
+            checkingRelay: _checkingRelay,
+            peerCount: _totalPeerCount(),
+            channelCount: _channels?.sessions.length ?? 0,
+            relayUrl: _relayUrl.toString(),
+            onTapRelay: () {
+              Navigator.pop(context);
+              unawaited(_setRelayUrl());
+            },
+            onRefresh: () => unawaited(_checkRelay()),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Edits the relay URL (the rendezvous + media-proxy endpoint). Persisted; open
   /// channels keep using the old one until you restart.
   Future<void> _setRelayUrl() async {
@@ -763,6 +1038,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _composerFocus.dispose();
     _scroll.dispose();
     _typingTimer?.cancel();
+    _fireTimer?.cancel();
     super.dispose();
   }
 
@@ -777,6 +1053,28 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     await _publish(TextContent(text));
     _composerFocus.requestFocus();
+    // Fire effect: if 4+ messages in 5 seconds, ignite the composer.
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _recentSendTimes.add(now);
+    _recentSendTimes.removeWhere((t) => now - t > 5000);
+    if (_recentSendTimes.length >= 4 && !_composerOnFire) {
+      setState(() => _composerOnFire = true);
+    }
+    if (_composerOnFire) {
+      _fireTimer?.cancel();
+      _fireTimer = Timer(const Duration(seconds: 10), () {
+        if (mounted) setState(() => _composerOnFire = false);
+      });
+    }
+    // Always scroll to show your own message.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      _scroll.animateTo(
+        _scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   void _scrollToBottom() {
@@ -836,8 +1134,62 @@ class _ChatScreenState extends State<ChatScreen> {
     final file = result?.files.single;
     final bytes = file?.bytes;
     if (file == null || bytes == null) return;
+    final danger = _fileDanger(file.name, bytes);
+    if (danger != null) {
+      if (mounted) setState(() => _error = danger);
+      return;
+    }
     final hash = await store.put(bytes);
     await _publish(FileContent(hash, file.name, _mimeFor(file.extension)));
+  }
+
+  static const _blockedExtensions = {
+    'exe', 'scr', 'bat', 'cmd', 'ps1', 'vbs', 'vbe', 'wsh', 'wsf',
+    'msi', 'dll', 'com', 'pif', 'hta', 'cpl', 'reg', 'inf', 'lnk',
+  };
+
+  static const int _maxFileSize = 500 * 1024 * 1024; // 500 MB
+  static const int _maxArchiveSize = 2 * 1024 * 1024 * 1024; // 2 GB
+  static const _archiveExtensions = {'zip', '7z', 'rar', 'tar', 'gz', 'bz2', 'xz', 'zst'};
+
+  /// Returns a reason string if the file is dangerous, null if safe.
+  static String? _fileDanger(String name, List<int> bytes) {
+    final ext = name.split('.').last.toLowerCase();
+    // Size limit — archives get a higher cap.
+    final limit = _archiveExtensions.contains(ext) ? _maxArchiveSize : _maxFileSize;
+    if (bytes.length > limit) {
+      return 'File too large (${_archiveExtensions.contains(ext) ? "2 GB" : "500 MB"} max)';
+    }
+    // Extension check.
+    if (_blockedExtensions.contains(ext)) {
+      return 'That file type (.$ext) is blocked for safety';
+    }
+    // Double-extension trick (e.g. report.pdf.exe).
+    final parts = name.split('.');
+    if (parts.length > 2) {
+      final secondLast = parts[parts.length - 2].toLowerCase();
+      if (_blockedExtensions.contains(secondLast)) {
+        return 'Suspicious double extension detected';
+      }
+    }
+    // Magic bytes: detect PE executables regardless of extension.
+    if (bytes.length >= 2 && bytes[0] == 0x4D && bytes[1] == 0x5A) {
+      return 'File contains executable code (blocked)';
+    }
+    return null;
+  }
+
+  /// Name-only danger check for received files (no bytes available — used in
+  /// the chat view to flag blocked extensions with a warning chip).
+  bool _isDangerousFile(String name) {
+    final ext = name.split('.').last.toLowerCase();
+    if (_blockedExtensions.contains(ext)) return true;
+    final parts = name.split('.');
+    if (parts.length > 2) {
+      return _blockedExtensions.contains(
+          parts[parts.length - 2].toLowerCase());
+    }
+    return false;
   }
 
   /// A coarse MIME from a file extension (enough to render images inline).
@@ -906,10 +1258,18 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Plays a soundboard clip if its blob is held locally.
   Future<void> _playSound(ChannelSession session, String blob) async {
     final bytes = session.blobOf(blob);
-    final player = _player;
-    if (bytes == null || player == null) return;
-    await player.stop();
+    if (bytes == null) return;
+    // Cap concurrent soundboard players to avoid resource exhaustion.
+    if (_soundPlayers.length >= 10) return;
+    final player = AudioPlayer();
+    _soundPlayers.add(player);
     await player.play(BytesSource(bytes));
+    // Kill after 10 seconds max to prevent long clips hogging voice.
+    Future.delayed(const Duration(seconds: 10), () async {
+      await player.stop();
+      await player.dispose();
+      _soundPlayers.remove(player);
+    });
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
@@ -1130,6 +1490,7 @@ class _ChatScreenState extends State<ChatScreen> {
         identity: widget.identity,
         relayUrl: _relayUrl,
         onChange: _voiceChanged,
+        enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
       );
       _voice!.onSoundboard = (blob) {
         final session = _channels?.active;
@@ -1163,136 +1524,149 @@ class _ChatScreenState extends State<ChatScreen> {
     final inCall = voice != null && voice.channelId == session.channelId;
     return Container(
       color: theme.colorScheme.surfaceContainerLow,
-      child: ListView(
-        padding: const EdgeInsets.all(16),
+      child: Column(
         children: [
-          Row(
-            children: [
-              Icon(
-                session.isDm ? Icons.alternate_email : Icons.tag,
-                size: 18,
-                color: theme.colorScheme.primary,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  _channelTitle(session),
-                  style: theme.textTheme.titleMedium,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-          if (!session.isDm) ...[
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () => unawaited(_shareInvite(session.channelId)),
-              icon: const Icon(Icons.person_add_alt_1),
-              label: const Text('Invite'),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: () => unawaited(_addMembers(session)),
-              icon: const Icon(Icons.group_add_outlined),
-              label: const Text('Add members'),
-            ),
-          ],
-          const Divider(height: 28),
-          Text('VOICE', style: theme.textTheme.labelSmall),
-          const SizedBox(height: 8),
-          if (!inCall)
-            FilledButton.icon(
-              onPressed: () => unawaited(_joinVoice(session.channelId)),
-              icon: const Icon(Icons.call),
-              label: const Text('Join voice'),
-            )
-          else ...[
-            Row(
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(16),
               children: [
-                IconButton(
-                  onPressed: voice.toggleMute,
-                  icon: Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
-                  tooltip: voice.isMuted ? 'Unmute' : 'Mute',
+                Row(
+                  children: [
+                    Icon(
+                      session.isDm ? Icons.alternate_email : Icons.tag,
+                      size: 18,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _channelTitle(session),
+                        style: theme.textTheme.titleMedium,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  onPressed: voice.toggleDeafen,
-                  icon: Icon(
-                    voice.isDeafened ? Icons.headset_off : Icons.headset,
+                if (!session.isDm) ...[
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        unawaited(_shareInvite(session.channelId)),
+                    icon: const Icon(Icons.person_add_alt_1),
+                    label: const Text('Invite'),
                   ),
-                  tooltip: voice.isDeafened ? 'Undeafen' : 'Deafen',
-                ),
-                const Spacer(),
-                IconButton(
-                  onPressed: () => unawaited(_leaveVoice()),
-                  icon: const Icon(Icons.call_end),
-                  color: theme.colorScheme.error,
-                  tooltip: 'Leave voice',
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            _participantTile(
-              voice,
-              'self',
-              widget.identity.publicKey,
-              voice.isMuted ? 'You (muted)' : 'You',
-            ),
-            for (final peerHex in voice.peerHexes)
-              _participantTile(
-                voice,
-                peerHex,
-                Uint8List.fromList(hex.decode(peerHex)),
-                _displayName(Uint8List.fromList(hex.decode(peerHex))),
-              ),
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              onPressed: () => unawaited(_openVoiceSoundboard(session)),
-              icon: const Icon(Icons.library_music_outlined),
-              label: const Text('Soundboard'),
-            ),
-          ],
-          const Divider(height: 28),
-          Text('MEMBERS', style: theme.textTheme.labelSmall),
-          for (final key in _membersOf(session))
-            ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
-              title: Text(
-                _displayName(Uint8List.fromList(hex.decode(key))),
-                overflow: TextOverflow.ellipsis,
-              ),
-              onTap: () =>
-                  unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
-            ),
-          if (_membersOf(session).isEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Text('Just you so far.', style: theme.textTheme.bodySmall),
-            ),
-          if (!session.isDm) ...[
-            const Divider(height: 28),
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_horiz, size: 18),
-              tooltip: 'Channel options',
-              onSelected: (action) {
-                if (action == 'leave') {
-                  unawaited(_leaveChannel(session.channelId));
-                }
-              },
-              itemBuilder: (context) => [
-                const PopupMenuItem(
-                  value: 'leave',
-                  child: ListTile(
-                    leading: Icon(Icons.logout, color: Colors.red),
-                    title: Text('Leave channel'),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(_addMembers(session)),
+                    icon: const Icon(Icons.group_add_outlined),
+                    label: const Text('Add members'),
+                  ),
+                ],
+                const Divider(height: 28),
+                Text('VOICE', style: theme.textTheme.labelSmall),
+                const SizedBox(height: 8),
+                if (!inCall)
+                  FilledButton.icon(
+                    onPressed: () =>
+                        unawaited(_joinVoice(session.channelId)),
+                    icon: const Icon(Icons.call),
+                    label: const Text('Join voice'),
+                  )
+                else ...[
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: voice.toggleMute,
+                        icon:
+                            Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
+                        tooltip: voice.isMuted ? 'Unmute' : 'Mute',
+                      ),
+                      IconButton(
+                        onPressed: voice.toggleDeafen,
+                        icon: Icon(
+                          voice.isDeafened
+                              ? Icons.headset_off
+                              : Icons.headset,
+                        ),
+                        tooltip:
+                            voice.isDeafened ? 'Undeafen' : 'Deafen',
+                      ),
+                      const Spacer(),
+                      IconButton(
+                        onPressed: () => unawaited(_leaveVoice()),
+                        icon: const Icon(Icons.call_end),
+                        color: theme.colorScheme.error,
+                        tooltip: 'Leave voice',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  _participantTile(
+                    voice,
+                    'self',
+                    widget.identity.publicKey,
+                    voice.isMuted ? 'You (muted)' : 'You',
+                  ),
+                  for (final peerHex in voice.peerHexes)
+                    _participantTile(
+                      voice,
+                      peerHex,
+                      Uint8List.fromList(hex.decode(peerHex)),
+                      _displayName(
+                          Uint8List.fromList(hex.decode(peerHex))),
+                    ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () =>
+                        unawaited(_openVoiceSoundboard(session)),
+                    icon: const Icon(Icons.library_music_outlined),
+                    label: const Text('Soundboard'),
+                  ),
+                ],
+                const Divider(height: 28),
+                Text('MEMBERS', style: theme.textTheme.labelSmall),
+                for (final key in _membersOf(session))
+                  ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
+                    leading: _avatar(
+                        Uint8List.fromList(hex.decode(key)),
+                        radius: 14),
+                    title: Text(
+                      _displayName(Uint8List.fromList(hex.decode(key))),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => unawaited(
+                        _peerActions(Uint8List.fromList(hex.decode(key)))),
                   ),
-                ),
+                if (_membersOf(session).isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text('Just you so far.',
+                        style: theme.textTheme.bodySmall),
+                  ),
               ],
             ),
-          ],
+          ),
+          if (!session.isDm)
+            Container(
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(
+                      color: theme.colorScheme.outlineVariant, width: 0.5),
+                ),
+              ),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: TextButton.icon(
+                onPressed: () => unawaited(_leaveChannel(session.channelId)),
+                icon: const Icon(Icons.logout, size: 16),
+                label: const Text('Leave channel'),
+                style: TextButton.styleFrom(
+                  foregroundColor: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -1730,7 +2104,27 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _chatColumn(ChannelSession session) => Column(
     children: [
-      Expanded(child: _messageList(context, session)),
+      Expanded(
+        child: Stack(
+          children: [
+            _messageList(context, session),
+            if (_showScrollDown)
+              Positioned(
+                bottom: 8,
+                right: 8,
+                child: FloatingActionButton.small(
+                  onPressed: () => _scroll.animateTo(
+                    _scroll.position.maxScrollExtent,
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOut,
+                  ),
+                  tooltip: 'Scroll to bottom',
+                  child: const Icon(Icons.keyboard_arrow_down),
+                ),
+              ),
+          ],
+        ),
+      ),
       _typingIndicator(session),
       _composer(context, session),
     ],
@@ -1973,23 +2367,26 @@ class _ChatScreenState extends State<ChatScreen> {
     final dms = sessions.where((s) => s.isDm);
     return Drawer(
       child: SafeArea(
-        child: ListView(
-          padding: EdgeInsets.zero,
+        child: Column(
           children: [
-            _brandHeader(),
-            _drawerHeader('Channels'),
-            for (final s in groups)
-              ListTile(
-                leading: const Icon(Icons.tag),
-                title: Text(_channelTitle(s)),
-                selected: s.channelId == channels?.activeId,
-                trailing: _unreadBadge(s),
-                onTap: () {
-                  channels?.activate(s.channelId);
-                  _markRead(s);
-                  Navigator.pop(context);
-                },
-              ),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  _brandHeader(),
+                  _drawerHeader('Channels'),
+                  for (final s in groups)
+                    ListTile(
+                      leading: const Icon(Icons.tag),
+                      title: Text(_channelTitle(s)),
+                      selected: s.channelId == channels?.activeId,
+                      trailing: _unreadBadge(s),
+                      onTap: () {
+                        channels?.activate(s.channelId);
+                        _markRead(s);
+                        Navigator.pop(context);
+                      },
+                    ),
             ListTile(
               leading: const Icon(Icons.add),
               title: const Text('Create a channel'),
@@ -2040,52 +2437,31 @@ class _ChatScreenState extends State<ChatScreen> {
                 unawaited(_openContacts());
               },
             ),
-            _drawerHeader('Identity'),
-            ListTile(
-              leading: const Icon(Icons.key_outlined),
-              title: const Text('Back up identity'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_backupIdentity());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.restore),
-              title: const Text('Restore identity'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_restoreIdentity());
-              },
-            ),
-            _drawerHeader('Network'),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: NetworkStatus(
-                relayUp: _relayUp,
-                checkingRelay: _checkingRelay,
-                peerCount: _totalPeerCount(),
-                channelCount: _channels?.sessions.length ?? 0,
-                relayUrl: _relayUrl.toString(),
-                onTapRelay: () {
-                  Navigator.pop(context);
-                  unawaited(_setRelayUrl());
-                },
-                onRefresh: () => unawaited(_checkRelay()),
-              ),
-            ),
             const Divider(height: 24),
-            ListTile(
-              dense: true,
-              leading: const Icon(Icons.code),
-              title: const Text('Source code'),
-              subtitle: Text(
-                'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
-              ),
-              onTap: () => unawaited(_openSourceCode()),
-            ),
           ],
         ),
       ),
+      ListTile(
+        dense: true,
+        leading: const Icon(Icons.settings_outlined, size: 20),
+        title: const Text('Settings'),
+        onTap: () {
+          Navigator.pop(context);
+          unawaited(_openSettings());
+        },
+      ),
+      ListTile(
+        dense: true,
+        leading: const Icon(Icons.code, size: 20),
+        title: const Text('Source code'),
+        subtitle: Text(
+          'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
+        ),
+        onTap: () => unawaited(_openSourceCode()),
+      ),
+    ],
+  ),
+),
     );
   }
 
@@ -2201,7 +2577,15 @@ class _ChatScreenState extends State<ChatScreen> {
       FileContent(:final blob, :final name, :final mime) =>
         mime.startsWith('image/')
             ? _imageBlobView(session, blob)
-            : _fileChip(name),
+            : _isDangerousFile(name)
+                ? Chip(
+                    avatar: Icon(Icons.warning_amber, size: 18,
+                        color: Theme.of(context).colorScheme.error),
+                    label: Text('$name (blocked)',
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error)),
+                  )
+                : _fileChip(name),
       // Profile claims aren't shown in the timeline (filtered in _messageList).
       ProfileContent() => const SizedBox.shrink(),
     };
@@ -2260,119 +2644,6 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
     return sounds.reversed.toList();
-  }
-
-  /// Your saved media (everything sent or received), to re-send here.
-  Future<void> _openLibrary() async {
-    final library = _library;
-    final store = _blobStore;
-    if (library == null || store == null) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) => SizedBox(
-        height: 480,
-        child: ListView(
-          padding: const EdgeInsets.all(12),
-          children: [
-            _drawerHeader('Stickers'),
-            _imageLibrary(
-              library.byKind(MediaKind.sticker),
-              store,
-              (hash) => _publish(StickerContent(hash)),
-            ),
-            _drawerHeader('GIFs'),
-            _imageLibrary(
-              library.byKind(MediaKind.gif),
-              store,
-              (hash) => _publish(GifContent(hash)),
-            ),
-            _drawerHeader('Sounds'),
-            _soundLibrary(library.byKind(MediaKind.sound)),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// A wrap of image-blob thumbnails (stickers/GIFs); tap to re-send.
-  Widget _imageLibrary(
-    List<MediaItem> items,
-    BlobStore store,
-    Future<void> Function(String) onPick,
-  ) {
-    if (items.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.all(8),
-        child: Text('Nothing yet'),
-      );
-    }
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        for (final item in items)
-          GestureDetector(
-            onTap: () {
-              Navigator.pop(context);
-              unawaited(onPick(item.hash));
-            },
-            child: SizedBox(
-              width: 72,
-              height: 72,
-              child: FutureBuilder<Uint8List?>(
-                future: store.get(item.hash),
-                builder: (context, snapshot) {
-                  final bytes = snapshot.data;
-                  if (bytes == null) {
-                    return const ColoredBox(color: Colors.black12);
-                  }
-                  return ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: Image.memory(bytes, fit: BoxFit.cover),
-                  );
-                },
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  /// A wrap of named sound chips; tap to re-send to this channel.
-  Widget _soundLibrary(List<MediaItem> items) {
-    if (items.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.all(8),
-        child: Text('Nothing yet'),
-      );
-    }
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        for (final item in items)
-          ActionChip(
-            avatar: Text(
-              item.emoji ?? '🔊',
-              style: const TextStyle(fontSize: 16),
-            ),
-            label: Text(item.name ?? 'sound'),
-            onPressed: () {
-              Navigator.pop(context);
-              unawaited(
-                _publish(
-                  SoundContent(
-                    item.hash,
-                    item.name ?? 'sound',
-                    item.emoji ?? '🔊',
-                  ),
-                ),
-              );
-            },
-          ),
-      ],
-    );
   }
 
 
@@ -2464,39 +2735,6 @@ class _ChatScreenState extends State<ChatScreen> {
     return HSLColor.fromAHSL(1, hue, 0.5, 0.62).toColor();
   }
 
-  /// Returns true if this author has sent 4+ messages in the last 5 seconds —
-  /// they're spamming and their bubbles catch fire 🔥.
-  bool _isOnFire(String authorHex, int messageTimestampMs) {
-    final times = _recentMsgTimes[authorHex];
-    if (times == null || times.length < 4) return false;
-    return times.length >= 4;
-  }
-
-  /// Updates the fire-state tracker — call from _refresh, not build.
-  void _refreshFireState() {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final active = _channels?.active;
-    if (active == null) return;
-    final messages = active.repository.ordered();
-    // Only check the last 20 messages (recent activity window).
-    final recent = messages.length > 20
-        ? messages.sublist(messages.length - 20)
-        : messages;
-    for (final message in recent) {
-      final authorHex = hex.encode(message.author);
-      final times = _recentMsgTimes[authorHex] ??= [];
-      if (now - message.timestampMs < 10000) {
-        if (!times.contains(message.timestampMs)) {
-          times.add(message.timestampMs);
-        }
-      }
-    }
-    // Prune expired entries.
-    for (final times in _recentMsgTimes.values) {
-      times.removeWhere((t) => now - t > 5000);
-    }
-  }
-
   /// A small colour-coded avatar (initial of the display name).
   Widget _avatar(Uint8List author, {double radius = 16}) {
     final label = _displayName(author).replaceFirst('hearth#', '');
@@ -2522,9 +2760,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ) {
     final mine = listEquals(message.author, widget.identity.publicKey);
     final scheme = Theme.of(context).colorScheme;
-    const radius = Radius.circular(16);
-    final authorHex = hex.encode(message.author);
-    final onFire = _isOnFire(authorHex, message.timestampMs);
+    const radius = Radius.circular(12);
     final bubble = Container(
       constraints: BoxConstraints(
         maxWidth: MediaQuery.of(context).size.width * 0.72,
@@ -2538,20 +2774,6 @@ class _ChatScreenState extends State<ChatScreen> {
           bottomLeft: mine ? radius : Radius.zero,
           bottomRight: mine ? Radius.zero : radius,
         ),
-        border: onFire ? Border.all(color: Colors.orange, width: 2) : null,
-        boxShadow: onFire
-            ? [
-                BoxShadow(
-                  color: Colors.deepOrange.withValues(alpha: 0.6),
-                  blurRadius: 12,
-                  spreadRadius: 1,
-                ),
-                BoxShadow(
-                  color: Colors.amber.withValues(alpha: 0.4),
-                  blurRadius: 6,
-                ),
-              ]
-            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2560,9 +2782,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Padding(
               padding: const EdgeInsets.only(bottom: 2),
               child: Text(
-                onFire
-                    ? '🔥 ${_displayName(message.author)}'
-                    : _displayName(message.author),
+                _displayName(message.author),
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: _userColor(message.author),
                   fontWeight: FontWeight.w600,
@@ -2671,36 +2891,56 @@ class _ChatScreenState extends State<ChatScreen> {
             tooltip: 'Attach file',
             focusNode: FocusNode(skipTraversal: true),
           ),
-          IconButton(
-            onPressed: () => unawaited(_openLibrary()),
-            icon: const Icon(Icons.collections_bookmark_outlined),
-            tooltip: 'Your media',
-            focusNode: FocusNode(skipTraversal: true),
-          ),
           Expanded(
-            child: TextField(
-              controller: _input,
-              focusNode: _composerFocus,
-              onSubmitted: (_) {
-                unawaited(_send());
-                _composerFocus.requestFocus();
-              },
-              decoration: InputDecoration(
-                hintText: 'Message ${_channelTitle(session)}',
-                filled: true,
-                fillColor: Theme.of(
-                  context,
-                ).colorScheme.surfaceContainerHighest,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
-                ),
-              ),
-            ),
+            child: _composerOnFire
+                ? _FlameBox(
+                    child: TextField(
+                      controller: _input,
+                      focusNode: _composerFocus,
+                      onSubmitted: (_) {
+                        unawaited(_send());
+                        _composerFocus.requestFocus();
+                      },
+                      decoration: InputDecoration(
+                        hintText: 'Message ${_channelTitle(session)}',
+                        filled: true,
+                        fillColor: Theme.of(
+                          context,
+                        ).colorScheme.surfaceContainerHighest,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide.none,
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
+                        ),
+                      ),
+                    ),
+                  )
+                : TextField(
+                    controller: _input,
+                    focusNode: _composerFocus,
+                    onSubmitted: (_) {
+                      unawaited(_send());
+                      _composerFocus.requestFocus();
+                    },
+                    decoration: InputDecoration(
+                      hintText: 'Message ${_channelTitle(session)}',
+                      filled: true,
+                      fillColor: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide.none,
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                    ),
+                  ),
           ),
           const SizedBox(width: 8),
           IconButton.filled(
@@ -2763,42 +3003,84 @@ class _ContactsPage extends StatefulWidget {
 class _ContactsPageState extends State<_ContactsPage> {
   @override
   Widget build(BuildContext context) {
-    final entries = widget.contacts.entries();
+    final selfHex = widget.identity.publicKeyHex;
+    final entries = Map.of(widget.contacts.entries())..remove(selfHex);
+    final myName = widget.contacts.nameFor(selfHex);
     return Scaffold(
       appBar: AppBar(title: const Text('Contacts')),
-      body: entries.isEmpty
-          ? const Center(
-              child: Text(
-                "No contacts yet — tap someone's name in a chat to add them.",
-              ),
-            )
-          : ListView.builder(
-              itemCount: entries.length,
-              itemBuilder: (context, i) {
-                final pubkeyHex = entries.keys.elementAt(i);
-                final name = entries.values.elementAt(i);
-                return ListTile(
-                  leading: CircleAvatar(child: Text(name[0].toUpperCase())),
-                  title: Text(name),
-                  subtitle: Text(
-                    'hearth#${pubkeyHex.substring(0, 8)}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (action) => _onAction(action, pubkeyHex),
-                    itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'dm', child: Text('Direct message')),
-                      PopupMenuItem(
-                        value: 'invite',
-                        child: Text('Invite to channel'),
-                      ),
-                      PopupMenuItem(value: 'rename', child: Text('Rename')),
-                      PopupMenuItem(value: 'remove', child: Text('Remove')),
-                    ],
-                  ),
-                );
-              },
+      body: Column(
+        children: [
+          // Your profile card.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            color: Theme.of(context).colorScheme.surfaceContainerLow,
+            child: Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: Theme.of(context).colorScheme.primary,
+                  child: const Icon(Icons.person, color: Colors.white),
+                ),
+                const SizedBox(width: 12),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      myName ?? 'You',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      'hearth#${selfHex.substring(0, 8)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ],
             ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: entries.isEmpty
+                ? const Center(
+                    child: Text(
+                      "No contacts yet — tap someone's name in a chat to add them.",
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: entries.length,
+                    itemBuilder: (context, i) {
+                      final pubkeyHex = entries.keys.elementAt(i);
+                      final name = entries.values.elementAt(i);
+                      return ListTile(
+                        leading:
+                            CircleAvatar(child: Text(name[0].toUpperCase())),
+                        title: Text(name),
+                        subtitle: Text(
+                          'hearth#${pubkeyHex.substring(0, 8)}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                        trailing: PopupMenuButton<String>(
+                          onSelected: (action) =>
+                              _onAction(action, pubkeyHex),
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(
+                                value: 'dm', child: Text('Direct message')),
+                            PopupMenuItem(
+                              value: 'invite',
+                              child: Text('Invite to channel'),
+                            ),
+                            PopupMenuItem(
+                                value: 'rename', child: Text('Rename')),
+                            PopupMenuItem(
+                                value: 'remove', child: Text('Remove')),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2871,3 +3153,127 @@ class _ContactsPageState extends State<_ContactsPage> {
     if (channelId != null) widget.onInvite(pubkeyHex, channelId);
   }
 }
+
+/// Wraps a child in an animated flame effect around the perimeter.
+class _FlameBox extends StatefulWidget {
+  const _FlameBox({required this.child});
+  final Widget child;
+
+  @override
+  State<_FlameBox> createState() => _FlameBoxState();
+}
+
+class _FlameBoxState extends State<_FlameBox>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, child) => CustomPaint(
+        foregroundPainter: _FlamePainter(_ctrl.value),
+        child: child,
+      ),
+      child: widget.child,
+    );
+  }
+}
+
+class _FlamePainter extends CustomPainter {
+  _FlamePainter(this.phase);
+  final double phase;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    // Draw multiple flame tongues around the perimeter.
+    final rng = phase * 2 * 3.14159;
+    final paint = Paint()..style = PaintingStyle.fill;
+
+    // Perimeter points: distribute ~24 flame tongues around the rounded rect.
+    const count = 24;
+    final perimeter = 2 * (size.width + size.height);
+    for (var i = 0; i < count; i++) {
+      final t = i / count;
+      // Offset each flame by phase for animation.
+      final flicker = sin((t * 12 + rng) * 1.0) * 0.5 + 0.5;
+      final height = 4.0 + flicker * 8.0;
+      final opacity = 0.4 + flicker * 0.5;
+
+      // Position along perimeter.
+      final d = t * perimeter;
+      late Offset pos;
+      late Offset dir; // outward direction
+
+      if (d < size.width) {
+        // Top edge.
+        pos = Offset(d, 0);
+        dir = const Offset(0, -1);
+      } else if (d < size.width + size.height) {
+        // Right edge.
+        pos = Offset(size.width, d - size.width);
+        dir = const Offset(1, 0);
+      } else if (d < 2 * size.width + size.height) {
+        // Bottom edge.
+        pos = Offset(size.width - (d - size.width - size.height), size.height);
+        dir = const Offset(0, 1);
+      } else {
+        // Left edge.
+        pos = Offset(0, size.height - (d - 2 * size.width - size.height));
+        dir = const Offset(-1, 0);
+      }
+
+      // Draw a teardrop flame tongue.
+      final tip = pos + dir * height;
+      final perp = Offset(-dir.dy, dir.dx) * 3.0;
+      final path = Path()
+        ..moveTo(pos.dx - perp.dx, pos.dy - perp.dy)
+        ..quadraticBezierTo(tip.dx, tip.dy, pos.dx + perp.dx, pos.dy + perp.dy)
+        ..close();
+
+      // Gradient from orange at base to yellow at tip.
+      paint.color = Color.lerp(
+        Colors.deepOrange,
+        Colors.amber,
+        flicker,
+      )!.withValues(alpha: opacity);
+      canvas.drawPath(path, paint);
+    }
+
+    // Glow around the border.
+    final glowPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..shader = LinearGradient(
+        colors: [
+          Colors.orange.withValues(alpha: 0.8),
+          Colors.amber.withValues(alpha: 0.6),
+          Colors.deepOrange.withValues(alpha: 0.8),
+        ],
+      ).createShader(rect);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(rect, const Radius.circular(24)),
+      glowPaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_FlamePainter old) => old.phase != phase;
+}
+
