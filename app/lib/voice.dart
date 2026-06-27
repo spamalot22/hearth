@@ -7,6 +7,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:core/core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'mesh_control.dart';
 import 'webrtc_mesh.dart';
 
 /// A live voice call in a channel: a second [WebRtcMesh] on a `voice:<channelId>`
@@ -105,6 +106,7 @@ class VoiceSession {
       onRemoteStream: (peerHex, remote) =>
           unawaited(session._onRemote(peerHex, remote)),
       onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),
+      onControl: (_, control) => session._onControl(control),
     );
     session = VoiceSession._(channelId, mesh, stream, onChange);
     // The mesh only starts announcing once peerConnected is listened to.
@@ -233,6 +235,22 @@ class VoiceSession {
   }
 
   /// Leaves the call: tears down the mesh, releases renderers, stops the mic.
+  /// Callback for when a peer plays a soundboard clip.
+  void Function(String blob)? onSoundboard;
+
+  /// Broadcasts a control message to all voice peers.
+  void sendControl(MeshControl control) {
+    for (final peerHex in _mesh.connections.keys) {
+      _mesh.sendControlTo(peerHex, control);
+    }
+  }
+
+  void _onControl(MeshControl control) {
+    if (control is SoundboardControl && control.blob.isNotEmpty) {
+      onSoundboard?.call(control.blob);
+    }
+  }
+
   Future<void> leave() async {
     if (_closed) return;
     _closed = true;

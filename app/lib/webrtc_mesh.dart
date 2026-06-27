@@ -372,6 +372,8 @@ class WebRtcMesh {
         break; // Handled by the external onControl callback (app layer).
       case TypingControl():
         break; // Handled by the external onControl callback (app layer).
+      case SoundboardControl():
+        break; // Handled by the external onControl callback (voice layer).
     }
   }
 

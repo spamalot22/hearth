@@ -26,6 +26,7 @@ import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
 import 'media_library.dart';
+import 'mesh_control.dart';
 import 'network_status.dart';
 import 'profile.dart';
 import 'settings.dart';
@@ -901,44 +902,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Sound button: play the channel soundboard, search the CC0 library, or
-  /// upload your own file.
-  Future<void> _addSound(ChannelSession session) async {
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.grid_view_outlined),
-              title: const Text('Soundboard'),
-              subtitle: const Text('play this channel’s clips'),
-              onTap: () => Navigator.pop(context, 'board'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.search),
-              title: const Text('Search sounds'),
-              onTap: () => Navigator.pop(context, 'search'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.upload_file_outlined),
-              title: const Text('Upload your own'),
-              onTap: () => Navigator.pop(context, 'upload'),
-            ),
-          ],
-        ),
-      ),
-    );
-    switch (action) {
-      case 'board':
-        await _openSoundboard(session);
-      case 'search':
-        await _searchSound();
-      case 'upload':
-        await _sendSound();
-    }
-  }
 
   /// Plays a soundboard clip if its blob is held locally.
   Future<void> _playSound(ChannelSession session, String blob) async {
@@ -1168,6 +1131,10 @@ class _ChatScreenState extends State<ChatScreen> {
         relayUrl: _relayUrl,
         onChange: _voiceChanged,
       );
+      _voice!.onSoundboard = (blob) {
+        final session = _channels?.active;
+        if (session != null) unawaited(_playSound(session, blob));
+      };
       if (mounted) setState(() {});
     } catch (_) {
       if (mounted) {
@@ -1277,6 +1244,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 Uint8List.fromList(hex.decode(peerHex)),
                 _displayName(Uint8List.fromList(hex.decode(peerHex))),
               ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => unawaited(_openVoiceSoundboard(session)),
+              icon: const Icon(Icons.library_music_outlined),
+              label: const Text('Soundboard'),
+            ),
           ],
           const Divider(height: 28),
           Text('MEMBERS', style: theme.textTheme.labelSmall),
@@ -1299,13 +1272,25 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           if (!session.isDm) ...[
             const Divider(height: 28),
-            TextButton.icon(
-              onPressed: () => unawaited(_leaveChannel(session.channelId)),
-              icon: const Icon(Icons.logout, size: 18),
-              label: const Text('Leave channel'),
-              style: TextButton.styleFrom(
-                foregroundColor: theme.colorScheme.error,
-              ),
+            PopupMenuButton<String>(
+              icon: const Icon(Icons.more_horiz, size: 18),
+              tooltip: 'Channel options',
+              onSelected: (action) {
+                if (action == 'leave') {
+                  unawaited(_leaveChannel(session.channelId));
+                }
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: 'leave',
+                  child: ListTile(
+                    leading: Icon(Icons.logout, color: Colors.red),
+                    title: Text('Leave channel'),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
             ),
           ],
         ],
@@ -1754,7 +1739,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _messageList(BuildContext context, ChannelSession session) {
     final messages = session.repository
         .ordered()
-        .where((m) => session.contentOf(m) is! ProfileContent)
+        .where((m) {
+          final c = session.contentOf(m);
+          return c is! ProfileContent && c is! SoundContent;
+        })
         .toList();
     return messages.isEmpty
         ? const Center(child: Text('No messages yet — say something.'))
@@ -2387,8 +2375,10 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// Opens the channel soundboard — a grid of its clips, tap any to play.
-  Future<void> _openSoundboard(ChannelSession session) async {
+
+  /// Opens the soundboard from the voice panel — playing a clip broadcasts it
+  /// to all voice participants via a control frame.
+  Future<void> _openVoiceSoundboard(ChannelSession session) async {
     await showModalBottomSheet<void>(
       context: context,
       builder: (context) {
@@ -2396,9 +2386,24 @@ class _ChatScreenState extends State<ChatScreen> {
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: sounds.isEmpty
-                ? const Text('No sounds yet — upload one with the 🎵 button.')
-                : Wrap(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Soundboard',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Plays for everyone in voice',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                if (sounds.isEmpty)
+                  const Text('No sounds yet — add one below.')
+                else
+                  Wrap(
                     spacing: 8,
                     runSpacing: 8,
                     children: [
@@ -2409,15 +2414,48 @@ class _ChatScreenState extends State<ChatScreen> {
                             style: const TextStyle(fontSize: 16),
                           ),
                           label: Text(sound.name),
-                          onPressed: () =>
-                              unawaited(_playSound(session, sound.blob)),
+                          onPressed: () {
+                            Navigator.pop(context);
+                            unawaited(_playSoundToVoice(session, sound.blob));
+                          },
                         ),
                     ],
                   ),
+                const Divider(height: 24),
+                Row(
+                  children: [
+                    TextButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        unawaited(_searchSound());
+                      },
+                      icon: const Icon(Icons.search, size: 18),
+                      label: const Text('Search'),
+                    ),
+                    TextButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        unawaited(_sendSound());
+                      },
+                      icon: const Icon(Icons.upload_file_outlined, size: 18),
+                      label: const Text('Upload'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         );
       },
     );
+  }
+
+  /// Plays a sound locally AND broadcasts it to voice peers.
+  Future<void> _playSoundToVoice(ChannelSession session, String blob) async {
+    // Play locally.
+    await _playSound(session, blob);
+    // Broadcast to voice peers via the voice mesh.
+    _voice?.sendControl(SoundboardControl(blob: blob));
   }
 
   /// A deterministic warm colour per person, derived from their pubkey.
@@ -2613,31 +2651,31 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => unawaited(_insertEmoji()),
             icon: const Icon(Icons.emoji_emotions_outlined),
             tooltip: 'Emoji',
+            focusNode: FocusNode(skipTraversal: true),
           ),
           IconButton(
             onPressed: () => unawaited(_sendGif()),
             icon: const Icon(Icons.gif_box_outlined),
             tooltip: 'GIF',
+            focusNode: FocusNode(skipTraversal: true),
           ),
           IconButton(
             onPressed: () => unawaited(_sendSticker()),
             icon: const Icon(Icons.image_outlined),
             tooltip: 'Sticker',
+            focusNode: FocusNode(skipTraversal: true),
           ),
           IconButton(
             onPressed: () => unawaited(_sendFile()),
             icon: const Icon(Icons.attach_file),
             tooltip: 'Attach file',
-          ),
-          IconButton(
-            onPressed: () => unawaited(_addSound(session)),
-            icon: const Icon(Icons.library_music_outlined),
-            tooltip: 'Sound',
+            focusNode: FocusNode(skipTraversal: true),
           ),
           IconButton(
             onPressed: () => unawaited(_openLibrary()),
             icon: const Icon(Icons.collections_bookmark_outlined),
             tooltip: 'Your media',
+            focusNode: FocusNode(skipTraversal: true),
           ),
           Expanded(
             child: TextField(

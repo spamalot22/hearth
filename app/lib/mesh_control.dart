@@ -44,6 +44,9 @@ sealed class MeshControl {
               .cast<String, Object?>(),
         ),
         'typing' => TypingControl(typing: json['typing'] as bool? ?? false),
+        'soundboard' => SoundboardControl(
+          blob: json['blob'] as String? ?? '',
+        ),
         _ => null,
       };
     } catch (_) {
@@ -137,6 +140,17 @@ class TypingControl extends MeshControl {
 
   @override
   Map<String, Object?> toJson() => {'t': 'typing', 'typing': typing};
+}
+
+/// "Play this soundboard clip" — sent over the voice mesh so all voice
+/// participants play the referenced blob locally.
+class SoundboardControl extends MeshControl {
+  const SoundboardControl({required this.blob});
+
+  final String blob;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'soundboard', 'blob': blob};
 }
 
 /// Tags a gossip frame's text for the data channel.
