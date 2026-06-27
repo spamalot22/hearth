@@ -62,6 +62,11 @@ Future<void> _initNotifications() async {
     settings: const InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
       linux: LinuxInitializationSettings(defaultActionName: 'Open'),
+      windows: WindowsInitializationSettings(
+        appName: 'Hearth',
+        appUserModelId: 'com.hearth.app',
+        guid: '6e2f7a8b-1c3d-4e5f-9a0b-2c4d6e8f0a1b',
+      ),
     ),
   );
 }
@@ -79,6 +84,7 @@ Future<void> showLocalNotification(String title, String body) async {
         'Messages',
         importance: Importance.high,
       ),
+      windows: WindowsNotificationDetails(),
     ),
   );
 }
