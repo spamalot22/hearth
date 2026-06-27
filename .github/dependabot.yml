@@ -1,0 +1,43 @@
+# Dependabot opens dependency-update PRs, each gated by the `ci` workflow before
+# it can merge. Updates are grouped per ecosystem (one PR each) on a weekly
+# cadence to keep the noise down.
+version: 2
+updates:
+  # Flutter app (Dart pub).
+  - package-ecosystem: pub
+    directory: /app
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      app:
+        patterns: ['*']
+
+  # Shared core package (Dart pub).
+  - package-ecosystem: pub
+    directory: /core
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      core:
+        patterns: ['*']
+
+  # Relay backend (npm / pnpm).
+  - package-ecosystem: npm
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      backend:
+        patterns: ['*']
+
+  # The GitHub Actions used by the workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
