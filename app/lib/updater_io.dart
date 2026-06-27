@@ -29,6 +29,11 @@ Future<void> downloadAndInstall(
     throw UnsupportedError('No update asset for this platform.');
   }
   final fileName = asset['file'] as String;
+  // Defence-in-depth: the filename is signature-gated, but never let it carry
+  // path separators or shell-special chars into the file write / install script.
+  if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(fileName)) {
+    throw StateError('unsafe update asset filename: $fileName');
+  }
   final expectedHash = (asset['sha256'] as String).toLowerCase();
 
   final url = relayUrl.replace(

@@ -19,21 +19,45 @@ void main() {
 
     test('a correctly signed offer verifies', () async {
       final data = offer('v=0 ... a=fingerprint:sha-256 AB:CD');
-      data['sig'] = await signSignal(alice, 'offer', bob.publicKeyHex, data);
+      data['sig'] = await signSignal(
+        alice,
+        'room',
+        'offer',
+        bob.publicKeyHex,
+        data,
+      );
 
       expect(
-        await verifySignal(alice.publicKeyHex, bob.publicKeyHex, 'offer', data),
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        ),
         isTrue,
       );
     });
 
     test('a swapped DTLS fingerprint is rejected (the MITM case)', () async {
       final data = offer('v=0 ... a=fingerprint:sha-256 AB:CD');
-      data['sig'] = await signSignal(alice, 'offer', bob.publicKeyHex, data);
+      data['sig'] = await signSignal(
+        alice,
+        'room',
+        'offer',
+        bob.publicKeyHex,
+        data,
+      );
       data['sdp'] = 'v=0 ... a=fingerprint:sha-256 EV:IL'; // attacker swap
 
       expect(
-        await verifySignal(alice.publicKeyHex, bob.publicKeyHex, 'offer', data),
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        ),
         isFalse,
       );
     });
@@ -41,23 +65,65 @@ void main() {
     test('impersonation (signed by another key) is rejected', () async {
       final data = offer('v=0 ...');
       // Mallory signs but the signal claims to be from Alice.
-      data['sig'] = await signSignal(mallory, 'offer', bob.publicKeyHex, data);
+      data['sig'] = await signSignal(
+        mallory,
+        'room',
+        'offer',
+        bob.publicKeyHex,
+        data,
+      );
 
       expect(
-        await verifySignal(alice.publicKeyHex, bob.publicKeyHex, 'offer', data),
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        ),
         isFalse,
       );
     });
 
     test('replay to a different recipient is rejected', () async {
       final data = offer('v=0 ...');
-      data['sig'] = await signSignal(alice, 'offer', bob.publicKeyHex, data);
+      data['sig'] = await signSignal(
+        alice,
+        'room',
+        'offer',
+        bob.publicKeyHex,
+        data,
+      );
 
       // Relay redirects Alice's offer-for-Bob to Mallory instead.
       expect(
         await verifySignal(
           alice.publicKeyHex,
           mallory.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        ),
+        isFalse,
+      );
+    });
+
+    test('replay into a different channel is rejected', () async {
+      final data = offer('v=0 ...');
+      data['sig'] = await signSignal(
+        alice,
+        'room-a',
+        'offer',
+        bob.publicKeyHex,
+        data,
+      );
+
+      // Relay moves Alice's offer from room-a's mailbox into room-b's.
+      expect(
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room-b',
           'offer',
           data,
         ),
@@ -68,7 +134,13 @@ void main() {
     test('a missing signature is rejected', () async {
       final data = offer('v=0 ...');
       expect(
-        await verifySignal(alice.publicKeyHex, bob.publicKeyHex, 'offer', data),
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        ),
         isFalse,
       );
     });
@@ -79,15 +151,33 @@ void main() {
         'sdpMid': '0',
         'sdpMLineIndex': 0,
       };
-      data['sig'] = await signSignal(alice, 'ice', bob.publicKeyHex, data);
+      data['sig'] = await signSignal(
+        alice,
+        'room',
+        'ice',
+        bob.publicKeyHex,
+        data,
+      );
       expect(
-        await verifySignal(alice.publicKeyHex, bob.publicKeyHex, 'ice', data),
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'ice',
+          data,
+        ),
         isTrue,
       );
 
       data['candidate'] = 'candidate:evil';
       expect(
-        await verifySignal(alice.publicKeyHex, bob.publicKeyHex, 'ice', data),
+        await verifySignal(
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'ice',
+          data,
+        ),
         isFalse,
       );
     });

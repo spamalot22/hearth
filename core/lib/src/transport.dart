@@ -120,8 +120,14 @@ class RelayTransport implements Transport {
 
     final verified = <Message>[];
     for (final entry in body['messages'] as List<dynamic>) {
-      final message = Message.fromJson((entry as Map).cast<String, Object?>());
-      if (await message.verify()) verified.add(message);
+      try {
+        final message = Message.fromJson(
+          (entry as Map).cast<String, Object?>(),
+        );
+        if (await message.verify()) verified.add(message);
+      } catch (_) {
+        // One malformed entry shouldn't abort the whole poll round.
+      }
     }
     return verified;
   }

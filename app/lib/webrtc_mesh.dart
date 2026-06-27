@@ -281,7 +281,9 @@ class WebRtcMesh {
     final payload = data.cast<String, Object?>();
     // Drop anything not validly signed by the claimed sender — this is what
     // stops a relay/MITM impersonating a peer or substituting a fingerprint.
-    if (!await verifySignal(from, selfPubkeyHex, kind, payload)) return;
+    if (!await verifySignal(from, selfPubkeyHex, channel, kind, payload)) {
+      return;
+    }
     switch (kind) {
       case 'offer':
         final link = _links[from] ?? _createLink(from, initiator: false);
@@ -396,7 +398,7 @@ class WebRtcMesh {
     // DTLS fingerprint; the signature rides inside `data`.
     final signed = {
       ...payload,
-      'sig': await signSignal(identity, kind, to, payload),
+      'sig': await signSignal(identity, channel, kind, to, payload),
     };
     try {
       await _client.post(
