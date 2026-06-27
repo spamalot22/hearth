@@ -218,7 +218,9 @@ class WebRtcMesh {
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       _authToken = body['token'] as String?;
-      for (final peer in (body['peers'] as List).cast<String>()) {
+      for (final peer in (body['peers'] as List).cast<String>().take(
+        _kMaxPeerFanout,
+      )) {
         _maybeInitiate(peer);
       }
     } catch (_) {
@@ -255,10 +257,15 @@ class WebRtcMesh {
     }
   }
 
+  /// Cap on how many peers a single peer-exchange / announce response can make us
+  /// dial, so a malicious peer or relay can't flood us into spawning connections.
+  static const int _kMaxPeerFanout = 64;
+
   /// We initiate (offer) only to peers whose key sorts below ours, so exactly
   /// one side of every pair offers.
   void _maybeInitiate(String peerHex) {
-    if (_closed || _links.containsKey(peerHex)) return;
+    // A pubkey is 32 bytes = 64 hex chars; drop anything malformed early.
+    if (_closed || peerHex.length != 64 || _links.containsKey(peerHex)) return;
     if (selfPubkeyHex.compareTo(peerHex) <= 0) return; // they offer to us
     final until = _backoffUntil[peerHex];
     if (until != null && DateTime.now().isBefore(until)) return; // backing off
@@ -346,7 +353,7 @@ class WebRtcMesh {
   void _handleControl(String fromHex, MeshControl control) {
     switch (control) {
       case PeersControl(:final peers):
-        for (final peerHex in peers) {
+        for (final peerHex in peers.take(_kMaxPeerFanout)) {
           _maybeInitiate(peerHex);
         }
       case SignalControl(:final to, :final from, :final kind, :final data):
