@@ -310,8 +310,7 @@ class ChannelManager {
   /// All pubkeys we're currently connected to across all channels.
   Set<String> get _allConnectedPeers => {
     for (final s in _sessions.values)
-      if (s._mesh != null)
-        ...s._mesh.connections.keys,
+      if (s._mesh != null) ...s._mesh.connections.keys,
   };
 
   /// Broadcasts our cross-channel connectivity to all connected peers.
@@ -339,23 +338,17 @@ class ChannelManager {
     // Cap to 20 peers per message to prevent amplification attacks.
     final capped = onlinePeers.take(20);
     for (final peerHex in capped) {
-      // Only attempt if we actually have a channel where this peer exists
-      // (they appear in our sessions' connections or candidate cache).
-      var known = false;
+      // Only reach for a peer we already know in some channel (candidate cache)
+      // and aren't already connected to — punch through the sender's mesh.
       for (final session in _sessions.values) {
         final mesh = session._mesh;
         if (mesh == null) continue;
         final cached = candidateCache?.knownPeers(session.channelId) ?? {};
-        if (cached.contains(peerHex) ||
-            mesh.connections.containsKey(peerHex)) {
-          known = true;
-          if (!mesh.connections.containsKey(peerHex)) {
-            mesh.maybeInitiateVia(peerHex);
-          }
+        if (cached.contains(peerHex) &&
+            !mesh.connections.containsKey(peerHex)) {
+          mesh.maybeInitiateVia(peerHex);
         }
       }
-      // Also try if they're a contact we know by name.
-      if (!known) continue;
     }
   }
 

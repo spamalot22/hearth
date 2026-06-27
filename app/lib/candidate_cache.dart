@@ -5,11 +5,15 @@ import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
 /// Persists known peer pubkeys per channel with last-seen timestamps.
 ///
-/// On startup, peers are filtered by a TTL-based exponential backoff:
-/// - Seen within 7 days → always try
-/// - 7–14 days → try once (then wait until 14-day mark)
-/// - 14–60 days → try once (then wait until 60-day mark)
-/// - >60 days → try once (final attempt), then prune
+/// On startup, peers are filtered by age since last *successful* connection:
+/// - < 14 days → always try
+/// - 14–60 days → try roughly once per 14-day window (approximate, keys off the
+///   startup day, so it's best-effort rather than exact)
+/// - 60–62 days → one final attempt
+/// - > 90 days → pruned
+///
+/// Last-seen only advances on a successful connection, so an unreachable peer's
+/// age keeps growing and walks it down these tiers until it's pruned.
 ///
 /// Retries are staggered: each peer gets a random delay (0–2s) so they don't
 /// all hit the relay in the same instant on startup.
@@ -100,6 +104,5 @@ class CandidateCache {
   }
 
   /// Random 0–2s stagger so startup attempts don't all fire at once.
-  static Duration _jitter() =>
-      Duration(milliseconds: _rand.nextInt(2000));
+  static Duration _jitter() => Duration(milliseconds: _rand.nextInt(2000));
 }

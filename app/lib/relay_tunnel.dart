@@ -29,6 +29,7 @@ class RelayTunnel implements FrameChannel {
   final StreamController<SyncFrame> _frames = StreamController<SyncFrame>();
   Timer? _timer;
   bool _closed = false;
+  bool _polling = false;
 
   @override
   Stream<SyncFrame> get frames => _frames.stream;
@@ -60,7 +61,8 @@ class RelayTunnel implements FrameChannel {
   }
 
   Future<void> _poll() async {
-    if (_closed) return;
+    if (_closed || _polling) return;
+    _polling = true;
     try {
       final params = <String, String>{
         'from': peerPubkeyHex,
@@ -77,7 +79,11 @@ class RelayTunnel implements FrameChannel {
         final frame = SyncFrame.decode(raw);
         if (frame != null && !_frames.isClosed) _frames.add(frame);
       }
-    } catch (_) {}
+    } catch (_) {
+      // Transient — the next tick retries.
+    } finally {
+      _polling = false;
+    }
   }
 
   Future<void> close() async {
