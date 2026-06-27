@@ -50,6 +50,10 @@ dependencies:
   audioplayers: ^6.8.0
   window_manager: ^0.5.1
   flutter_local_notifications: ^22.0.1
+  # Auto-update: hash-verify the download + launch the platform install.
+  crypto: ^3.0.0
+  open_filex: ^4.5.0
+  path_provider: ^2.1.0
 
 dev_dependencies:
   flutter_test:

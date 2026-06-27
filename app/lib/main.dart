@@ -31,6 +31,7 @@ import 'sound_search.dart';
 import 'starter_sounds.dart';
 import 'unread.dart';
 import 'update_checker.dart';
+import 'updater.dart';
 import 'voice.dart';
 
 /// Relay endpoint for local dev (signalling only).
@@ -241,6 +242,11 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _error;
   bool _sending = false;
   UpdateInfo? _updateInfo;
+  bool _relayBlocked = false; // released build can't reach the relay to verify
+  bool _checkingBlock = false;
+  double? _updateProgress;
+  bool _installing = false;
+  String? _installError;
   // Track recent message timestamps per author for the "on fire" effect.
   final Map<String, List<int>> _recentMsgTimes = {};
   bool _typingLocally = false;
@@ -348,11 +354,13 @@ class _ChatScreenState extends State<ChatScreen> {
         .where((s) => s.channelId == channelId)
         .firstOrNull;
     final name = session != null ? _channelTitle(session) : 'a channel';
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text('New message in #$name'),
-      duration: const Duration(seconds: 2),
-      behavior: SnackBarBehavior.floating,
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('New message in #$name'),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
     // Also fire a local OS notification (visible when app is in tray/background).
     unawaited(showLocalNotification('Hearth', 'New message in #$name'));
   }
@@ -657,8 +665,20 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _checkUpdate() async {
-    final info = await checkForUpdate(_relayUrl);
-    if (info != null && mounted) setState(() => _updateInfo = info);
+    final state = await checkForUpdate(_relayUrl);
+    if (!mounted) return;
+    setState(() {
+      switch (state) {
+        case UpdateAvailable(:final info):
+          _updateInfo = info;
+          _relayBlocked = false;
+        case RelayUnreachable():
+          // Released build, relay down — block until it's reachable again.
+          _relayBlocked = true;
+        case UpToDate():
+          _relayBlocked = false;
+      }
+    });
   }
 
   /// A coloured dot + label for the relay's reachability.
@@ -1085,9 +1105,9 @@ class _ChatScreenState extends State<ChatScreen> {
         content: Text(
           isLastMember
               ? "You're the only member — leaving will destroy this channel "
-                  'and all its message history permanently.'
+                    'and all its message history permanently.'
               : "You'll stop receiving its messages and need a new invite to "
-                  'rejoin.',
+                    'rejoin.',
         ),
         actions: [
           TextButton(
@@ -1471,10 +1491,12 @@ class _ChatScreenState extends State<ChatScreen> {
               relayUrl: _relayUrl.toString(),
             );
             Clipboard.setData(ClipboardData(text: invite));
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('Invite copied — send it to them!'),
-              behavior: SnackBarBehavior.floating,
-            ));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Invite copied — send it to them!'),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
           },
           onRemove: (pubkeyHex) async {
             await contacts.setName(pubkeyHex, '');
@@ -1628,6 +1650,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_updateInfo != null) {
       return _forceUpdateScreen(context);
     }
+    if (_relayBlocked) {
+      return _relayBlockedScreen(context);
+    }
     final session = _channels?.active;
     // Wide screens get the channel panel inline (right column); narrow screens
     // reach it via the end drawer.
@@ -1734,6 +1759,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _forceUpdateScreen(BuildContext context) {
     final theme = Theme.of(context);
+    // In-app install is only wired for Android + Windows; elsewhere the user
+    // updates manually (web reloads; macOS/Linux fetch a build).
+    final canInstall =
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.windows);
     return Scaffold(
       body: Center(
         child: Padding(
@@ -1747,14 +1778,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 color: theme.colorScheme.primary,
               ),
               const SizedBox(height: 16),
-              Text(
-                'Update required',
-                style: theme.textTheme.headlineSmall,
-              ),
+              Text('Update required', style: theme.textTheme.headlineSmall),
               const SizedBox(height: 8),
               Text(
                 'Hearth v${_updateInfo!.version} is available. '
-                'Please update to continue.',
+                '${canInstall ? "Install it to continue." : "Please update to continue."}',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
@@ -1765,11 +1793,120 @@ class _ChatScreenState extends State<ChatScreen> {
                 'You are running ${appVersion == "dev" ? "a dev build" : "v$appVersion"}.',
                 style: theme.textTheme.bodySmall,
               ),
+              const SizedBox(height: 24),
+              if (_installing) ...[
+                SizedBox(
+                  width: 240,
+                  child: LinearProgressIndicator(
+                    value: (_updateProgress ?? 0) > 0 ? _updateProgress : null,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _updateProgress != null
+                      ? 'Downloading ${(_updateProgress! * 100).round()}%…'
+                      : 'Downloading…',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ] else if (canInstall) ...[
+                FilledButton.icon(
+                  onPressed: () => unawaited(_startInstall()),
+                  icon: const Icon(Icons.download),
+                  label: Text('Install v${_updateInfo!.version}'),
+                ),
+                if (_installError != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _installError!,
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
+                  ),
+                ],
+              ],
             ],
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _startInstall() async {
+    setState(() {
+      _installing = true;
+      _updateProgress = 0;
+      _installError = null;
+    });
+    try {
+      await downloadAndInstall(
+        _updateInfo!,
+        _relayUrl,
+        onProgress: (p) {
+          if (mounted) setState(() => _updateProgress = p);
+        },
+      );
+      // Windows relaunches via its helper (we never return here). Android opens
+      // the system installer — leave the gate up until the user finishes.
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _installing = false;
+          _installError = 'Update failed: $e';
+        });
+      }
+    }
+  }
+
+  /// Shown when a released build can't reach the relay to verify its version — a
+  /// deliberate kill-switch while the project is private. Retry re-checks.
+  Widget _relayBlockedScreen(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.cloud_off, size: 64, color: theme.colorScheme.primary),
+              const SizedBox(height: 16),
+              Text('Connect to a relay', style: theme.textTheme.headlineSmall),
+              const SizedBox(height: 8),
+              Text(
+                "Hearth can't reach a relay to check you're up to date. Connect to "
+                'a relay to continue and pick up any update.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _relayUrl.toString(),
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: _checkingBlock
+                    ? null
+                    : () => unawaited(_retryRelayBlock()),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _retryRelayBlock() async {
+    setState(() => _checkingBlock = true);
+    await _checkRelay();
+    await _checkUpdate();
+    if (mounted) setState(() => _checkingBlock = false);
   }
 
   Widget _emptyState(BuildContext context) {
@@ -1782,10 +1919,8 @@ class _ChatScreenState extends State<ChatScreen> {
             tween: Tween(begin: 0.8, end: 1.0),
             duration: const Duration(seconds: 2),
             curve: Curves.easeInOut,
-            builder: (context, value, child) => Transform.scale(
-              scale: value,
-              child: child,
-            ),
+            builder: (context, value, child) =>
+                Transform.scale(scale: value, child: child),
             child: Icon(
               Icons.local_fire_department,
               size: 64,
@@ -1831,7 +1966,10 @@ class _ChatScreenState extends State<ChatScreen> {
             _brandHeader(),
             if (_updateInfo != null)
               MaterialBanner(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
                 leading: const Icon(Icons.system_update, color: Colors.amber),
                 content: Text('Update available: v${_updateInfo!.version}'),
                 actions: [
@@ -1982,8 +2120,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   Text(
                     appVersion == 'dev' ? 'dev build' : 'v$appVersion',
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant
-                          .withValues(alpha: 0.6),
+                      color: theme.colorScheme.onSurfaceVariant.withValues(
+                        alpha: 0.6,
+                      ),
                     ),
                   ),
                 ],
@@ -2341,9 +2480,7 @@ class _ChatScreenState extends State<ChatScreen> {
           bottomLeft: mine ? radius : Radius.zero,
           bottomRight: mine ? Radius.zero : radius,
         ),
-        border: onFire
-            ? Border.all(color: Colors.orange, width: 2)
-            : null,
+        border: onFire ? Border.all(color: Colors.orange, width: 2) : null,
         boxShadow: onFire
             ? [
                 BoxShadow(
@@ -2413,10 +2550,16 @@ class _ChatScreenState extends State<ChatScreen> {
     final typers = _channels?.typingPeers[session.channelId] ?? const {};
     if (typers.isEmpty) return const SizedBox.shrink();
     final names = typers
-        .map((hex) => _displayName(Uint8List.fromList(
-              List.generate(hex.length ~/ 2,
-                  (i) => int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16)),
-            )))
+        .map(
+          (hex) => _displayName(
+            Uint8List.fromList(
+              List.generate(
+                hex.length ~/ 2,
+                (i) => int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16),
+              ),
+            ),
+          ),
+        )
         .toList();
     final text = names.length == 1
         ? '${names[0]} is typing…'
@@ -2439,7 +2582,9 @@ class _ChatScreenState extends State<ChatScreen> {
     return Container(
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
-        border: Border(top: BorderSide(color: scheme.outlineVariant, width: 0.5)),
+        border: Border(
+          top: BorderSide(color: scheme.outlineVariant, width: 0.5),
+        ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
       child: Row(
@@ -2485,7 +2630,9 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: InputDecoration(
                 hintText: 'Message ${_channelTitle(session)}',
                 filled: true,
-                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                fillColor: Theme.of(
+                  context,
+                ).colorScheme.surfaceContainerHighest,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(24),
                   borderSide: BorderSide.none,
@@ -2563,7 +2710,9 @@ class _ContactsPageState extends State<_ContactsPage> {
       appBar: AppBar(title: const Text('Contacts')),
       body: entries.isEmpty
           ? const Center(
-              child: Text("No contacts yet — tap someone's name in a chat to add them."),
+              child: Text(
+                "No contacts yet — tap someone's name in a chat to add them.",
+              ),
             )
           : ListView.builder(
               itemCount: entries.length,
@@ -2571,9 +2720,7 @@ class _ContactsPageState extends State<_ContactsPage> {
                 final pubkeyHex = entries.keys.elementAt(i);
                 final name = entries.values.elementAt(i);
                 return ListTile(
-                  leading: CircleAvatar(
-                    child: Text(name[0].toUpperCase()),
-                  ),
+                  leading: CircleAvatar(child: Text(name[0].toUpperCase())),
                   title: Text(name),
                   subtitle: Text(
                     'hearth#${pubkeyHex.substring(0, 8)}',
@@ -2583,7 +2730,10 @@ class _ContactsPageState extends State<_ContactsPage> {
                     onSelected: (action) => _onAction(action, pubkeyHex),
                     itemBuilder: (_) => const [
                       PopupMenuItem(value: 'dm', child: Text('Direct message')),
-                      PopupMenuItem(value: 'invite', child: Text('Invite to channel')),
+                      PopupMenuItem(
+                        value: 'invite',
+                        child: Text('Invite to channel'),
+                      ),
                       PopupMenuItem(value: 'rename', child: Text('Rename')),
                       PopupMenuItem(value: 'remove', child: Text('Remove')),
                     ],
@@ -2632,10 +2782,12 @@ class _ContactsPageState extends State<_ContactsPage> {
   Future<void> _pickChannelAndInvite(String pubkeyHex) async {
     final groups = widget.groups;
     if (groups.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('No channels to invite to.'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No channels to invite to.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
       return;
     }
     final channelId = await showModalBottomSheet<String>(
