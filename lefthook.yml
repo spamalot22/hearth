@@ -21,5 +21,7 @@ pre-push:
   commands:
     core-tests:
       run: cd core && dart test
+    app-tests:
+      run: cd app && flutter test
     backend-tests:
       run: cd backend && pnpm test
