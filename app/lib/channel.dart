@@ -307,24 +307,24 @@ class ChannelManager {
   String? get activeId => _activeId;
   ChannelSession? get active => _activeId == null ? null : _sessions[_activeId];
 
-  /// All pubkeys we're currently connected to across all channels.
-  Set<String> get _allConnectedPeers => {
-    for (final s in _sessions.values)
-      if (s._mesh != null) ...s._mesh.connections.keys,
-  };
-
-  /// Broadcasts our cross-channel connectivity to all connected peers.
+  /// Tells each connected peer which *other* peers are online **in that same
+  /// channel**, so a channel's mesh can re-knit itself without the relay — two
+  /// peers that both reach us but not each other get introduced and connect.
+  ///
+  /// Deliberately scoped to the shared channel: we never reveal who we're
+  /// connected to in *other* channels, so a peer can't map our cross-channel
+  /// social graph. This costs nothing — the receiver only acts on peers it
+  /// already shares a channel with, and bridging only works within a channel
+  /// we're both in, so the cross-channel spillover was leak, not function.
   void _broadcastContactsOnline() {
-    final allPeers = _allConnectedPeers.toList();
-    if (allPeers.isEmpty) return;
     for (final session in _sessions.values) {
       final mesh = session._mesh;
       if (mesh == null) continue;
-      for (final peerHex in mesh.connections.keys) {
-        // Don't tell a peer about themselves.
-        final filtered = allPeers.where((p) => p != peerHex).toList();
-        if (filtered.isNotEmpty) {
-          mesh.sendControlTo(peerHex, ContactsOnlineControl(filtered));
+      final peersHere = mesh.connections.keys.toList();
+      for (final peerHex in peersHere) {
+        final others = peersHere.where((p) => p != peerHex).toList();
+        if (others.isNotEmpty) {
+          mesh.sendControlTo(peerHex, ContactsOnlineControl(others));
         }
       }
     }
