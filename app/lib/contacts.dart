@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
 /// Local, private petnames: a map from a peer's public key (hex) to the name

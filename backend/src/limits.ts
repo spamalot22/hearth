@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /**
  * Resource bounds + a small rate limiter for the relay. The relay is public
  * (anyone with the URL can hit it), so these cap the damage a flood can do:

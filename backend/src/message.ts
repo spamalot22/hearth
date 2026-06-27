@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from 'node:crypto';
 
 import { encode as dagCborEncode } from '@ipld/dag-cbor';

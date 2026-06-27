@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /// Hearth core — identity, signed messages, and (soon) the message DAG.
 ///
 /// Pure Dart with no Flutter imports, so it stays portable across every target

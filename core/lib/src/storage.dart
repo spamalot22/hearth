@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'message.dart';
 
 /// Durable, append-only storage for a channel's [Message]s.

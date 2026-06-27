@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it, beforeEach } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { createRelay, RelayStore } from './relay';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'update_checker.dart';
 
 /// Web stub — there's no in-app install on the web (it updates by reload), and

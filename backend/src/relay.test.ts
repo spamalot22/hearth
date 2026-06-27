@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import * as ed from '@noble/ed25519';
 import { describe, expect, it } from 'vitest';
 

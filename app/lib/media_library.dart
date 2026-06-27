@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:convert';
 
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';

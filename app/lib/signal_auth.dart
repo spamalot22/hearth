@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /// Authenticated WebRTC signalling — binding the handshake to the Ed25519
 /// identity so a relay or man-in-the-middle can't impersonate a peer, swap the
 /// DTLS fingerprint inside an SDP, or replay a signal to a different recipient.

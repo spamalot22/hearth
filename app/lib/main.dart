@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
 import 'dart:convert';
 
@@ -12,6 +13,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     hide Message;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'blob_store_hive.dart';
@@ -36,6 +38,10 @@ import 'voice.dart';
 
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
+
+/// Public source repository — shown in the drawer so users of a hosted instance
+/// can find the source (AGPL-3.0).
+const String kSourceUrl = 'https://github.com/spamalot22/hearth';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -696,6 +702,19 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mesh != null) all.addAll(mesh.connections.keys);
     }
     return all.length;
+  }
+
+  /// Opens the public source repo (AGPL etiquette — let users find the source).
+  Future<void> _openSourceCode() async {
+    final ok = await launchUrl(
+      Uri.parse(kSourceUrl),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Couldn't open the source link")),
+      );
+    }
   }
 
   /// Edits the relay URL (the rendezvous + media-proxy endpoint). Persisted; open
@@ -2065,6 +2084,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 },
                 onRefresh: () => unawaited(_checkRelay()),
               ),
+            ),
+            const Divider(height: 24),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.code),
+              title: const Text('Source code'),
+              subtitle: Text(
+                'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
+              ),
+              onTap: () => unawaited(_openSourceCode()),
             ),
           ],
         ),

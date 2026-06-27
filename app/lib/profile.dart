@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
 /// Your own self-asserted display name — the one suggested to others when they

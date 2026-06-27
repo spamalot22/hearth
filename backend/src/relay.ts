@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:convert';
 
 /// The logical content of a message — a typed envelope serialised into the

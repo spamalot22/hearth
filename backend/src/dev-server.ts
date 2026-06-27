@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dotenv/config'; // loads backend/.env (gitignored) into process.env
 
 import { serve } from '@hono/node-server';
