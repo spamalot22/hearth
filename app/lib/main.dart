@@ -31,6 +31,8 @@ import 'media_library.dart';
 import 'mesh_control.dart';
 import 'network_status.dart';
 import 'profile.dart';
+import 'screen_picker.dart';
+import 'screen_share.dart';
 import 'settings.dart';
 import 'sound_search.dart';
 import 'starter_sounds.dart';
@@ -38,6 +40,7 @@ import 'unread.dart';
 import 'update_checker.dart';
 import 'updater.dart';
 import 'voice.dart';
+import 'youtube_share.dart';
 
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
@@ -118,15 +121,21 @@ Future<void> _initSystemTray() async {
   );
   final menu = Menu();
   await menu.buildFrom([
-    MenuItemLabel(label: 'Show', onClicked: (_) async {
-      await windowManager.show();
-      await windowManager.focus();
-    }),
+    MenuItemLabel(
+      label: 'Show',
+      onClicked: (_) async {
+        await windowManager.show();
+        await windowManager.focus();
+      },
+    ),
     MenuSeparator(),
-    MenuItemLabel(label: 'Quit', onClicked: (_) async {
-      await windowManager.setPreventClose(false);
-      await windowManager.close();
-    }),
+    MenuItemLabel(
+      label: 'Quit',
+      onClicked: (_) async {
+        await windowManager.setPreventClose(false);
+        await windowManager.close();
+      },
+    ),
   ]);
   await tray.setContextMenu(menu);
   tray.registerSystemTrayEventHandler((event) async {
@@ -269,6 +278,26 @@ class _ChatScreenState extends State<ChatScreen> {
   MediaLibrary? _library;
   AudioPlayer? _player;
   VoiceSession? _voice;
+  // Screen share (Windows): my outgoing broadcast (null = not sharing), the
+  // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
+  ScreenBroadcast? _broadcast;
+  final Map<String, ScreenView> _screenViews = {};
+  String? _selectedShareHex;
+  Set<String> _sharedTo = {}; // voice peers already told about my active share
+  // Shared YouTube "watch party" (Windows): host-driven, synced over the voice
+  // mesh. videoId null = no party; mute/hidden are local-only per member.
+  WatchPartyController? _ytController;
+  String? _ytVideoId;
+  String _ytHostHex = '';
+  bool _ytIsHost = false;
+  bool _ytPlaying = false;
+  double _ytPosition = 0;
+  double _ytDuration = 0;
+  bool _ytMuted = false;
+  bool _ytHidden = false; // I locally closed/disabled my view
+  bool _ytSeeking = false; // host is dragging the seek bar
+  Timer? _ytHeartbeat;
+  Set<String> _ytSharedTo = {};
   ProfileStore? _profile;
   SettingsStore? _settings;
   UnreadStore? _unread;
@@ -800,11 +829,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 Expanded(
                   child: TabBarView(
-                    children: [
-                      _audioTab(),
-                      _identityTab(),
-                      _networkTab(),
-                    ],
+                    children: [_audioTab(), _identityTab(), _networkTab()],
                   ),
                 ),
               ],
@@ -822,16 +847,18 @@ class _ChatScreenState extends State<ChatScreen> {
           future: navigator.mediaDevices.enumerateDevices(),
           builder: (context, snapshot) {
             final devices = snapshot.data ?? [];
-            final mics =
-                devices.where((d) => d.kind == 'audioinput').toList();
-            final speakers =
-                devices.where((d) => d.kind == 'audiooutput').toList();
+            final mics = devices.where((d) => d.kind == 'audioinput').toList();
+            final speakers = devices
+                .where((d) => d.kind == 'audiooutput')
+                .toList();
             return Padding(
               padding: const EdgeInsets.all(16),
               child: ListView(
                 children: [
-                  Text('Microphone',
-                      style: Theme.of(context).textTheme.labelLarge),
+                  Text(
+                    'Microphone',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
                   const SizedBox(height: 4),
                   if (mics.isEmpty)
                     const Text('No microphones found')
@@ -851,16 +878,17 @@ class _ChatScreenState extends State<ChatScreen> {
                           child: const Text('Test'),
                           onPressed: () async {
                             try {
-                              final stream =
-                                  await navigator.mediaDevices.getUserMedia({
-                                'audio': {
-                                  'deviceId': {'exact': mic.deviceId}
-                                },
-                                'video': false,
-                              });
+                              final stream = await navigator.mediaDevices
+                                  .getUserMedia({
+                                    'audio': {
+                                      'deviceId': {'exact': mic.deviceId},
+                                    },
+                                    'video': false,
+                                  });
                               // Record briefly then stop — proves it works.
                               await Future<void>.delayed(
-                                  const Duration(milliseconds: 500));
+                                const Duration(milliseconds: 500),
+                              );
                               for (final t in stream.getTracks()) {
                                 await t.stop();
                               }
@@ -869,7 +897,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
                                     content: Text(
-                                        '✓ ${mic.label.isNotEmpty ? mic.label : "Mic"} is working'),
+                                      '✓ ${mic.label.isNotEmpty ? mic.label : "Mic"} is working',
+                                    ),
                                   ),
                                 );
                               }
@@ -878,7 +907,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(
                                     content: Text(
-                                        '✗ ${mic.label.isNotEmpty ? mic.label : "Mic"} failed: $e'),
+                                      '✗ ${mic.label.isNotEmpty ? mic.label : "Mic"} failed: $e',
+                                    ),
                                   ),
                                 );
                               }
@@ -887,8 +917,10 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       ),
                   const Divider(height: 24),
-                  Text('Speaker',
-                      style: Theme.of(context).textTheme.labelLarge),
+                  Text(
+                    'Speaker',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
                   const SizedBox(height: 4),
                   if (speakers.isEmpty)
                     const Text('No speakers found')
@@ -909,21 +941,26 @@ class _ChatScreenState extends State<ChatScreen> {
                           onPressed: () async {
                             final player = AudioPlayer();
                             await player.play(
-                                BytesSource(VoiceSession.connectTone));
+                              BytesSource(VoiceSession.connectTone),
+                            );
                             await Future<void>.delayed(
-                                const Duration(milliseconds: 300));
+                              const Duration(milliseconds: 300),
+                            );
                             await player.dispose();
                           },
                         ),
                       ),
                   const Divider(height: 24),
-                  Text('Processing',
-                      style: Theme.of(context).textTheme.labelLarge),
+                  Text(
+                    'Processing',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Noise suppression'),
                     subtitle: const Text(
-                        'Reduces background noise in voice chat'),
+                      'Reduces background noise in voice chat',
+                    ),
                     value: _settings?.noiseSuppression ?? false,
                     onChanged: (v) {
                       unawaited(_settings?.setNoiseSuppression(v));
@@ -1032,6 +1069,13 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     unawaited(_channels?.close());
+    unawaited(_broadcast?.stop());
+    for (final view in _screenViews.values) {
+      unawaited(view.close());
+    }
+    _screenViews.clear();
+    _ytHeartbeat?.cancel();
+    _ytController = null;
     unawaited(_voice?.leave());
     unawaited(_player?.dispose());
     _input.dispose();
@@ -1144,19 +1188,46 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   static const _blockedExtensions = {
-    'exe', 'scr', 'bat', 'cmd', 'ps1', 'vbs', 'vbe', 'wsh', 'wsf',
-    'msi', 'dll', 'com', 'pif', 'hta', 'cpl', 'reg', 'inf', 'lnk',
+    'exe',
+    'scr',
+    'bat',
+    'cmd',
+    'ps1',
+    'vbs',
+    'vbe',
+    'wsh',
+    'wsf',
+    'msi',
+    'dll',
+    'com',
+    'pif',
+    'hta',
+    'cpl',
+    'reg',
+    'inf',
+    'lnk',
   };
 
   static const int _maxFileSize = 500 * 1024 * 1024; // 500 MB
   static const int _maxArchiveSize = 2 * 1024 * 1024 * 1024; // 2 GB
-  static const _archiveExtensions = {'zip', '7z', 'rar', 'tar', 'gz', 'bz2', 'xz', 'zst'};
+  static const _archiveExtensions = {
+    'zip',
+    '7z',
+    'rar',
+    'tar',
+    'gz',
+    'bz2',
+    'xz',
+    'zst',
+  };
 
   /// Returns a reason string if the file is dangerous, null if safe.
   static String? _fileDanger(String name, List<int> bytes) {
     final ext = name.split('.').last.toLowerCase();
     // Size limit — archives get a higher cap.
-    final limit = _archiveExtensions.contains(ext) ? _maxArchiveSize : _maxFileSize;
+    final limit = _archiveExtensions.contains(ext)
+        ? _maxArchiveSize
+        : _maxFileSize;
     if (bytes.length > limit) {
       return 'File too large (${_archiveExtensions.contains(ext) ? "2 GB" : "500 MB"} max)';
     }
@@ -1186,8 +1257,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_blockedExtensions.contains(ext)) return true;
     final parts = name.split('.');
     if (parts.length > 2) {
-      return _blockedExtensions.contains(
-          parts[parts.length - 2].toLowerCase());
+      return _blockedExtensions.contains(parts[parts.length - 2].toLowerCase());
     }
     return false;
   }
@@ -1253,7 +1323,6 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() => _error = 'could not fetch that sound');
     }
   }
-
 
   /// Plays a soundboard clip if its blob is held locally.
   Future<void> _playSound(ChannelSession session, String blob) async {
@@ -1496,6 +1565,14 @@ class _ChatScreenState extends State<ChatScreen> {
         final session = _channels?.active;
         if (session != null) unawaited(_playSound(session, blob));
       };
+      _voice!.onScreenShare = (sharerHex, active) {
+        if (active) {
+          unawaited(_addScreenView(channelId, sharerHex));
+        } else {
+          unawaited(_removeScreenView(sharerHex));
+        }
+      };
+      _voice!.onYoutube = _onYoutubeControl;
       if (mounted) setState(() {});
     } catch (_) {
       if (mounted) {
@@ -1505,14 +1582,335 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _voiceChanged() {
+    _pruneScreenViews();
+    _reannounceShareToNewPeers();
+    _pruneWatchParty();
+    _reannounceYtToNewPeers();
     if (mounted) setState(() {});
   }
 
   Future<void> _leaveVoice() async {
+    await _stopScreenShare(); // no-op if not sharing; tells peers before we go
+    if (_ytIsHost && _ytVideoId != null) {
+      _voice?.sendControl(
+        YoutubeControl(
+          host: widget.identity.publicKeyHex,
+          videoId: '',
+          playing: false,
+          position: 0,
+        ),
+      );
+    }
+    _endWatchParty();
+    final views = _screenViews.values.toList();
+    _screenViews.clear();
+    _selectedShareHex = null;
     final voice = _voice;
     _voice = null;
     if (mounted) setState(() {});
+    for (final view in views) {
+      await view.close();
+    }
     await voice?.leave();
+  }
+
+  // --- screen share (Windows) ---
+
+  /// The desktop-webview features (screen share + YouTube watch party) are
+  /// Windows-only for now.
+  bool get _screenShareSupported =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  /// Opens the picker and starts sharing the chosen window/screen, announcing it
+  /// to the call so everyone joins my screen mesh.
+  Future<void> _startScreenShare(ChannelSession session) async {
+    final voice = _voice;
+    if (voice == null || _broadcast != null) return;
+    final choice = await showScreenSharePicker(context);
+    if (choice == null || !mounted) return;
+    try {
+      final broadcast = await ScreenBroadcast.start(
+        channelId: session.channelId,
+        identity: widget.identity,
+        relayUrl: _relayUrl,
+        source: choice.source,
+        resolution: choice.resolution,
+        onEnded: () => unawaited(_stopScreenShare()),
+      );
+      if (!mounted) {
+        await broadcast.stop();
+        return;
+      }
+      _broadcast = broadcast;
+      voice.sendControl(
+        ScreenShareControl(sharer: widget.identity.publicKeyHex, active: true),
+      );
+      _sharedTo = voice.peerHexes.toSet();
+      setState(() {});
+    } catch (e) {
+      if (mounted) setState(() => _error = 'screen share failed: $e');
+    }
+  }
+
+  Future<void> _stopScreenShare() async {
+    final broadcast = _broadcast;
+    if (broadcast == null) return;
+    _broadcast = null;
+    _sharedTo.clear();
+    // Announce the stop while the voice mesh is still up, so viewers drop it.
+    _voice?.sendControl(
+      ScreenShareControl(sharer: widget.identity.publicKeyHex, active: false),
+    );
+    if (mounted) setState(() {});
+    await broadcast.stop();
+  }
+
+  /// Joins [sharerHex]'s screen mesh to watch their share.
+  Future<void> _addScreenView(String channelId, String sharerHex) async {
+    if (_screenViews.containsKey(sharerHex)) return; // already watching
+    try {
+      final view = await ScreenView.watch(
+        channelId: channelId,
+        sharerHex: sharerHex,
+        identity: widget.identity,
+        relayUrl: _relayUrl,
+        onChange: _voiceChanged,
+      );
+      if (!mounted) {
+        await view.close();
+        return;
+      }
+      _screenViews[sharerHex] = view;
+      _selectedShareHex ??= sharerHex;
+      setState(() {});
+    } catch (_) {
+      // Couldn't open the view — ignore; a re-announce will retry.
+    }
+  }
+
+  Future<void> _removeScreenView(String sharerHex) async {
+    final view = _screenViews.remove(sharerHex);
+    if (view == null) return;
+    if (_selectedShareHex == sharerHex) {
+      _selectedShareHex = _screenViews.keys.isEmpty
+          ? null
+          : _screenViews.keys.first;
+    }
+    if (mounted) setState(() {});
+    await view.close();
+  }
+
+  /// Drops any screen view whose sharer has left the voice call (a strong signal
+  /// they've stopped, vs. a transient mesh blip which keeps the view alive).
+  void _pruneScreenViews() {
+    final voice = _voice;
+    if (voice == null) return;
+    final present = voice.peerHexes.toSet();
+    for (final hex
+        in _screenViews.keys.where((h) => !present.contains(h)).toList()) {
+      unawaited(_removeScreenView(hex));
+    }
+  }
+
+  /// While I'm sharing, re-announce to any voice peer that has joined since — so
+  /// people who join the call mid-share (or whom I just connected to) still learn
+  /// of my screen mesh. Re-sends to existing viewers are deduped away.
+  void _reannounceShareToNewPeers() {
+    final voice = _voice;
+    if (voice == null || _broadcast == null) return;
+    final current = voice.peerHexes.toSet();
+    if (current.difference(_sharedTo).isEmpty) return; // no new peers
+    _sharedTo = current;
+    voice.sendControl(
+      ScreenShareControl(sharer: widget.identity.publicKeyHex, active: true),
+    );
+  }
+
+  // --- shared YouTube (watch party) ---
+
+  WatchPartyController _newYtController() {
+    final c = WatchPartyController();
+    c.onStateChange = (playing, position) {
+      if (!mounted) return;
+      setState(() {
+        _ytPlaying = playing;
+        if (!_ytSeeking) _ytPosition = position;
+      });
+    };
+    return c;
+  }
+
+  /// Starts (or replaces) the shared video, becoming the host.
+  Future<void> _startWatchParty(ChannelSession session) async {
+    final voice = _voice;
+    if (voice == null) return;
+    final raw = await showYoutubeStartDialog(context);
+    if (raw == null || !mounted) return;
+    final id = parseYoutubeId(raw);
+    if (id == null) {
+      setState(() => _error = "couldn't read that YouTube link");
+      return;
+    }
+    _ytController ??= _newYtController();
+    setState(() {
+      _ytVideoId = id;
+      _ytHostHex = widget.identity.publicKeyHex;
+      _ytIsHost = true;
+      _ytPlaying = true;
+      _ytPosition = 0;
+      _ytDuration = 0;
+      _ytHidden = false;
+    });
+    _broadcastYt();
+    _ytSharedTo = voice.peerHexes.toSet();
+    _startYtHeartbeat();
+  }
+
+  /// Applies the host's watch-party state (I'm a follower).
+  void _onYoutubeControl(String senderHex, YoutubeControl control) {
+    if (!mounted || senderHex == widget.identity.publicKeyHex) return;
+    if (control.videoId.isEmpty) {
+      if (senderHex == _ytHostHex) _endWatchParty(); // host closed it
+      return;
+    }
+    // Two near-simultaneous starts: the higher pubkey wins, so both sides
+    // converge on one host instead of yielding to each other. If I'm hosting and
+    // a lower-key peer also started, keep hosting — my next broadcast wins them.
+    if (_ytIsHost && senderHex.compareTo(widget.identity.publicKeyHex) < 0) {
+      return;
+    }
+    final isNew = _ytVideoId != control.videoId || _ytHostHex != senderHex;
+    _ytHeartbeat?.cancel(); // someone else hosts now
+    _ytHeartbeat = null;
+    if (isNew) _ytHidden = false; // a fresh video re-engages everyone
+    if (!_ytHidden) _ytController ??= _newYtController();
+    setState(() {
+      _ytHostHex = senderHex;
+      _ytIsHost = false;
+      _ytVideoId = control.videoId;
+      _ytPlaying = control.playing;
+      if (isNew) _ytPosition = control.position;
+    });
+    unawaited(_applyRemoteYt(control, isNew));
+  }
+
+  Future<void> _applyRemoteYt(YoutubeControl control, bool isNew) async {
+    final c = _ytController;
+    if (c == null || !c.isReady || _ytHidden) return;
+    if (!isNew) {
+      final cur = await c.currentTime();
+      if ((cur - control.position).abs() > 2.0) await c.seek(control.position);
+    }
+    if (control.playing) {
+      await c.play();
+    } else {
+      await c.pause();
+    }
+  }
+
+  void _broadcastYt() {
+    final id = _ytVideoId;
+    if (!_ytIsHost || id == null) return;
+    _voice?.sendControl(
+      YoutubeControl(
+        host: widget.identity.publicKeyHex,
+        videoId: id,
+        playing: _ytPlaying,
+        position: _ytPosition,
+      ),
+    );
+  }
+
+  void _startYtHeartbeat() {
+    _ytHeartbeat?.cancel();
+    var tick = 0;
+    _ytHeartbeat = Timer.periodic(const Duration(seconds: 1), (_) async {
+      final c = _ytController;
+      if (!_ytIsHost || c == null || !c.isReady || _ytVideoId == null) return;
+      final pos = await c.currentTime();
+      if (!mounted) return;
+      if (!_ytSeeking) setState(() => _ytPosition = pos);
+      if (_ytDuration == 0) {
+        final d = await c.duration();
+        if (mounted && d > 0) setState(() => _ytDuration = d);
+      }
+      if (++tick % 4 == 0) _broadcastYt(); // network heartbeat every ~4s
+    });
+  }
+
+  void _ytTogglePlay() {
+    setState(() => _ytPlaying = !_ytPlaying);
+    final c = _ytController;
+    unawaited(_ytPlaying ? c?.play() : c?.pause());
+    _broadcastYt();
+  }
+
+  void _ytSeekTo(double pos) {
+    setState(() {
+      _ytPosition = pos;
+      _ytSeeking = false;
+    });
+    unawaited(_ytController?.seek(pos));
+    _broadcastYt();
+  }
+
+  void _toggleYtMute() {
+    setState(() => _ytMuted = !_ytMuted);
+    unawaited(_ytController?.setMuted(_ytMuted));
+  }
+
+  /// Local close — stops watching for me only; others keep going.
+  void _closeYtLocal() {
+    _ytHeartbeat?.cancel();
+    _ytHeartbeat = null;
+    setState(() {
+      _ytHidden = true;
+      _ytController = null;
+    });
+  }
+
+  /// Re-mounts my player after a local close, resuming near the last position.
+  void _rejoinYt() {
+    _ytController = _newYtController();
+    setState(() => _ytHidden = false);
+    if (_ytIsHost) _startYtHeartbeat();
+  }
+
+  /// Full teardown (I left voice, or the host ended it).
+  void _endWatchParty() {
+    _ytHeartbeat?.cancel();
+    _ytHeartbeat = null;
+    _ytController = null;
+    _ytSharedTo = {};
+    _ytVideoId = null;
+    _ytHostHex = '';
+    _ytIsHost = false;
+    _ytPlaying = false;
+    _ytHidden = false;
+    if (mounted) setState(() {});
+  }
+
+  /// Ends the party for me if its host has left the voice call.
+  void _pruneWatchParty() {
+    final voice = _voice;
+    if (voice == null || _ytVideoId == null || _ytIsHost) return;
+    if (!voice.peerHexes.contains(_ytHostHex)) _endWatchParty();
+  }
+
+  /// While hosting, re-broadcast to voice peers that have joined since.
+  void _reannounceYtToNewPeers() {
+    final voice = _voice;
+    if (voice == null || !_ytIsHost || _ytVideoId == null) return;
+    final current = voice.peerHexes.toSet();
+    if (current.difference(_ytSharedTo).isEmpty) return;
+    _ytSharedTo = current;
+    _broadcastYt();
+  }
+
+  String _fmtTime(double seconds) {
+    final s = seconds.isFinite && seconds > 0 ? seconds.round() : 0;
+    final sec = (s % 60).toString().padLeft(2, '0');
+    return '${s ~/ 60}:$sec';
   }
 
   /// The right-hand **channel control panel** — channel-scoped actions (invite,
@@ -1550,8 +1948,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 if (!session.isDm) ...[
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
-                    onPressed: () =>
-                        unawaited(_shareInvite(session.channelId)),
+                    onPressed: () => unawaited(_shareInvite(session.channelId)),
                     icon: const Icon(Icons.person_add_alt_1),
                     label: const Text('Invite'),
                   ),
@@ -1567,8 +1964,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 const SizedBox(height: 8),
                 if (!inCall)
                   FilledButton.icon(
-                    onPressed: () =>
-                        unawaited(_joinVoice(session.channelId)),
+                    onPressed: () => unawaited(_joinVoice(session.channelId)),
                     icon: const Icon(Icons.call),
                     label: const Text('Join voice'),
                   )
@@ -1577,20 +1973,37 @@ class _ChatScreenState extends State<ChatScreen> {
                     children: [
                       IconButton(
                         onPressed: voice.toggleMute,
-                        icon:
-                            Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
+                        icon: Icon(voice.isMuted ? Icons.mic_off : Icons.mic),
                         tooltip: voice.isMuted ? 'Unmute' : 'Mute',
                       ),
                       IconButton(
                         onPressed: voice.toggleDeafen,
                         icon: Icon(
-                          voice.isDeafened
-                              ? Icons.headset_off
-                              : Icons.headset,
+                          voice.isDeafened ? Icons.headset_off : Icons.headset,
                         ),
-                        tooltip:
-                            voice.isDeafened ? 'Undeafen' : 'Deafen',
+                        tooltip: voice.isDeafened ? 'Undeafen' : 'Deafen',
                       ),
+                      if (_screenShareSupported)
+                        IconButton(
+                          onPressed: () {
+                            if (_broadcast != null) {
+                              unawaited(_stopScreenShare());
+                            } else {
+                              unawaited(_startScreenShare(session));
+                            }
+                          },
+                          icon: Icon(
+                            _broadcast != null
+                                ? Icons.stop_screen_share
+                                : Icons.screen_share,
+                          ),
+                          color: _broadcast != null
+                              ? theme.colorScheme.primary
+                              : null,
+                          tooltip: _broadcast != null
+                              ? 'Stop sharing'
+                              : 'Share screen',
+                        ),
                       const Spacer(),
                       IconButton(
                         onPressed: () => unawaited(_leaveVoice()),
@@ -1612,16 +2025,24 @@ class _ChatScreenState extends State<ChatScreen> {
                       voice,
                       peerHex,
                       Uint8List.fromList(hex.decode(peerHex)),
-                      _displayName(
-                          Uint8List.fromList(hex.decode(peerHex))),
+                      _displayName(Uint8List.fromList(hex.decode(peerHex))),
                     ),
                   const SizedBox(height: 8),
                   OutlinedButton.icon(
-                    onPressed: () =>
-                        unawaited(_openVoiceSoundboard(session)),
+                    onPressed: () => unawaited(_openVoiceSoundboard(session)),
                     icon: const Icon(Icons.library_music_outlined),
                     label: const Text('Soundboard'),
                   ),
+                  if (_screenShareSupported) ...[
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: () => unawaited(_startWatchParty(session)),
+                      icon: const Icon(Icons.smart_display_outlined),
+                      label: Text(
+                        _ytVideoId == null ? 'Start a video' : 'Change video',
+                      ),
+                    ),
+                  ],
                 ],
                 const Divider(height: 28),
                 Text('MEMBERS', style: theme.textTheme.labelSmall),
@@ -1630,20 +2051,24 @@ class _ChatScreenState extends State<ChatScreen> {
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     leading: _avatar(
-                        Uint8List.fromList(hex.decode(key)),
-                        radius: 14),
+                      Uint8List.fromList(hex.decode(key)),
+                      radius: 14,
+                    ),
                     title: Text(
                       _displayName(Uint8List.fromList(hex.decode(key))),
                       overflow: TextOverflow.ellipsis,
                     ),
                     onTap: () => unawaited(
-                        _peerActions(Uint8List.fromList(hex.decode(key)))),
+                      _peerActions(Uint8List.fromList(hex.decode(key))),
+                    ),
                   ),
                 if (_membersOf(session).isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Text('Just you so far.',
-                        style: theme.textTheme.bodySmall),
+                    child: Text(
+                      'Just you so far.',
+                      style: theme.textTheme.bodySmall,
+                    ),
                   ),
               ],
             ),
@@ -1653,11 +2078,12 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: BoxDecoration(
                 border: Border(
                   top: BorderSide(
-                      color: theme.colorScheme.outlineVariant, width: 0.5),
+                    color: theme.colorScheme.outlineVariant,
+                    width: 0.5,
+                  ),
                 ),
               ),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: TextButton.icon(
                 onPressed: () => unawaited(_leaveChannel(session.channelId)),
                 icon: const Icon(Icons.logout, size: 16),
@@ -2102,42 +2528,290 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _chatColumn(ChannelSession session) => Column(
-    children: [
-      Expanded(
-        child: Stack(
-          children: [
-            _messageList(context, session),
-            if (_showScrollDown)
-              Positioned(
-                bottom: 8,
-                right: 8,
-                child: FloatingActionButton.small(
-                  onPressed: () => _scroll.animateTo(
-                    _scroll.position.maxScrollExtent,
-                    duration: const Duration(milliseconds: 200),
-                    curve: Curves.easeOut,
+  Widget _chatColumn(ChannelSession session) {
+    final stage = _screenStage(session);
+    final watchParty = _watchPartyStage(session);
+    return Column(
+      children: [
+        ?stage,
+        ?watchParty,
+        Expanded(
+          child: Stack(
+            children: [
+              _messageList(context, session),
+              if (_showScrollDown)
+                Positioned(
+                  bottom: 8,
+                  right: 8,
+                  child: FloatingActionButton.small(
+                    onPressed: () => _scroll.animateTo(
+                      _scroll.position.maxScrollExtent,
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                    ),
+                    tooltip: 'Scroll to bottom',
+                    child: const Icon(Icons.keyboard_arrow_down),
                   ),
-                  tooltip: 'Scroll to bottom',
-                  child: const Icon(Icons.keyboard_arrow_down),
                 ),
-              ),
+            ],
+          ),
+        ),
+        _typingIndicator(session),
+        _composer(context, session),
+      ],
+    );
+  }
+
+  /// The shared YouTube "watch party" stage atop the chat: the synced player
+  /// (host gets play/pause + a seek bar; everyone gets local mute + close), or a
+  /// slim "rejoin" banner after a local close. Null when there's no party here.
+  Widget? _watchPartyStage(ChannelSession session) {
+    final voice = _voice;
+    final videoId = _ytVideoId;
+    if (voice == null ||
+        voice.channelId != session.channelId ||
+        videoId == null) {
+      return null;
+    }
+    final theme = Theme.of(context);
+
+    if (_ytHidden || _ytController == null) {
+      return Container(
+        margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: theme.colorScheme.outlineVariant),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.smart_display_outlined,
+              size: 16,
+              color: theme.colorScheme.primary,
+            ),
+            const SizedBox(width: 8),
+            const Expanded(child: Text('Watch party hidden')),
+            TextButton(onPressed: _rejoinYt, child: const Text('Rejoin')),
           ],
         ),
+      );
+    }
+
+    final hostName = _ytIsHost
+        ? 'You'
+        : _displayName(Uint8List.fromList(hex.decode(_ytHostHex)));
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
       ),
-      _typingIndicator(session),
-      _composer(context, session),
-    ],
-  );
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.smart_display,
+                  size: 16,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Watch party · $hostName',
+                    style: theme.textTheme.labelLarge,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                IconButton(
+                  onPressed: _toggleYtMute,
+                  icon: Icon(_ytMuted ? Icons.volume_off : Icons.volume_up),
+                  tooltip: _ytMuted ? 'Unmute video' : 'Mute video',
+                  iconSize: 20,
+                ),
+                IconButton(
+                  onPressed: _closeYtLocal,
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Close video',
+                  iconSize: 20,
+                ),
+              ],
+            ),
+          ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 360),
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: ColoredBox(
+                color: Colors.black,
+                child: WatchPartyPlayer(
+                  key: ObjectKey(_ytController),
+                  controller: _ytController!,
+                  videoId: videoId,
+                  startSeconds: _ytPosition,
+                  startPlaying: _ytPlaying,
+                  muted: _ytMuted,
+                ),
+              ),
+            ),
+          ),
+          if (_ytIsHost)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: _ytTogglePlay,
+                    icon: Icon(_ytPlaying ? Icons.pause : Icons.play_arrow),
+                    tooltip: _ytPlaying ? 'Pause' : 'Play',
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: _ytDuration > 0
+                          ? _ytPosition.clamp(0, _ytDuration)
+                          : 0,
+                      max: _ytDuration > 0 ? _ytDuration : 1,
+                      onChangeStart: _ytDuration > 0
+                          ? (_) => _ytSeeking = true
+                          : null,
+                      onChanged: _ytDuration > 0
+                          ? (v) => setState(() => _ytPosition = v)
+                          : null,
+                      onChangeEnd: _ytDuration > 0 ? _ytSeekTo : null,
+                    ),
+                  ),
+                  Text(
+                    _fmtTime(_ytPosition),
+                    style: theme.textTheme.labelSmall,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The screen-share "stage" atop the chat: the selected incoming share (with a
+  /// switcher when several are live) plus a banner when I'm sharing. Returns null
+  /// when there's nothing to show for this channel's call.
+  Widget? _screenStage(ChannelSession session) {
+    final voice = _voice;
+    if (voice == null || voice.channelId != session.channelId) return null;
+    final broadcasting = _broadcast != null;
+    final live = _screenViews.values.where((v) => v.hasVideo).toList();
+    if (!broadcasting && live.isEmpty) return null;
+    final theme = Theme.of(context);
+
+    ScreenView? selected;
+    final sel = _selectedShareHex;
+    if (sel != null) {
+      final v = _screenViews[sel];
+      if (v != null && v.hasVideo) selected = v;
+    }
+    selected ??= live.isNotEmpty ? live.first : null;
+
+    final headerText = selected != null
+        ? '${_displayName(Uint8List.fromList(hex.decode(selected.sharerHex)))} is sharing'
+        : broadcasting
+        ? "You're sharing ${_broadcast!.sourceName}"
+        : 'Screen share';
+
+    return Container(
+      margin: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: theme.colorScheme.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 6, 6),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.screen_share,
+                  size: 16,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    headerText,
+                    style: theme.textTheme.labelLarge,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (broadcasting)
+                  TextButton.icon(
+                    onPressed: () => unawaited(_stopScreenShare()),
+                    icon: const Icon(Icons.stop_screen_share, size: 16),
+                    label: const Text('Stop sharing'),
+                  ),
+              ],
+            ),
+          ),
+          if (live.length > 1)
+            SizedBox(
+              height: 40,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                children: [
+                  for (final v in live)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ChoiceChip(
+                        label: Text(
+                          _displayName(
+                            Uint8List.fromList(hex.decode(v.sharerHex)),
+                          ),
+                        ),
+                        selected: v.sharerHex == selected?.sharerHex,
+                        onSelected: (_) =>
+                            setState(() => _selectedShareHex = v.sharerHex),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          if (selected != null)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: AspectRatio(
+                aspectRatio: 16 / 9,
+                child: ColoredBox(
+                  color: Colors.black,
+                  child: RTCVideoView(
+                    selected.renderer,
+                    objectFit:
+                        RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
   Widget _messageList(BuildContext context, ChannelSession session) {
-    final messages = session.repository
-        .ordered()
-        .where((m) {
-          final c = session.contentOf(m);
-          return c is! ProfileContent && c is! SoundContent;
-        })
-        .toList();
+    final messages = session.repository.ordered().where((m) {
+      final c = session.contentOf(m);
+      return c is! ProfileContent && c is! SoundContent;
+    }).toList();
     return messages.isEmpty
         ? const Center(child: Text('No messages yet — say something.'))
         : ListView.builder(
@@ -2387,81 +3061,81 @@ class _ChatScreenState extends State<ChatScreen> {
                         Navigator.pop(context);
                       },
                     ),
-            ListTile(
-              leading: const Icon(Icons.add),
-              title: const Text('Create a channel'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_createChannel());
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.link),
-              title: const Text('Join via invite'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_joinViaInvite());
-              },
-            ),
-            _drawerHeader('Direct messages'),
-            ListTile(
-              leading: const Icon(Icons.add),
-              title: const Text('New message'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_newDm());
-              },
-            ),
-            for (final s in dms)
-              ListTile(
-                leading: const Icon(Icons.alternate_email),
-                title: Text(_channelTitle(s)),
-                selected: s.channelId == channels?.activeId,
-                trailing: _unreadBadge(s),
-                onTap: () {
-                  channels?.activate(s.channelId);
-                  _markRead(s);
-                  Navigator.pop(context);
-                },
+                  ListTile(
+                    leading: const Icon(Icons.add),
+                    title: const Text('Create a channel'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      unawaited(_createChannel());
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.link),
+                    title: const Text('Join via invite'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      unawaited(_joinViaInvite());
+                    },
+                  ),
+                  _drawerHeader('Direct messages'),
+                  ListTile(
+                    leading: const Icon(Icons.add),
+                    title: const Text('New message'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      unawaited(_newDm());
+                    },
+                  ),
+                  for (final s in dms)
+                    ListTile(
+                      leading: const Icon(Icons.alternate_email),
+                      title: Text(_channelTitle(s)),
+                      selected: s.channelId == channels?.activeId,
+                      trailing: _unreadBadge(s),
+                      onTap: () {
+                        channels?.activate(s.channelId);
+                        _markRead(s);
+                        Navigator.pop(context);
+                      },
+                    ),
+                  _drawerHeader('Contacts'),
+                  ListTile(
+                    leading: const Icon(Icons.people_outline),
+                    title: const Text('Manage contacts'),
+                    trailing: Text(
+                      '${_contacts?.entries().length ?? 0}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      unawaited(_openContacts());
+                    },
+                  ),
+                  const Divider(height: 24),
+                ],
               ),
-            _drawerHeader('Contacts'),
+            ),
             ListTile(
-              leading: const Icon(Icons.people_outline),
-              title: const Text('Manage contacts'),
-              trailing: Text(
-                '${_contacts?.entries().length ?? 0}',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
+              dense: true,
+              leading: const Icon(Icons.settings_outlined, size: 20),
+              title: const Text('Settings'),
               onTap: () {
                 Navigator.pop(context);
-                unawaited(_openContacts());
+                unawaited(_openSettings());
               },
             ),
-            const Divider(height: 24),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.code, size: 20),
+              title: const Text('Source code'),
+              subtitle: Text(
+                'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
+              ),
+              onTap: () => unawaited(_openSourceCode()),
+            ),
           ],
         ),
       ),
-      ListTile(
-        dense: true,
-        leading: const Icon(Icons.settings_outlined, size: 20),
-        title: const Text('Settings'),
-        onTap: () {
-          Navigator.pop(context);
-          unawaited(_openSettings());
-        },
-      ),
-      ListTile(
-        dense: true,
-        leading: const Icon(Icons.code, size: 20),
-        title: const Text('Source code'),
-        subtitle: Text(
-          'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
-        ),
-        onTap: () => unawaited(_openSourceCode()),
-      ),
-    ],
-  ),
-),
     );
   }
 
@@ -2578,14 +3252,18 @@ class _ChatScreenState extends State<ChatScreen> {
         mime.startsWith('image/')
             ? _imageBlobView(session, blob)
             : _isDangerousFile(name)
-                ? Chip(
-                    avatar: Icon(Icons.warning_amber, size: 18,
-                        color: Theme.of(context).colorScheme.error),
-                    label: Text('$name (blocked)',
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error)),
-                  )
-                : _fileChip(name),
+            ? Chip(
+                avatar: Icon(
+                  Icons.warning_amber,
+                  size: 18,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                label: Text(
+                  '$name (blocked)',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              )
+            : _fileChip(name),
       // Profile claims aren't shown in the timeline (filtered in _messageList).
       ProfileContent() => const SizedBox.shrink(),
     };
@@ -2645,7 +3323,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     return sounds.reversed.toList();
   }
-
 
   /// Opens the soundboard from the voice panel — playing a clip broadcasts it
   /// to all voice participants via a control frame.
@@ -3052,27 +3729,33 @@ class _ContactsPageState extends State<_ContactsPage> {
                       final pubkeyHex = entries.keys.elementAt(i);
                       final name = entries.values.elementAt(i);
                       return ListTile(
-                        leading:
-                            CircleAvatar(child: Text(name[0].toUpperCase())),
+                        leading: CircleAvatar(
+                          child: Text(name[0].toUpperCase()),
+                        ),
                         title: Text(name),
                         subtitle: Text(
                           'hearth#${pubkeyHex.substring(0, 8)}',
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                         trailing: PopupMenuButton<String>(
-                          onSelected: (action) =>
-                              _onAction(action, pubkeyHex),
+                          onSelected: (action) => _onAction(action, pubkeyHex),
                           itemBuilder: (_) => const [
                             PopupMenuItem(
-                                value: 'dm', child: Text('Direct message')),
+                              value: 'dm',
+                              child: Text('Direct message'),
+                            ),
                             PopupMenuItem(
                               value: 'invite',
                               child: Text('Invite to channel'),
                             ),
                             PopupMenuItem(
-                                value: 'rename', child: Text('Rename')),
+                              value: 'rename',
+                              child: Text('Rename'),
+                            ),
                             PopupMenuItem(
-                                value: 'remove', child: Text('Remove')),
+                              value: 'remove',
+                              child: Text('Remove'),
+                            ),
                           ],
                         ),
                       );
@@ -3276,4 +3959,3 @@ class _FlamePainter extends CustomPainter {
   @override
   bool shouldRepaint(_FlamePainter old) => old.phase != phase;
 }
-

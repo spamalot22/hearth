@@ -29,6 +29,46 @@ void main() {
       expect(s.data['sig'], 'deadbeef');
     });
 
+    test('ScreenShareControl round-trips sharer + active flag', () {
+      final wire = const ScreenShareControl(
+        sharer: 'abcd',
+        active: true,
+      ).encode();
+      final split = splitFrame(wire);
+      expect(split.isControl, isTrue);
+
+      final back = MeshControl.decodeBody(split.body);
+      expect(back, isA<ScreenShareControl>());
+      final s = back! as ScreenShareControl;
+      expect(s.sharer, 'abcd');
+      expect(s.active, isTrue);
+
+      // And the stop signal.
+      final stop = MeshControl.decodeBody(
+        splitFrame(
+          const ScreenShareControl(sharer: 'abcd', active: false).encode(),
+        ).body,
+      );
+      expect((stop! as ScreenShareControl).active, isFalse);
+    });
+
+    test('YoutubeControl round-trips host/video/playing/position', () {
+      final wire = const YoutubeControl(
+        host: 'beef',
+        videoId: 'dQw4w9WgXcQ',
+        playing: true,
+        position: 42.5,
+      ).encode();
+
+      final back = MeshControl.decodeBody(splitFrame(wire).body);
+      expect(back, isA<YoutubeControl>());
+      final y = back! as YoutubeControl;
+      expect(y.host, 'beef');
+      expect(y.videoId, 'dQw4w9WgXcQ');
+      expect(y.playing, isTrue);
+      expect(y.position, 42.5);
+    });
+
     test('gossip frames are tagged and unwrap to the original text', () {
       const sync = '{"t":"have","ids":["a"]}';
       final split = splitFrame(wrapGossip(sync));

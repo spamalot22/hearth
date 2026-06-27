@@ -127,7 +127,7 @@ class VoiceSession {
       onRemoteStream: (peerHex, remote) =>
           unawaited(session._onRemote(peerHex, remote)),
       onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),
-      onControl: (_, control) => session._onControl(control),
+      onControl: (peer, control) => session._onControl(peer, control),
     );
     session = VoiceSession._(channelId, mesh, stream, onChange);
     // The mesh only starts announcing once peerConnected is listened to.
@@ -273,6 +273,13 @@ class VoiceSession {
   /// Callback for when a peer plays a soundboard clip.
   void Function(String blob)? onSoundboard;
 
+  /// Callback for when a peer starts (true) / stops (false) sharing their
+  /// screen, so the app can join or drop that sharer's screen mesh.
+  void Function(String sharerHex, bool active)? onScreenShare;
+
+  /// Callback for shared-YouTube ("watch party") state from the host.
+  void Function(String senderHex, YoutubeControl control)? onYoutube;
+
   /// Broadcasts a control message to all voice peers.
   void sendControl(MeshControl control) {
     for (final peerHex in _mesh.connections.keys) {
@@ -280,9 +287,15 @@ class VoiceSession {
     }
   }
 
-  void _onControl(MeshControl control) {
+  void _onControl(String peerHex, MeshControl control) {
     if (control is SoundboardControl && control.blob.isNotEmpty) {
       onSoundboard?.call(control.blob);
+    } else if (control is ScreenShareControl) {
+      // The sender peerHex is the authenticated sharer (control rides their own
+      // signed link), so trust it over the payload's self-reported `sharer`.
+      onScreenShare?.call(peerHex, control.active);
+    } else if (control is YoutubeControl) {
+      onYoutube?.call(peerHex, control);
     }
   }
 

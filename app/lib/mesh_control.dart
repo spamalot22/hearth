@@ -44,8 +44,16 @@ sealed class MeshControl {
               .cast<String, Object?>(),
         ),
         'typing' => TypingControl(typing: json['typing'] as bool? ?? false),
-        'soundboard' => SoundboardControl(
-          blob: json['blob'] as String? ?? '',
+        'soundboard' => SoundboardControl(blob: json['blob'] as String? ?? ''),
+        'screen' => ScreenShareControl(
+          sharer: json['sharer'] as String? ?? '',
+          active: json['active'] as bool? ?? false,
+        ),
+        'youtube' => YoutubeControl(
+          host: json['host'] as String? ?? '',
+          videoId: json['video'] as String? ?? '',
+          playing: json['playing'] as bool? ?? false,
+          position: (json['pos'] as num?)?.toDouble() ?? 0,
         ),
         _ => null,
       };
@@ -151,6 +159,63 @@ class SoundboardControl extends MeshControl {
 
   @override
   Map<String, Object?> toJson() => {'t': 'soundboard', 'blob': blob};
+}
+
+/// "I started/stopped sharing my screen" — sent over the voice mesh so every
+/// participant knows to join (or drop) my per-sharer screen mesh
+/// (`screen:<channelId>:<sharer>`), which carries the screen-share video. Per-
+/// sharer namespacing lets several people share at once, each an independent
+/// mesh, with no mid-call renegotiation.
+class ScreenShareControl extends MeshControl {
+  const ScreenShareControl({required this.sharer, required this.active});
+
+  /// The sharer's pubkey hex — names the screen mesh viewers should join.
+  final String sharer;
+
+  /// Whether the share just started (true) or stopped (false).
+  final bool active;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'screen',
+    'sharer': sharer,
+    'active': active,
+  };
+}
+
+/// "Here's the shared watch-party state" — a synchronised YouTube player driven
+/// over the voice mesh. Only the [host] (the member who started the video)
+/// broadcasts these; everyone else follows. [videoId] empty means the party was
+/// closed. [position] is the host's playback time in seconds, sent on each
+/// play/pause/seek and as a periodic heartbeat so followers can correct drift.
+class YoutubeControl extends MeshControl {
+  const YoutubeControl({
+    required this.host,
+    required this.videoId,
+    required this.playing,
+    required this.position,
+  });
+
+  /// The host's pubkey hex (the DJ whose playback everyone follows).
+  final String host;
+
+  /// The YouTube video id, or '' when the party is closed.
+  final String videoId;
+
+  /// Whether the host is playing (true) or paused (false).
+  final bool playing;
+
+  /// The host's current playback position, in seconds.
+  final double position;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'youtube',
+    'host': host,
+    'video': videoId,
+    'playing': playing,
+    'pos': position,
+  };
 }
 
 /// Tags a gossip frame's text for the data channel.

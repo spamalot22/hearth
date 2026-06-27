@@ -37,6 +37,7 @@ class WebRtcMesh {
     this.onRemoteStream,
     this.onPeerLeft,
     this.onControl,
+    this.forceInitiator,
     this.candidateCache,
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
@@ -77,6 +78,14 @@ class WebRtcMesh {
   /// Called when a peer sends a mesh control message (peer-exchange / relayed
   /// signalling) over the data channel. Null until track A wires a handler.
   final void Function(String peerHex, MeshControl control)? onControl;
+
+  /// Who offers in this mesh. `null` (default) uses the glare rule — the
+  /// lexicographically-greater pubkey offers, so exactly one side of each pair
+  /// does. `true` always offers to every discovered peer; `false` never offers
+  /// (answer-only). Screen share uses this to make the *sharer* the sole offerer
+  /// (a one-way media offer must carry the track) and viewers answer-only, which
+  /// also makes the screen mesh a star rather than a full mesh.
+  final bool? forceInitiator;
 
   /// Optional persistent cache of known peers — enables instant reconnect.
   final CandidateCache? candidateCache;
@@ -264,9 +273,18 @@ class WebRtcMesh {
   /// We initiate (offer) only to peers whose key sorts below ours, so exactly
   /// one side of every pair offers.
   void _maybeInitiate(String peerHex) {
-    // A pubkey is 32 bytes = 64 hex chars; drop anything malformed early.
-    if (_closed || peerHex.length != 64 || _links.containsKey(peerHex)) return;
-    if (selfPubkeyHex.compareTo(peerHex) <= 0) return; // they offer to us
+    // A pubkey is 32 bytes = 64 hex chars; drop anything malformed or our own.
+    if (_closed ||
+        peerHex.length != 64 ||
+        peerHex == selfPubkeyHex ||
+        _links.containsKey(peerHex)) {
+      return;
+    }
+    // Default policy: the greater key offers (one offerer per pair). A forced
+    // policy overrides it — `true` always offers, `false` never does.
+    final shouldOffer =
+        forceInitiator ?? (selfPubkeyHex.compareTo(peerHex) > 0);
+    if (!shouldOffer) return;
     final until = _backoffUntil[peerHex];
     if (until != null && DateTime.now().isBefore(until)) return; // backing off
     final link = _createLink(peerHex, initiator: true);
@@ -373,6 +391,10 @@ class WebRtcMesh {
       case TypingControl():
         break; // Handled by the external onControl callback (app layer).
       case SoundboardControl():
+        break; // Handled by the external onControl callback (voice layer).
+      case ScreenShareControl():
+        break; // Handled by the external onControl callback (voice layer).
+      case YoutubeControl():
         break; // Handled by the external onControl callback (voice layer).
     }
   }
@@ -517,19 +539,22 @@ class _PeerLink implements FrameChannel {
         unawaited(dispose());
       }
     };
-    // Voice: attach our mic before the offer/answer (so the audio is in the
-    // initial SDP), and surface the peer's remote audio for playback.
+    // Voice/screen: attach our local media before the offer/answer so it rides
+    // in the initial SDP (no renegotiation). Sharers/voice have a localStream;
+    // receive-only viewers have none and just add nothing.
     final stream = localStream;
     if (stream != null) {
       for (final track in stream.getTracks()) {
         await pc.addTrack(track, stream);
       }
-      pc.onTrack = (event) {
-        if (event.streams.isNotEmpty) {
-          onRemoteStream?.call(peerHex, event.streams.first);
-        }
-      };
     }
+    // Surface the peer's remote media. Wired unconditionally — a receive-only
+    // viewer (no localStream) still needs onTrack to get the sharer's video.
+    pc.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        onRemoteStream?.call(peerHex, event.streams.first);
+      }
+    };
     _pc = pc;
     return pc;
   }

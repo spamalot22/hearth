@@ -39,7 +39,9 @@ Future<void> initRecentGifs() async {
       final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
       _recentGifs
         ..clear()
-        ..addAll(list.map((g) => _Gif(g['url'] as String, g['preview'] as String)));
+        ..addAll(
+          list.map((g) => _Gif(g['url'] as String, g['preview'] as String)),
+        );
     } catch (_) {}
   }
 }
@@ -47,7 +49,9 @@ Future<void> initRecentGifs() async {
 void _saveRecents() {
   _recentBox?.put(
     'list',
-    jsonEncode(_recentGifs.map((g) => {'url': g.url, 'preview': g.preview}).toList()),
+    jsonEncode(
+      _recentGifs.map((g) => {'url': g.url, 'preview': g.preview}).toList(),
+    ),
   );
 }
 
