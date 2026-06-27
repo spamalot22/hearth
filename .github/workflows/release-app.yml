@@ -21,7 +21,30 @@ env:
   FLUTTER_VERSION: 3.44.2
 
 jobs:
+  # Derive the version from the tag — the single source of truth for a release.
+  # versionName is the semver (any leading "v" stripped); versionCode is a
+  # monotonic integer (major*1e6 + minor*1e3 + patch) so Android accepts each
+  # release as an in-place upgrade. No more hand-editing pubspec per release.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.compute.outputs.name }}
+      code: ${{ steps.compute.outputs.code }}
+    steps:
+      - id: compute
+        run: |
+          TAG="${{ github.ref_name }}"
+          NAME="${TAG#v}"                 # strip an optional leading "v"
+          IFS=. read -r MAJ MIN PAT <<< "$NAME"
+          PAT="${PAT%%-*}"                # drop any -prerelease suffix before maths
+          # 10# forces base-10 so a zero-padded part can't be read as octal.
+          CODE=$(( 10#${MAJ:-0} * 1000000 + 10#${MIN:-0} * 1000 + 10#${PAT:-0} ))
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag $TAG -> versionName $NAME, versionCode $CODE"
+
   android:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,11 +57,31 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
+      - name: Set up release keystore
+        working-directory: app/android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 not set — release will be debug-signed (in-place updates won't install)."
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > app/hearth-release.jks
+          cat > key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=hearth-release.jks
+          EOF
+          echo "Release keystore configured."
       - name: Build APK
         working-directory: app
         run: |
           flutter pub get
-          flutter build apk --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
+          flutter build apk --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
       - run: mv app/build/app/outputs/flutter-apk/app-release.apk hearth-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -46,6 +89,7 @@ jobs:
           path: hearth-android.apk
 
   windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +102,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build windows --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
+          flutter build windows --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
       - name: Zip
         run: Compress-Archive -Path app/build/windows/x64/runner/Release/* -DestinationPath hearth-windows.zip
       - uses: actions/upload-artifact@v4

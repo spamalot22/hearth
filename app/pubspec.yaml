@@ -16,6 +16,11 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
+#
+# NOTE: release builds in CI derive the version + build number from the git tag
+# (see .github/workflows/release-app.yml — the `version` job feeds --build-name
+# and --build-number). This value is only used for local/dev builds, so there's
+# no need to hand-edit it per release — just tag.
 version: 0.2.2+4
 
 environment:
