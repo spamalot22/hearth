@@ -16,6 +16,7 @@ import { SignalHub, addSignalingRoutes } from './signal';
 import { addSoundRoutes } from './sound';
 import { TunnelHub, addTunnelRoutes } from './tunnel';
 import { VersionStore, addVersionRoutes } from './version';
+import { addDownloadRoutes } from './download';
 
 interface StoredMessage {
   seq: number;
@@ -98,6 +99,13 @@ export function createRelay(
 
   // Signed release manifest (auto-update check).
   addVersionRoutes(app, versionStore);
+
+  // Release download proxy: streams private-repo release assets using the relay's
+  // read-only GitHub token (config read per-request so tests can stub it).
+  addDownloadRoutes(app, () => ({
+    repo: process.env['GITHUB_REPO'] ?? '',
+    token: process.env['GITHUB_TOKEN'] ?? '',
+  }));
 
   // Relay tunnel for symmetric-NAT fallback (opaque ciphertext forwarding).
   addTunnelRoutes(app, tunnelHub, (token, nowMs) =>
