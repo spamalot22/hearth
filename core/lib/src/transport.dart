@@ -54,6 +54,7 @@ class RelayTransport implements Transport {
   Timer? _timer;
   int _since = 0;
   bool _busy = false;
+  bool _paused = false;
 
   /// The poll cursor (relay sequence number seen so far).
   int get since => _since;
@@ -61,12 +62,18 @@ class RelayTransport implements Transport {
   @override
   Stream<Message> get incoming => _incoming.stream;
 
+  /// Pauses polling (e.g. when P2P peers are connected and handling delivery).
+  void pause() => _paused = true;
+
+  /// Resumes polling (e.g. when the last P2P peer disconnects).
+  void resume() => _paused = false;
+
   void _startPolling() {
     _timer ??= Timer.periodic(pollInterval, (_) => unawaited(_pollOnce()));
   }
 
   Future<void> _pollOnce() async {
-    if (_busy) return; // don't overlap a slow poll with the next tick
+    if (_busy || _paused) return;
     _busy = true;
     try {
       final messages = await poll();

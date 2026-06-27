@@ -1,5 +1,5 @@
-import 'package:chat_app/group_channel.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/group_channel.dart';
 
 void main() {
   group('GroupChannel', () {

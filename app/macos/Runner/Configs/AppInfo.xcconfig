@@ -8,7 +8,7 @@
 PRODUCT_NAME = chat_app
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.example.chatApp
+PRODUCT_BUNDLE_IDENTIFIER = com.hearth.app
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 Hearth. All rights reserved.

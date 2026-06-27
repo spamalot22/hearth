@@ -38,7 +38,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release --dart-define=APP_VERSION=${{ github.ref_name }}
       - run: mv app/build/app/outputs/flutter-apk/app-release.apk hearth-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -58,7 +58,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build windows --release
+          flutter build windows --release --dart-define=APP_VERSION=${{ github.ref_name }}
       - name: Zip
         run: Compress-Archive -Path app/build/windows/x64/runner/Release/* -DestinationPath hearth-windows.zip
       - uses: actions/upload-artifact@v4
@@ -79,7 +79,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build web --release
+          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }}
       - name: Zip
         run: cd app/build/web && zip -r "$GITHUB_WORKSPACE/hearth-web.zip" .
       - uses: actions/upload-artifact@v4

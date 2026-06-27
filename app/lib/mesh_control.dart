@@ -34,6 +34,15 @@ sealed class MeshControl {
           kind: json['kind'] as String? ?? '',
           data: ((json['data'] as Map?) ?? const {}).cast<String, Object?>(),
         ),
+        'contacts_online' => ContactsOnlineControl(
+          ((json['peers'] as List?) ?? const []).cast<String>(),
+        ),
+        'version' => VersionControl(
+          version: json['version'] as String? ?? '',
+          manifest: ((json['manifest'] as Map?) ?? const {})
+              .cast<String, Object?>(),
+        ),
+        'typing' => TypingControl(typing: json['typing'] as bool? ?? false),
         _ => null,
       };
     } catch (_) {
@@ -79,6 +88,53 @@ class SignalControl extends MeshControl {
     'kind': kind,
     'data': data,
   };
+}
+
+/// "These contacts of mine are online right now" — cross-channel peer discovery.
+/// Sent periodically to connected peers. The receiver checks if any listed pubkeys
+/// are their own contacts and, if so, can route signalling through the sender to
+/// reach them without the relay.
+class ContactsOnlineControl extends MeshControl {
+  const ContactsOnlineControl(this.peers);
+
+  final List<String> peers; // pubkey hex of currently-connected peers (all channels)
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'contacts_online', 'peers': peers};
+}
+
+/// "I'm running this version; here's the signed manifest I last verified" — P2P
+/// version enforcement. Exchanged on connect. The receiver verifies the manifest's
+/// Ed25519 signature against the hardcoded release public key; if valid and newer,
+/// it triggers the update gate. A malicious peer can't forge a manifest (needs the
+/// release private key) or replay an old one (seq is checked).
+class VersionControl extends MeshControl {
+  const VersionControl({required this.version, required this.manifest});
+
+  /// The sender's running app version.
+  final String version;
+
+  /// The full signed release manifest (version, seq, assets, sig). The receiver
+  /// verifies this independently — trusting the signature, not the peer.
+  final Map<String, Object?> manifest;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'version',
+    'version': version,
+    'manifest': manifest,
+  };
+}
+
+/// "I started/stopped typing" — lightweight presence indicator sent over the
+/// data channel. The UI shows "X is typing..." for a few seconds.
+class TypingControl extends MeshControl {
+  const TypingControl({required this.typing});
+
+  final bool typing;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'typing', 'typing': typing};
 }
 
 /// Tags a gossip frame's text for the data channel.

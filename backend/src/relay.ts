@@ -5,6 +5,8 @@ import { addGifRoutes } from './gif';
 import {
   MAX_BODY_BYTES,
   MAX_CHANNEL_MESSAGES,
+  MESSAGE_RATE_LIMIT,
+  MESSAGE_RATE_WINDOW_MS,
   RateLimiter,
   SEARCH_RATE_LIMIT,
   SEARCH_RATE_WINDOW_MS,
@@ -12,6 +14,8 @@ import {
 import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
 import { addSoundRoutes } from './sound';
+import { TunnelHub, addTunnelRoutes } from './tunnel';
+import { VersionStore, addVersionRoutes } from './version';
 
 interface StoredMessage {
   seq: number;
@@ -51,6 +55,8 @@ export class RelayStore {
 export function createRelay(
   store: RelayStore = new RelayStore(),
   signalHub: SignalHub = new SignalHub(),
+  versionStore: VersionStore = new VersionStore(),
+  tunnelHub: TunnelHub = new TunnelHub(),
 ): Hono {
   const app = new Hono();
 
@@ -90,7 +96,16 @@ export function createRelay(
   // Sound search proxy (Freesound token stays on the relay; CC0-filtered).
   addSoundRoutes(app);
 
+  // Signed release manifest (auto-update check).
+  addVersionRoutes(app, versionStore);
+
+  // Relay tunnel for symmetric-NAT fallback (opaque ciphertext forwarding).
+  addTunnelRoutes(app, tunnelHub, (token, nowMs) =>
+    signalHub.verifyToken(token, nowMs),
+  );
+
   // Accept a signed message: verify it, then store it.
+  const messageLimiter = new RateLimiter(MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS);
   app.post('/messages', async (c) => {
     let body: WireMessage;
     try {
@@ -107,6 +122,9 @@ export function createRelay(
       ok = false;
     }
     if (!ok) return c.json({ error: 'verification failed' }, 400);
+    if (!messageLimiter.allow(body.author, Date.now())) {
+      return c.json({ error: 'rate limited' }, 429);
+    }
     return c.json({ ok: true, seq: store.append(body) });
   });
 

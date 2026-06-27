@@ -10,8 +10,9 @@ only to introduce peers to each other (and to courier messages to people who are
 offline); it can verify that a message is authentic but can never read it.
 
 > **Status:** early, fast-moving work in progress. Crypto, message sync, P2P mesh,
-> channels, media, voice, and identity backup/restore work locally today; it does
-> not yet run off `localhost` (the relay isn't deployed). See
+> channels, media, voice, identity backup/restore, signed auto-updates, P2P version
+> enforcement, relay tunnel fallback, and peer-exchange all work today. The relay is
+> deployed (Synology NAS + Tailscale Funnel). See
 > [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the living plan and the
 > decisions log.
 
@@ -36,6 +37,18 @@ offline); it can verify that a message is authentic but can never read it.
   per-user volume, join/leave cues, and live speaking indicators.
 - **Offline delivery is epidemic, not routed** — any peer can carry and re-serve
   another's (signed, sealed) messages without being able to forge or read them.
+- **Signed auto-updates with P2P enforcement** — a release signing key (Ed25519)
+  produces manifests the relay serves; peers propagate them epidemically. The app
+  verifies the signature against a hardcoded public key before gating — no trust
+  in the relay or peers required. Downgrade-protected by a monotonic sequence.
+- **Peer-exchange & cached candidates** — once you hold a single live link, you
+  discover all other reachable peers through the mesh (no relay). Known peers are
+  cached locally for near-instant reconnection on restart.
+- **Cross-channel contact discovery** — connected peers share who else they're
+  talking to, letting you reach contacts in other channels without the relay.
+- **Authenticated signalling** — announce requests are Ed25519-signed; signal
+  mailbox reads require a short-lived token, preventing strangers from observing
+  your ICE candidates.
 
 ---
 
@@ -62,6 +75,8 @@ disposable convenience.**
         └──────────────►   Relay (Hono)   ◄──────────────┘   ← never sees plaintext
                          /announce /peers /signal
                          /messages /poll  (offline courier)
+                         /tunnel (symmetric-NAT fallback)
+                         /version (signed auto-update manifest)
                          /gif/search /sound/search (keyed proxy)
 ```
 
@@ -139,8 +154,12 @@ message's signature but **never decrypts or owns history**. It's reduced to a
 media-search proxies; once peers have a live link, presence/peers/messages flow
 pure P2P, so the happy path needs no server. It's optional and swappable (the
 client points at any relay URL), and is designed to **self-host** as a single
-in-memory Docker container behind a tunnel (no port-forward) — not deployed yet;
-see *Rendezvous & connectivity* and *Deployment* in the plan.
+in-memory Docker container behind a tunnel (no port-forward). Deployed on a
+Synology NAS via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
+
+When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
+(`/tunnel`) forwards opaque ciphertext between the stuck peers — same E2E
+guarantees, just routed through the relay instead of direct.
 
 ---
 
@@ -163,7 +182,7 @@ IMPLEMENTATION_PLAN.md   Living plan, architecture decisions log, roadmap.
 - **Crypto:** the `cryptography` package — Ed25519, X25519, ChaCha20-Poly1305,
   HKDF-SHA256.
 - **Backend:** TypeScript, [Hono](https://hono.dev), run with `tsx`; **pnpm**.
-  Self-hosted as a Docker container, tunnelled (Cloudflare Tunnel); shipped via
+  Self-hosted as a Docker container, tunnelled (Tailscale Funnel); shipped via
   GitHub Actions on a version tag → GHCR.
 - **Quality:** `flutter analyze` + Dart/TS tests (`vitest`), `lefthook` pre-commit
   (format + analyze + typecheck).
@@ -225,6 +244,14 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 - Messages are **signed** (authenticity/integrity) and **encrypted** (DMs/groups),
   so the relay and any couriering peer see only ciphertext they can't forge.
 - Signalling is **authenticated**, so the relay can't MITM the WebRTC handshake.
+- **Signal mailbox reads are token-gated** — announces are Ed25519-signed and
+  return a short-lived token; reading your signal mailbox requires the token, so
+  strangers can't observe your ICE candidates.
+- **Auto-updates are signature-verified** — the relay (or any peer) can serve an
+  update manifest, but the app only trusts it if signed by the hardcoded release
+  key. A malicious relay or peer can't forge an update, only withhold one.
+- **Per-pubkey rate limiting** on signal and message endpoints prevents mailbox
+  flooding from anonymous attackers.
 - **What the relay still learns:** that a peer is online, who they're signalling
   with, and (for media search) your search terms — proxying hides your IP from the
   GIF/sound provider, but the relay sees the query. Hiding *who a message is for*
@@ -234,11 +261,9 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 
 ## Roadmap
 
-Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): self-host the
-relay (Docker + Cloudflare Tunnel) to get off `localhost`, server-minimal
-contact-graph rendezvous (cached addresses + mutual-contact peer-exchange), a Dart
-relay-fallback for symmetric-NAT pairs (no coturn), multi-device identity, MLS-style
-group key management, and richer media. The plan
+Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): multi-device
+identity, MLS-style group key management (forward secrecy + per-member revocation),
+channel ownership and kick, Windows tray mode, and typing indicators. The plan
 also keeps a dated **decisions log** explaining *why* each choice was made.
 
 ## License

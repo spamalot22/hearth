@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:convert/convert.dart';
@@ -7,10 +8,14 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    hide Message;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:window_manager/window_manager.dart';
 
 import 'blob_store_hive.dart';
+import 'candidate_cache.dart';
 import 'channel.dart';
 import 'contacts.dart';
 import 'content.dart';
@@ -19,17 +24,70 @@ import 'gif_search.dart';
 import 'group_channel.dart';
 import 'key_store.dart';
 import 'media_library.dart';
+import 'network_status.dart';
 import 'profile.dart';
 import 'settings.dart';
 import 'sound_search.dart';
 import 'starter_sounds.dart';
+import 'unread.dart';
+import 'update_checker.dart';
 import 'voice.dart';
 
 /// Relay endpoint for local dev (signalling only).
 final Uri kRelayUrl = Uri.parse('http://localhost:8787');
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Desktop: minimize to tray instead of closing.
+  if (!kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux ||
+          defaultTargetPlatform == TargetPlatform.macOS)) {
+    await windowManager.ensureInitialized();
+    await windowManager.setPreventClose(true);
+    windowManager.addListener(_HearthWindowListener());
+  }
+  // Init local notifications for background message toasts.
+  await _initNotifications();
   runApp(HearthApp(keyStore: SecureKeyStore()));
+}
+
+final FlutterLocalNotificationsPlugin _notifications =
+    FlutterLocalNotificationsPlugin();
+
+Future<void> _initNotifications() async {
+  if (kIsWeb) return;
+  await _notifications.initialize(
+    settings: const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      linux: LinuxInitializationSettings(defaultActionName: 'Open'),
+    ),
+  );
+}
+
+/// Shows a local notification (desktop/Android, not web).
+Future<void> showLocalNotification(String title, String body) async {
+  if (kIsWeb) return;
+  await _notifications.show(
+    id: 0,
+    title: title,
+    body: body,
+    notificationDetails: const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'hearth_messages',
+        'Messages',
+        importance: Importance.high,
+      ),
+    ),
+  );
+}
+
+class _HearthWindowListener extends WindowListener {
+  @override
+  void onWindowClose() async {
+    // Minimize to tray instead of exiting.
+    await windowManager.hide();
+  }
 }
 
 class HearthApp extends StatelessWidget {
@@ -152,6 +210,8 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _input = TextEditingController();
+  final FocusNode _composerFocus = FocusNode();
+  final ScrollController _scroll = ScrollController();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   ChannelManager? _channels;
   ContactBook? _contacts;
@@ -162,6 +222,7 @@ class _ChatScreenState extends State<ChatScreen> {
   VoiceSession? _voice;
   ProfileStore? _profile;
   SettingsStore? _settings;
+  UnreadStore? _unread;
   late Uri _relayUrl = widget.relayUrl;
   bool? _relayUp; // null = not checked yet
   bool _checkingRelay = false;
@@ -179,11 +240,34 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
   bool _sending = false;
+  UpdateInfo? _updateInfo;
+  // Track recent message timestamps per author for the "on fire" effect.
+  final Map<String, List<int>> _recentMsgTimes = {};
+  bool _typingLocally = false;
+  Timer? _typingTimer;
 
   @override
   void initState() {
     super.initState();
+    _input.addListener(_onInputChanged);
     unawaited(_init());
+  }
+
+  void _onInputChanged() {
+    final session = _channels?.active;
+    if (session == null) return;
+    if (_input.text.isNotEmpty && !_typingLocally) {
+      _typingLocally = true;
+      session.sendTyping(true);
+    }
+    // Reset the "stop typing" timer — fires 3s after last keystroke.
+    _typingTimer?.cancel();
+    _typingTimer = Timer(const Duration(seconds: 3), () {
+      if (_typingLocally) {
+        _typingLocally = false;
+        _channels?.active?.sendTyping(false);
+      }
+    });
   }
 
   /// Opens contacts + the channel registry, then re-opens every group channel
@@ -194,9 +278,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final registry = widget.autoPoll ? await ChannelRegistry.open() : null;
     final blobStore = widget.autoPoll ? await HiveBlobStore.open() : null;
     final library = widget.autoPoll ? await MediaLibrary.open() : null;
+    final peerCache = widget.autoPoll ? await CandidateCache.open() : null;
     final profile = widget.autoPoll ? await ProfileStore.open() : null;
     final settings = widget.autoPoll ? await SettingsStore.open() : null;
     _settings = settings;
+    _unread = widget.autoPoll ? await UnreadStore.open() : null;
     final savedRelay = settings?.relayUrl;
     if (savedRelay != null) {
       final parsed = Uri.tryParse(savedRelay);
@@ -205,6 +291,12 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
     if (widget.autoPoll) unawaited(_checkRelay());
+    if (widget.autoPoll) await _checkUpdate();
+    if (_updateInfo != null) {
+      // Force update: don't proceed to load channels — show the gate screen.
+      if (mounted) setState(() {});
+      return;
+    }
     if (blobStore != null && library != null) {
       await loadStarterSounds(blobStore, library);
     }
@@ -214,6 +306,11 @@ class _ChatScreenState extends State<ChatScreen> {
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: blobStore,
+      candidateCache: peerCache,
+      onBackgroundMessage: _notifyBackground,
+      onForceUpdate: (info) {
+        if (mounted) setState(() => _updateInfo = info);
+      },
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -233,12 +330,32 @@ class _ChatScreenState extends State<ChatScreen> {
       _player = widget.autoPoll ? AudioPlayer() : null;
       _channels = channels;
     });
+    // Mark all pre-existing channels as read so the drawer doesn't show stale
+    // unread counts from history that was loaded before the user opened the app.
+    for (final session in channels.sessions) {
+      _markRead(session);
+    }
     // Decrypt the active channel's loaded history: the onUpdate calls during the
     // open loop above ran before _channels was set, so they were no-ops.
     unawaited(_refresh());
   }
 
   void _onUpdate() => unawaited(_refresh());
+
+  void _notifyBackground(String channelId) {
+    if (!mounted) return;
+    final session = _channels?.sessions
+        .where((s) => s.channelId == channelId)
+        .firstOrNull;
+    final name = session != null ? _channelTitle(session) : 'a channel';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text('New message in #$name'),
+      duration: const Duration(seconds: 2),
+      behavior: SnackBarBehavior.floating,
+    ));
+    // Also fire a local OS notification (visible when app is in tray/background).
+    unawaited(showLocalNotification('Hearth', 'New message in #$name'));
+  }
 
   /// Decrypts the active channel's new messages, indexes any media into your
   /// library, then re-renders.
@@ -249,12 +366,17 @@ class _ChatScreenState extends State<ChatScreen> {
       await _indexLibrary(active);
       _indexProfiles(active);
       _detectNewMembers(active);
+      _markRead(active);
+      _refreshFireState();
       // Publish our own name into a channel the first time we're active in it.
       if (_myName != null && _announced.add(active.channelId)) {
         await _announceName(active);
       }
     }
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {});
+      _scrollToBottom();
+    }
   }
 
   /// Adds the active channel's media (whose blobs are held) to your library, so
@@ -306,7 +428,7 @@ class _ChatScreenState extends State<ChatScreen> {
       payload: await session.encodePayload(ProfileContent(name)),
       prev: session.repository.heads(),
     );
-    await session.engine.publish(message);
+    await session.publish(message);
   }
 
   /// Sets your display name (a suggestion to others) and re-announces it.
@@ -390,7 +512,9 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Shows your recovery code (the seed) to back up. Anyone with it *is* you, so
   /// it's display-only with a warning.
   Future<void> _backupIdentity() async {
-    final code = hex.encode(await widget.identity.extractSeed());
+    final seed = await widget.identity.extractSeed();
+    final codeHex = hex.encode(seed);
+    final codeB64 = base64Url.encode(seed).replaceAll('=', '');
     if (!mounted) return;
     await showDialog<void>(
       context: context,
@@ -406,9 +530,20 @@ class _ChatScreenState extends State<ChatScreen> {
               'identity if you lose this device.',
             ),
             const SizedBox(height: 12),
+            const Text('Recovery code:', style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 4),
             SelectableText(
-              code,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              codeB64,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Hex: $codeHex',
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 10,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
           ],
         ),
@@ -419,7 +554,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           FilledButton.icon(
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: code));
+              Clipboard.setData(ClipboardData(text: codeB64));
               Navigator.pop(context);
             },
             icon: const Icon(Icons.copy),
@@ -439,9 +574,20 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (code == null || code.trim().isEmpty) return;
     Uint8List? seed;
+    final trimmed = code.trim();
     try {
-      final bytes = Uint8List.fromList(hex.decode(code.trim()));
-      if (bytes.length == 32) seed = bytes;
+      if (trimmed.length == 64 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(trimmed)) {
+        // Hex format (64 chars = 32 bytes).
+        seed = Uint8List.fromList(hex.decode(trimmed));
+      } else {
+        // Base64url format (43 chars without padding = 32 bytes).
+        final padded = trimmed.padRight(
+          trimmed.length + (4 - trimmed.length % 4) % 4,
+          '=',
+        );
+        final bytes = base64Url.decode(padded);
+        if (bytes.length == 32) seed = Uint8List.fromList(bytes);
+      }
     } catch (_) {
       seed = null;
     }
@@ -510,31 +656,20 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  Future<void> _checkUpdate() async {
+    final info = await checkForUpdate(_relayUrl);
+    if (info != null && mounted) setState(() => _updateInfo = info);
+  }
+
   /// A coloured dot + label for the relay's reachability.
-  Widget _relayStatus() {
-    final Color color;
-    final String label;
-    if (_checkingRelay) {
-      (color, label) = (Colors.grey, 'checking…');
-    } else if (_relayUp == null) {
-      (color, label) = (Colors.grey, 'not checked');
-    } else if (_relayUp!) {
-      (color, label) = (Colors.green, 'responding');
-    } else {
-      (color, label) = (Colors.red, 'unreachable');
+  /// Unique connected peers across all channel meshes.
+  int _totalPeerCount() {
+    final all = <String>{};
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      final mesh = session.mesh;
+      if (mesh != null) all.addAll(mesh.connections.keys);
     }
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 6),
-        Text(label, style: TextStyle(color: color, fontSize: 12)),
-      ],
-    );
+    return all.length;
   }
 
   /// Edits the relay URL (the rendezvous + media-proxy endpoint). Persisted; open
@@ -579,6 +714,9 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_voice?.leave());
     unawaited(_player?.dispose());
     _input.dispose();
+    _composerFocus.dispose();
+    _scroll.dispose();
+    _typingTimer?.cancel();
     super.dispose();
   }
 
@@ -586,7 +724,27 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     _input.clear();
+    _typingTimer?.cancel();
+    if (_typingLocally) {
+      _typingLocally = false;
+      _channels?.active?.sendTyping(false);
+    }
     await _publish(TextContent(text));
+    _composerFocus.requestFocus();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      final pos = _scroll.position;
+      if (pos.maxScrollExtent - pos.pixels < 100) {
+        _scroll.animateTo(
+          pos.maxScrollExtent,
+          duration: const Duration(milliseconds: 150),
+          curve: Curves.easeOut,
+        );
+      }
+    });
   }
 
   /// Searches GIFs (via the relay's proxy), fetches the chosen one's bytes once,
@@ -759,7 +917,7 @@ class _ChatScreenState extends State<ChatScreen> {
         prev: session.repository.heads(),
       );
       // Persist + gossip to peers; the updates stream re-renders it.
-      await session.engine.publish(message);
+      await session.publish(message);
     } catch (_) {
       if (mounted) setState(() => _error = 'send failed');
     } finally {
@@ -919,12 +1077,17 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Leaves a group channel: confirm, drop it from the registry, close it.
   Future<void> _leaveChannel(String channelId) async {
+    final isLastMember = (_seenMembers[channelId] ?? {}).isEmpty;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Leave channel?'),
-        content: const Text(
-          "You'll stop receiving its messages and need a new invite to rejoin.",
+        content: Text(
+          isLastMember
+              ? "You're the only member — leaving will destroy this channel "
+                  'and all its message history permanently.'
+              : "You'll stop receiving its messages and need a new invite to "
+                  'rejoin.',
         ),
         actions: [
           TextButton(
@@ -932,8 +1095,11 @@ class _ChatScreenState extends State<ChatScreen> {
             child: const Text('Cancel'),
           ),
           FilledButton(
+            style: isLastMember
+                ? FilledButton.styleFrom(backgroundColor: Colors.red)
+                : null,
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Leave'),
+            child: Text(isLastMember ? 'Destroy & leave' : 'Leave'),
           ),
         ],
       ),
@@ -1280,6 +1446,57 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Full contacts management view: list, rename, remove, DM, or invite to a
+  /// channel.
+  Future<void> _openContacts() async {
+    final contacts = _contacts;
+    if (contacts == null) return;
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _ContactsPage(
+          contacts: contacts,
+          groups: _groups,
+          identity: widget.identity,
+          onDm: (pubkeyHex) async {
+            await _channels?.openDm(hex.decode(pubkeyHex));
+            if (mounted) setState(() {});
+          },
+          onInvite: (pubkeyHex, channelId) {
+            final channel = _groups[channelId];
+            if (channel == null) return;
+            final invite = channel.invite(
+              inviterPubkeyHex: widget.identity.publicKeyHex,
+              inviterName: _myName,
+              relayUrl: _relayUrl.toString(),
+            );
+            Clipboard.setData(ClipboardData(text: invite));
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Invite copied — send it to them!'),
+              behavior: SnackBarBehavior.floating,
+            ));
+          },
+          onRemove: (pubkeyHex) async {
+            await contacts.setName(pubkeyHex, '');
+            if (mounted) setState(() {});
+          },
+          onRename: (pubkeyHex) async {
+            final name = await _promptText(
+              title: 'Rename contact',
+              hint: 'local petname',
+              initial: contacts.nameFor(pubkeyHex) ?? '',
+              action: 'Save',
+            );
+            if (name != null && name.trim().isNotEmpty) {
+              await contacts.setName(pubkeyHex, name.trim());
+              if (mounted) setState(() {});
+            }
+          },
+        ),
+      ),
+    );
+  }
+
   /// Offers to add the channel's members (those who've shared a name) to
   /// contacts with their suggested petnames — you tick who; nothing is added
   /// without confirming. [auto] (used right after joining) stays silent when
@@ -1407,6 +1624,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Gate: if a mandatory update was detected (startup or from a peer), block.
+    if (_updateInfo != null) {
+      return _forceUpdateScreen(context);
+    }
     final session = _channels?.active;
     // Wide screens get the channel panel inline (right column); narrow screens
     // reach it via the end drawer.
@@ -1475,6 +1696,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _chatColumn(ChannelSession session) => Column(
     children: [
       Expanded(child: _messageList(context, session)),
+      _typingIndicator(session),
       _composer(context, session),
     ],
   );
@@ -1484,13 +1706,69 @@ class _ChatScreenState extends State<ChatScreen> {
         .ordered()
         .where((m) => session.contentOf(m) is! ProfileContent)
         .toList();
-    if (messages.isEmpty) {
-      return const Center(child: Text('No messages yet — say something.'));
-    }
-    return ListView.builder(
-      padding: const EdgeInsets.all(8),
-      itemCount: messages.length,
-      itemBuilder: (context, i) => _bubble(context, session, messages[i]),
+    return messages.isEmpty
+        ? const Center(child: Text('No messages yet — say something.'))
+        : ListView.builder(
+            controller: _scroll,
+            padding: const EdgeInsets.all(8),
+            itemCount: messages.length,
+            itemBuilder: (context, i) {
+              final msg = messages[i];
+              return TweenAnimationBuilder<double>(
+                key: ValueKey(msg.idHex),
+                tween: Tween(begin: 0, end: 1),
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeOutCubic,
+                builder: (context, value, child) => Opacity(
+                  opacity: value,
+                  child: Transform.translate(
+                    offset: Offset(0, 12 * (1 - value)),
+                    child: child,
+                  ),
+                ),
+                child: _bubble(context, session, msg),
+              );
+            },
+          );
+  }
+
+  Widget _forceUpdateScreen(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.system_update,
+                size: 64,
+                color: theme.colorScheme.primary,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Update required',
+                style: theme.textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Hearth v${_updateInfo!.version} is available. '
+                'Please update to continue.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'You are running ${appVersion == "dev" ? "a dev build" : "v$appVersion"}.',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1500,10 +1778,19 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.local_fire_department,
-            size: 64,
-            color: theme.colorScheme.primary,
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0.8, end: 1.0),
+            duration: const Duration(seconds: 2),
+            curve: Curves.easeInOut,
+            builder: (context, value, child) => Transform.scale(
+              scale: value,
+              child: child,
+            ),
+            child: Icon(
+              Icons.local_fire_department,
+              size: 64,
+              color: theme.colorScheme.primary,
+            ),
           ),
           const SizedBox(height: 16),
           Text('Welcome to Hearth', style: theme.textTheme.headlineSmall),
@@ -1542,14 +1829,28 @@ class _ChatScreenState extends State<ChatScreen> {
           padding: EdgeInsets.zero,
           children: [
             _brandHeader(),
+            if (_updateInfo != null)
+              MaterialBanner(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading: const Icon(Icons.system_update, color: Colors.amber),
+                content: Text('Update available: v${_updateInfo!.version}'),
+                actions: [
+                  TextButton(
+                    onPressed: () => setState(() => _updateInfo = null),
+                    child: const Text('Dismiss'),
+                  ),
+                ],
+              ),
             _drawerHeader('Channels'),
             for (final s in groups)
               ListTile(
                 leading: const Icon(Icons.tag),
                 title: Text(_channelTitle(s)),
                 selected: s.channelId == channels?.activeId,
+                trailing: _unreadBadge(s),
                 onTap: () {
                   channels?.activate(s.channelId);
+                  _markRead(s);
                   Navigator.pop(context);
                 },
               ),
@@ -1583,11 +1884,26 @@ class _ChatScreenState extends State<ChatScreen> {
                 leading: const Icon(Icons.alternate_email),
                 title: Text(_channelTitle(s)),
                 selected: s.channelId == channels?.activeId,
+                trailing: _unreadBadge(s),
                 onTap: () {
                   channels?.activate(s.channelId);
+                  _markRead(s);
                   Navigator.pop(context);
                 },
               ),
+            _drawerHeader('Contacts'),
+            ListTile(
+              leading: const Icon(Icons.people_outline),
+              title: const Text('Manage contacts'),
+              trailing: Text(
+                '${_contacts?.entries().length ?? 0}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_openContacts());
+              },
+            ),
             _drawerHeader('Identity'),
             ListTile(
               leading: const Icon(Icons.key_outlined),
@@ -1605,32 +1921,21 @@ class _ChatScreenState extends State<ChatScreen> {
                 unawaited(_restoreIdentity());
               },
             ),
-            _drawerHeader('Relay'),
-            ListTile(
-              leading: const Icon(Icons.dns_outlined),
-              title: const Text('Relay server'),
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _relayUrl.toString(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  _relayStatus(),
-                ],
+            _drawerHeader('Network'),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: NetworkStatus(
+                relayUp: _relayUp,
+                checkingRelay: _checkingRelay,
+                peerCount: _totalPeerCount(),
+                channelCount: _channels?.sessions.length ?? 0,
+                relayUrl: _relayUrl.toString(),
+                onTapRelay: () {
+                  Navigator.pop(context);
+                  unawaited(_setRelayUrl());
+                },
+                onRefresh: () => unawaited(_checkRelay()),
               ),
-              trailing: IconButton(
-                tooltip: 'Re-check relay',
-                icon: const Icon(Icons.refresh),
-                onPressed: _checkingRelay
-                    ? null
-                    : () => unawaited(_checkRelay()),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_setRelayUrl());
-              },
             ),
           ],
         ),
@@ -1674,6 +1979,13 @@ class _ChatScreenState extends State<ChatScreen> {
                     style: theme.textTheme.bodySmall,
                     overflow: TextOverflow.ellipsis,
                   ),
+                  Text(
+                    appVersion == 'dev' ? 'dev build' : 'v$appVersion',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant
+                          .withValues(alpha: 0.6),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -1683,6 +1995,36 @@ class _ChatScreenState extends State<ChatScreen> {
               color: theme.colorScheme.onSurfaceVariant,
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _markRead(ChannelSession session) {
+    final ordered = session.repository.ordered();
+    if (ordered.isNotEmpty) {
+      _unread?.markRead(session.channelId, ordered.last.idHex);
+    }
+  }
+
+  Widget? _unreadBadge(ChannelSession session) {
+    final unread = _unread;
+    if (unread == null) return null;
+    final ids = session.repository.ordered().map((m) => m.idHex).toList();
+    final count = unread.unreadCount(session.channelId, ids);
+    if (count <= 0) return null;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primary,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.onPrimary,
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
         ),
       ),
     );
@@ -1925,6 +2267,39 @@ class _ChatScreenState extends State<ChatScreen> {
     return HSLColor.fromAHSL(1, hue, 0.5, 0.62).toColor();
   }
 
+  /// Returns true if this author has sent 4+ messages in the last 5 seconds —
+  /// they're spamming and their bubbles catch fire 🔥.
+  bool _isOnFire(String authorHex, int messageTimestampMs) {
+    final times = _recentMsgTimes[authorHex];
+    if (times == null || times.length < 4) return false;
+    return times.length >= 4;
+  }
+
+  /// Updates the fire-state tracker — call from _refresh, not build.
+  void _refreshFireState() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final active = _channels?.active;
+    if (active == null) return;
+    final messages = active.repository.ordered();
+    // Only check the last 20 messages (recent activity window).
+    final recent = messages.length > 20
+        ? messages.sublist(messages.length - 20)
+        : messages;
+    for (final message in recent) {
+      final authorHex = hex.encode(message.author);
+      final times = _recentMsgTimes[authorHex] ??= [];
+      if (now - message.timestampMs < 10000) {
+        if (!times.contains(message.timestampMs)) {
+          times.add(message.timestampMs);
+        }
+      }
+    }
+    // Prune expired entries.
+    for (final times in _recentMsgTimes.values) {
+      times.removeWhere((t) => now - t > 5000);
+    }
+  }
+
   /// A small colour-coded avatar (initial of the display name).
   Widget _avatar(Uint8List author, {double radius = 16}) {
     final label = _displayName(author).replaceFirst('hearth#', '');
@@ -1951,6 +2326,8 @@ class _ChatScreenState extends State<ChatScreen> {
     final mine = listEquals(message.author, widget.identity.publicKey);
     final scheme = Theme.of(context).colorScheme;
     const radius = Radius.circular(16);
+    final authorHex = hex.encode(message.author);
+    final onFire = _isOnFire(authorHex, message.timestampMs);
     final bubble = Container(
       constraints: BoxConstraints(
         maxWidth: MediaQuery.of(context).size.width * 0.72,
@@ -1964,6 +2341,22 @@ class _ChatScreenState extends State<ChatScreen> {
           bottomLeft: mine ? radius : Radius.zero,
           bottomRight: mine ? Radius.zero : radius,
         ),
+        border: onFire
+            ? Border.all(color: Colors.orange, width: 2)
+            : null,
+        boxShadow: onFire
+            ? [
+                BoxShadow(
+                  color: Colors.deepOrange.withValues(alpha: 0.6),
+                  blurRadius: 12,
+                  spreadRadius: 1,
+                ),
+                BoxShadow(
+                  color: Colors.amber.withValues(alpha: 0.4),
+                  blurRadius: 6,
+                ),
+              ]
+            : null,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1972,7 +2365,9 @@ class _ChatScreenState extends State<ChatScreen> {
             Padding(
               padding: const EdgeInsets.only(bottom: 2),
               child: Text(
-                _displayName(message.author),
+                onFire
+                    ? '🔥 ${_displayName(message.author)}'
+                    : _displayName(message.author),
                 style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: _userColor(message.author),
                   fontWeight: FontWeight.w600,
@@ -2014,9 +2409,39 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _composer(BuildContext context, ChannelSession session) {
+  Widget _typingIndicator(ChannelSession session) {
+    final typers = _channels?.typingPeers[session.channelId] ?? const {};
+    if (typers.isEmpty) return const SizedBox.shrink();
+    final names = typers
+        .map((hex) => _displayName(Uint8List.fromList(
+              List.generate(hex.length ~/ 2,
+                  (i) => int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16)),
+            )))
+        .toList();
+    final text = names.length == 1
+        ? '${names[0]} is typing…'
+        : '${names.join(", ")} are typing…';
     return Padding(
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 12,
+          fontStyle: FontStyle.italic,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    );
+  }
+
+  Widget _composer(BuildContext context, ChannelSession session) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerLow,
+        border: Border(top: BorderSide(color: scheme.outlineVariant, width: 0.5)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
       child: Row(
         children: [
           IconButton(
@@ -2052,10 +2477,23 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: TextField(
               controller: _input,
-              onSubmitted: (_) => unawaited(_send()),
+              focusNode: _composerFocus,
+              onSubmitted: (_) {
+                unawaited(_send());
+                _composerFocus.requestFocus();
+              },
               decoration: InputDecoration(
                 hintText: 'Message ${_channelTitle(session)}',
-                border: const OutlineInputBorder(),
+                filled: true,
+                fillColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
               ),
             ),
           ),
@@ -2091,4 +2529,135 @@ String _time(int millis) {
   final t = DateTime.fromMillisecondsSinceEpoch(millis).toLocal();
   return '${t.hour.toString().padLeft(2, '0')}:'
       '${t.minute.toString().padLeft(2, '0')}';
+}
+
+/// Standalone contacts management page.
+class _ContactsPage extends StatefulWidget {
+  const _ContactsPage({
+    required this.contacts,
+    required this.groups,
+    required this.identity,
+    required this.onDm,
+    required this.onInvite,
+    required this.onRemove,
+    required this.onRename,
+  });
+
+  final ContactBook contacts;
+  final Map<String, GroupChannel> groups;
+  final Identity identity;
+  final Future<void> Function(String pubkeyHex) onDm;
+  final void Function(String pubkeyHex, String channelId) onInvite;
+  final Future<void> Function(String pubkeyHex) onRemove;
+  final Future<void> Function(String pubkeyHex) onRename;
+
+  @override
+  State<_ContactsPage> createState() => _ContactsPageState();
+}
+
+class _ContactsPageState extends State<_ContactsPage> {
+  @override
+  Widget build(BuildContext context) {
+    final entries = widget.contacts.entries();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Contacts')),
+      body: entries.isEmpty
+          ? const Center(
+              child: Text("No contacts yet — tap someone's name in a chat to add them."),
+            )
+          : ListView.builder(
+              itemCount: entries.length,
+              itemBuilder: (context, i) {
+                final pubkeyHex = entries.keys.elementAt(i);
+                final name = entries.values.elementAt(i);
+                return ListTile(
+                  leading: CircleAvatar(
+                    child: Text(name[0].toUpperCase()),
+                  ),
+                  title: Text(name),
+                  subtitle: Text(
+                    'hearth#${pubkeyHex.substring(0, 8)}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (action) => _onAction(action, pubkeyHex),
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'dm', child: Text('Direct message')),
+                      PopupMenuItem(value: 'invite', child: Text('Invite to channel')),
+                      PopupMenuItem(value: 'rename', child: Text('Rename')),
+                      PopupMenuItem(value: 'remove', child: Text('Remove')),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+
+  Future<void> _onAction(String action, String pubkeyHex) async {
+    switch (action) {
+      case 'dm':
+        await widget.onDm(pubkeyHex);
+        if (mounted) Navigator.pop(context);
+      case 'invite':
+        await _pickChannelAndInvite(pubkeyHex);
+      case 'rename':
+        await widget.onRename(pubkeyHex);
+        if (mounted) setState(() {});
+      case 'remove':
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Remove contact?'),
+            content: const Text('You can always add them again later.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Remove'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed == true) {
+          await widget.onRemove(pubkeyHex);
+          if (mounted) setState(() {});
+        }
+    }
+  }
+
+  Future<void> _pickChannelAndInvite(String pubkeyHex) async {
+    final groups = widget.groups;
+    if (groups.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No channels to invite to.'),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    final channelId = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Invite to which channel?'),
+            ),
+            for (final entry in groups.entries)
+              ListTile(
+                leading: const Icon(Icons.tag),
+                title: Text(entry.value.name),
+                onTap: () => Navigator.pop(context, entry.key),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (channelId != null) widget.onInvite(pubkeyHex, channelId);
+  }
 }

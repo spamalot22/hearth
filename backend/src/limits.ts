@@ -18,6 +18,14 @@ export const MAX_CHANNEL_MESSAGES = 5000;
 export const SEARCH_RATE_LIMIT = 30;
 export const SEARCH_RATE_WINDOW_MS = 60_000;
 
+/** Per-pubkey: max signal POSTs per window (ICE candidates come in bursts). */
+export const SIGNAL_RATE_LIMIT = 60;
+export const SIGNAL_RATE_WINDOW_MS = 10_000;
+
+/** Per-pubkey: max message POSTs per window. */
+export const MESSAGE_RATE_LIMIT = 30;
+export const MESSAGE_RATE_WINDOW_MS = 10_000;
+
 /**
  * A simple sliding-window rate limiter. Keyed (e.g. by pubkey, or a constant for a
  * relay-wide cap). `now` is passed in so it's deterministic to test. In-memory, so

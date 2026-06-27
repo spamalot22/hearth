@@ -394,8 +394,17 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
    communities? Web-of-trust? Decide before any public discovery exists.
 3. **Permission conflicts.** Two admins act contradictorily while offline — who
    wins? Leaning: one designated owner key whose actions always take precedence.
-4. **Bundle / application IDs.** Scaffolding left the default `com.example.*`;
-   set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.
+4. **Bundle / application IDs.** ~~Scaffolding left the default `com.example.*`;
+   set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.~~
+   Done — renamed to `com.hearth.app` (2026-06-27).
+5. **Channel ownership + kick (maybe).** The creator's pubkey rides in the invite
+   already; a "kick" could be a signed message from the creator that honest peers
+   enforce (drop the target from their mesh, refuse to gossip to them). The kicked
+   user still holds the old key (can read history), so a key rotation + re-invite
+   for remaining members is needed for true eviction. Alternatively, rotate the
+   channel key on kick and distribute the new key to everyone except the kicked
+   user. Ties into #3 (permission conflicts). Not urgent — small trusted groups
+   don't need it yet.
 
 ---
 
@@ -611,3 +620,87 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   relay**. So: **no libp2p, no coturn, no DHT**; the self-hosted tunnelled relay stays
   the accepted bootstrap node + relay-fallback. WebRTC stays behind the `FrameChannel`
   seam, so libp2p remains a clean future swap if that ever changes.
+- **2026-06-27** — **Relay offline courier + P2P connectivity hardening.** Wired the
+  existing `RelayTransport` (POST `/messages` + poll `/poll`) into every
+  `ChannelSession` as a fallback courier — messages now go to both P2P peers AND
+  the relay on send, and new sessions poll the relay for anything missed while
+  offline. The courier **pauses** when at least one P2P peer is connected (no wasted
+  polls in steady state) and **resumes** when the last peer drops. This fixes the
+  "both restart with relay down → messages don't flow" gap.
+- **2026-06-27** — **Peer-exchange over the data channel.** `_emitPeer` now
+  broadcasts `PeersControl` (our other connected peers) on every new connection;
+  `_handleControl` initiates connections to any listed peers we don't already have.
+  `SignalControl` carries signed offer/answer/ICE through the mesh (relayed
+  signalling), so new connections can form without touching the relay at all once
+  you hold a single live link. Together with the **candidate cache** (Hive-backed
+  `CandidateCache` storing known peer pubkeys per channel, TTL-based expiry at
+  7/14/60/90 days with staggered startup retries), reconnection is near-instant.
+- **2026-06-27** — **Cross-channel contacts-online discovery (Option B).**
+  `ContactsOnlineControl` broadcasts all currently-connected peers (across all
+  channels) to every connection when a new peer joins anywhere. Receivers check
+  if any listed pubkey is someone they want to reach and attempt connections.
+  Metadata trade-off accepted: a peer learns who you're connected to, but not
+  which channels or message content — similar to the relay's existing visibility.
+- **2026-06-27** — **Signed auto-update with P2P version enforcement.** A release
+  signing key (Ed25519, generated offline via `sign-release.ts keygen`) produces
+  signed manifests with a monotonic `seq` (downgrade protection). The relay serves
+  the manifest at `GET /version` (persisted to disk, survives restarts); CI pushes
+  it via `POST /version` (authed by `RELEASE_SECRET`). Clients verify the signature
+  against a **hardcoded release public key** at startup (forced gate — blocks the
+  app if an update is detected). **P2P version enforcement:** on peer connect, each
+  side sends a `VersionControl` carrying the signed manifest; the receiver verifies
+  independently and triggers the gate if valid + newer. Valid manifests propagate
+  epidemically — a single peer seeing the relay spreads the update to the whole mesh.
+  Seq is only persisted once you're *running* the matching version (not on detection),
+  so missed updates re-trigger on next check.
+- **2026-06-27** — **Authenticated signal mailbox reads (Option C).** `POST /announce`
+  now accepts an Ed25519 signature over `"announce|channel|pubkey|ts"` (timestamp
+  within 30s). A valid signed announce returns a short-lived **token** (random hex,
+  60s TTL) that authenticates subsequent `GET /signal` reads. Unauthenticated
+  announces still work (backward compat) but receive no token. This prevents
+  strangers from polling your signal mailbox to observe ICE candidates / IPs.
+- **2026-06-27** — **Per-pubkey rate limiting.** Signal POST: 60 per 10s per sender.
+  Message POST: 30 per 10s per author. Prevents a flood from evicting legitimate
+  entries from bounded mailboxes/channel stores.
+- **2026-06-27** — **UX improvements.** Unread badges per channel (Hive-backed
+  `UnreadStore`, marks-read on view, zero on initial load). Background-channel
+  notifications (SnackBar). Auto-scroll only when near bottom (not when reading
+  history). Composer focus retention (FocusNode survives send). Contacts management
+  page (rename, remove, DM, invite-to-channel from a single view). Message slide-in
+  animation. "On fire" effect (orange glow + 🔥) when someone sends 4+ msgs in 5s.
+  Polished composer (rounded, filled). Version display in drawer header.
+- **2026-06-27** — **Bundle ID renamed** `com.example.chat_app` → `com.hearth.app`
+  across Android, iOS, macOS, Linux. Dart package `chat_app` → `hearth`. All
+  platform configs, Kotlin source, and test imports updated.
+- **2026-06-27** — **Windows mic fix.** `getUserMedia` now enumerates audio inputs
+  and targets the first by `deviceId` (with `autoGainControl` + `noiseSuppression`),
+  then force-enables tracks — fixing the silent-mic issue on Windows desktop where
+  the native WebRTC layer picks a non-functional default device.
+- **2026-06-27** — **Relay tunnel for symmetric-NAT pairs.** When ICE fails 3
+  times consecutively, the mesh opens a `RelayTunnel` — a `FrameChannel` that
+  POST/polls opaque frame text through `/tunnel` on the relay. Same E2E
+  guarantees (the relay sees ciphertext), just routed instead of direct. The
+  relay pairs frames by `from|to` with a bounded buffer (100 entries, 30s TTL).
+  Tunnels are tracked and closed if a direct WebRTC connection later succeeds.
+- **2026-06-27** — **Exponential mesh retry backoff.** Connection failures now
+  back off exponentially: 10s → 20s → 40s → 80s → 160s → 300s (5min cap).
+  Resets on successful connection. Prevents a flapping peer from thrashing the
+  announce/signal loop.
+- **2026-06-27** — **Security hardening: mandatory token auth on all relay
+  endpoints.** GET `/signal`, POST `/signal`, POST `/tunnel`, GET `/tunnel` all
+  now **require** the auth token from a signed announce (403 without). Tokens
+  are short-lived (60s), issued only on Ed25519-verified announces, and bound to
+  a pubkey — so an attacker can't read mailboxes, inject garbage signals, or
+  drain tunnel buffers without first proving identity. Per-pubkey rate limiting
+  (60 signals/10s, 30 messages/10s) prevents flooding even by authenticated
+  peers.
+- **2026-06-27** — **ContactsOnline hardened.** Incoming `ContactsOnlineControl`
+  is capped at 20 entries and filtered to peers we recognise from our candidate
+  cache — prevents a malicious peer from triggering mass connection attempts to
+  arbitrary pubkeys.
+- **2026-06-27** — **Typing indicators.** `TypingControl` frame (sent on input
+  change, cleared after 3s idle or on send) drives a "X is typing…" line below
+  the message list. Lightweight — rides on the existing mesh control channel.
+- **2026-06-27** — **Deafen reflects on mute.** `isMuted` getter now returns
+  true when deafened, so the mute button's visual state matches the mic's
+  actual state (Discord parity — undeafen restores prior mute state).

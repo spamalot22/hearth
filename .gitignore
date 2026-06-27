@@ -16,6 +16,7 @@ build/
 node_modules/
 dist/
 *.log
+backend/data/
 
 # Env / secrets — never commit these
 .env

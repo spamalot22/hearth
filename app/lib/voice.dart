@@ -40,7 +40,7 @@ class VoiceSession {
   bool _deafened = false;
   bool _closed = false;
 
-  bool get isMuted => _muted;
+  bool get isMuted => _muted || _deafened;
   bool get isDeafened => _deafened;
 
   /// A peer's playback volume (0..1) — defaults to full.
@@ -70,10 +70,31 @@ class VoiceSession {
     required Uri relayUrl,
     required void Function() onChange,
   }) async {
+    // On Windows desktop, plain `audio: true` can pick a non-functional
+    // default. Enumerate devices and explicitly target the first audioinput so
+    // the native WebRTC layer opens the correct capture device.
+    Object audioConstraint = true;
+    try {
+      final devices = await navigator.mediaDevices.enumerateDevices();
+      final mics = devices.where((d) => d.kind == 'audioinput').toList();
+      if (mics.isNotEmpty && mics.first.deviceId.isNotEmpty) {
+        audioConstraint = {
+          'deviceId': mics.first.deviceId,
+          'autoGainControl': true,
+          'noiseSuppression': true,
+        };
+      }
+    } catch (_) {
+      // Fall through with default constraint.
+    }
     final stream = await navigator.mediaDevices.getUserMedia({
-      'audio': true,
+      'audio': audioConstraint,
       'video': false,
     });
+    // Ensure tracks are enabled — Windows can return them disabled.
+    for (final track in stream.getAudioTracks()) {
+      track.enabled = true;
+    }
     late final VoiceSession session;
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,

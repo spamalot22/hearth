@@ -1,6 +1,6 @@
-import 'package:chat_app/gif_search.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/gif_search.dart';
 
 void main() {
   // Regression: searching used to call `setState(() => _results = _search(...))`,

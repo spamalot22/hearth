@@ -59,10 +59,15 @@ describe('signalling routes', () => {
   }
 
   it('announce -> peers -> signal round-trips', async () => {
-    const app = createRelay();
+    const hub = new SignalHub();
+    const app = createRelay(undefined, hub);
 
     await postJson(app, '/announce', { channel: 'general', pubkey: 'alice' });
     await postJson(app, '/announce', { channel: 'general', pubkey: 'bob' });
+
+    // Issue tokens directly (in production, signed announces return them).
+    const aliceToken = hub.issueToken('alice', Date.now());
+    const bobToken = hub.issueToken('bob', Date.now());
 
     const peersRes = await app.request('/peers?channel=general&pubkey=alice');
     const peers = (await peersRes.json()) as { peers: string[] };
@@ -74,9 +79,12 @@ describe('signalling routes', () => {
       from: 'alice',
       kind: 'offer',
       data: { sdp: 'x' },
+      token: aliceToken,
     });
 
-    const sigRes = await app.request('/signal?channel=general&for=bob&since=0');
+    const sigRes = await app.request(
+      `/signal?channel=general&for=bob&since=0&token=${bobToken}`,
+    );
     const sig = (await sigRes.json()) as {
       signals: { from: string; kind: string }[];
       seq: number;

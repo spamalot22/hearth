@@ -1,7 +1,7 @@
 import 'dart:convert';
 
-import 'package:chat_app/content.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/content.dart';
 
 void main() {
   group('content envelope', () {

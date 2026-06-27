@@ -6,9 +6,12 @@ list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   flutter_secure_storage_windows
   flutter_webrtc
+  screen_retriever_windows
+  window_manager
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
+  flutter_local_notifications_windows
   jni
 )
 

@@ -1,12 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import 'candidate_cache.dart';
 import 'mesh_control.dart';
+import 'relay_tunnel.dart';
 import 'signal_auth.dart';
+import 'update_checker.dart';
 
 /// A peer-to-peer WebRTC mesh that surfaces each connected peer to the gossip
 /// layer as a [FrameChannel].
@@ -31,6 +36,7 @@ class WebRtcMesh {
     this.onRemoteStream,
     this.onPeerLeft,
     this.onControl,
+    this.candidateCache,
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
@@ -71,6 +77,13 @@ class WebRtcMesh {
   /// signalling) over the data channel. Null until track A wires a handler.
   final void Function(String peerHex, MeshControl control)? onControl;
 
+  /// Optional persistent cache of known peers — enables instant reconnect.
+  final CandidateCache? candidateCache;
+
+  /// The signed release manifest to send to peers for version enforcement.
+  /// Set from the last-verified manifest (relay or peer-provided).
+  Map<String, Object?>? versionManifest;
+
   /// Our own public key (hex) — our peer id in the mesh.
   late final String selfPubkeyHex = identity.publicKeyHex;
 
@@ -91,6 +104,8 @@ class WebRtcMesh {
   // Per-peer reconnect backoff: after a failure, don't re-offer to a peer until
   // this time, so a flapping peer doesn't thrash the announce loop.
   final Map<String, DateTime> _backoffUntil = {};
+  final Map<String, int> _backoffFailures = {}; // consecutive failure count
+  final Map<String, RelayTunnel> _tunnels = {}; // peerHex -> active tunnel
 
   late final StreamController<FrameChannel> _peerConnected =
       StreamController<FrameChannel>.broadcast(onListen: _start);
@@ -109,6 +124,15 @@ class WebRtcMesh {
   /// Peers we currently hold a connection (or attempt) for.
   Iterable<String> get peers => _links.keys;
 
+  /// Returns the link for a specific peer (for sending control messages).
+  void sendControlTo(String peerHex, MeshControl control) {
+    final link = _links[peerHex];
+    if (link != null && link.open) link.sendControl(control);
+  }
+
+  /// Attempts to connect to a peer we've learned about (e.g. via contacts-online).
+  void maybeInitiateVia(String peerHex) => _maybeInitiate(peerHex);
+
   /// Connected peers' underlying connections (peerHex → pc) — for reading voice
   /// audio-level stats.
   Map<String, RTCPeerConnection> get connections => {
@@ -119,6 +143,15 @@ class WebRtcMesh {
   void _start() {
     if (_started) return;
     _started = true;
+    // Try cached peers with staggered delays (before waiting for relay announce).
+    final cached = candidateCache?.peersToTry(channel) ?? [];
+    for (final (:peer, :delay) in cached) {
+      if (delay == Duration.zero) {
+        _maybeInitiate(peer);
+      } else {
+        Future.delayed(delay, () => _maybeInitiate(peer));
+      }
+    }
     unawaited(_announce());
     _scheduleAnnounce();
     _scheduleSignalPoll();
@@ -159,18 +192,31 @@ class WebRtcMesh {
   /// We hold at least one open connection.
   bool get _connected => _links.values.any((link) => link.open);
 
+  String? _authToken;
+
   /// Announce presence, then start offering to any peer we don't yet have.
   Future<void> _announce() async {
     if (_announcing || _closed) return;
     _announcing = true;
     try {
+      final ts = DateTime.now().toUtc().millisecondsSinceEpoch;
+      final sigBytes = await identity.sign(
+        utf8.encode('announce|$channel|$selfPubkeyHex|$ts'),
+      );
+      final sig = hex.encode(sigBytes);
       final res = await _client.post(
         baseUrl.replace(path: '/announce'),
         headers: const {'content-type': 'application/json'},
-        body: jsonEncode({'channel': channel, 'pubkey': selfPubkeyHex}),
+        body: jsonEncode({
+          'channel': channel,
+          'pubkey': selfPubkeyHex,
+          'ts': ts,
+          'sig': sig,
+        }),
       );
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _authToken = body['token'] as String?;
       for (final peer in (body['peers'] as List).cast<String>()) {
         _maybeInitiate(peer);
       }
@@ -186,15 +232,14 @@ class WebRtcMesh {
     if (_pollingSignals || _closed) return;
     _pollingSignals = true;
     try {
+      final params = <String, String>{
+        'channel': channel,
+        'for': selfPubkeyHex,
+        'since': '$_signalSince',
+      };
+      if (_authToken != null) params['token'] = _authToken!;
       final res = await _client.get(
-        baseUrl.replace(
-          path: '/signal',
-          queryParameters: {
-            'channel': channel,
-            'for': selfPubkeyHex,
-            'since': '$_signalSince',
-          },
-        ),
+        baseUrl.replace(path: '/signal', queryParameters: params),
       );
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -247,14 +292,25 @@ class WebRtcMesh {
       iceServers: _iceServers,
       localStream: localStream,
       onRemoteStream: onRemoteStream,
-      onControl: onControl,
+      onControl: (peer, control) {
+        _handleControl(peer, control);
+        onControl?.call(peer, control);
+      },
       onSignal: (kind, data) => _sendSignal(peerHex, kind, data),
       onOpen: _emitPeer,
       onClosed: () {
         _links.remove(peerHex);
+        final failures = (_backoffFailures[peerHex] ?? 0) + 1;
+        _backoffFailures[peerHex] = failures;
+        // Exponential: 10s, 20s, 40s, 80s, 160s, capped at 300s (5min).
+        final delaySec = min(10 * (1 << (failures - 1)), 300);
         _backoffUntil[peerHex] = DateTime.now().add(
-          const Duration(seconds: 10),
+          Duration(seconds: delaySec),
         );
+        // After 3 consecutive failures, try the relay tunnel (symmetric NAT).
+        if (failures == 3 && !_closed) {
+          _openTunnel(peerHex);
+        }
         onPeerLeft?.call(peerHex);
       },
     );
@@ -265,7 +321,68 @@ class WebRtcMesh {
 
   void _emitPeer(_PeerLink link) {
     _backoffUntil.remove(link.peerHex); // connected — reset its backoff
+    _backoffFailures.remove(link.peerHex);
+    // Close any relay tunnel for this peer — direct connection wins.
+    final tunnel = _tunnels.remove(link.peerHex);
+    if (tunnel != null) unawaited(tunnel.close());
     if (!_closed && !_peerConnected.isClosed) _peerConnected.add(link);
+    // Persist this peer so next startup can try them immediately.
+    unawaited(candidateCache?.touch(channel, link.peerHex) ?? Future.value());
+    // Peer-exchange: tell the new peer about everyone else we're connected to.
+    final otherPeers = _links.entries
+        .where((e) => e.key != link.peerHex && e.value.open)
+        .map((e) => e.key)
+        .toList();
+    if (otherPeers.isNotEmpty) link.sendControl(PeersControl(otherPeers));
+    // Version enforcement: share our version + the signed manifest.
+    final manifest = versionManifest;
+    if (manifest != null) {
+      link.sendControl(VersionControl(
+        version: appVersion,
+        manifest: manifest,
+      ));
+    }
+  }
+
+  /// Handles mesh control messages (peer-exchange + relayed signalling).
+  void _handleControl(String fromHex, MeshControl control) {
+    switch (control) {
+      case PeersControl(:final peers):
+        for (final peerHex in peers) {
+          _maybeInitiate(peerHex);
+        }
+      case SignalControl(:final to, :final from, :final kind, :final data):
+        if (to == selfPubkeyHex) {
+          // Addressed to us — handle as if it came from the relay.
+          unawaited(_handleSignal({'from': from, 'kind': kind, 'data': data}));
+        } else {
+          // Not for us — forward to the target if we have a link.
+          _links[to]?.sendControl(control);
+        }
+      case ContactsOnlineControl():
+        break; // Handled by the external onControl callback (app layer).
+      case VersionControl():
+        break; // Handled by the external onControl callback (app layer).
+      case TypingControl():
+        break; // Handled by the external onControl callback (app layer).
+    }
+  }
+
+  /// Opens a relay tunnel as a fallback when ICE fails — symmetric NAT on both
+  /// sides can't go direct, so the relay forwards opaque ciphertext.
+  void _openTunnel(String peerHex) {
+    if (_tunnels.containsKey(peerHex)) return; // already tunnelling
+    final tunnel = RelayTunnel(
+      baseUrl: baseUrl,
+      selfPubkeyHex: selfPubkeyHex,
+      peerPubkeyHex: peerHex,
+      authToken: _authToken,
+    );
+    _tunnels[peerHex] = tunnel;
+    tunnel.start();
+    if (!_closed && !_peerConnected.isClosed) {
+      _peerConnected.add(tunnel);
+    }
   }
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
@@ -286,6 +403,7 @@ class WebRtcMesh {
           'from': selfPubkeyHex,
           'kind': kind,
           'data': signed,
+          if (_authToken != null) 'token': _authToken,
         }),
       );
     } catch (_) {
@@ -301,6 +419,10 @@ class WebRtcMesh {
       await link.dispose();
     }
     _links.clear();
+    for (final tunnel in _tunnels.values) {
+      await tunnel.close();
+    }
+    _tunnels.clear();
     _client.close();
     if (!_peerConnected.isClosed) await _peerConnected.close();
   }
