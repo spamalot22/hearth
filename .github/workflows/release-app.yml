@@ -38,7 +38,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build apk --release --dart-define=APP_VERSION=${{ github.ref_name }}
+          flutter build apk --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
       - run: mv app/build/app/outputs/flutter-apk/app-release.apk hearth-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -58,7 +58,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build windows --release --dart-define=APP_VERSION=${{ github.ref_name }}
+          flutter build windows --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
       - name: Zip
         run: Compress-Archive -Path app/build/windows/x64/runner/Release/* -DestinationPath hearth-windows.zip
       - uses: actions/upload-artifact@v4
@@ -79,7 +79,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }}
+          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
       - name: Zip
         run: cd app/build/web && zip -r "$GITHUB_WORKSPACE/hearth-web.zip" .
       - uses: actions/upload-artifact@v4
@@ -103,3 +103,47 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Sign a manifest of the built assets (SHA-256 + Ed25519) and publish it to the
+  # relay so clients see the new version. No-ops gracefully when the signing key
+  # or relay URL isn't configured, and never fails the release if the relay's down.
+  publish-manifest:
+    needs: [android, windows, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+      - name: Install backend deps
+        working-directory: backend
+        run: pnpm install --frozen-lockfile
+      - name: Sign + publish manifest
+        working-directory: backend
+        env:
+          RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_PRIVATE_KEY }}
+          RELEASE_SECRET: ${{ secrets.RELEASE_SECRET }}
+          RELAY_URL: ${{ vars.RELAY_URL }}
+        run: |
+          if [ -z "$RELEASE_PRIVATE_KEY" ] || [ -z "$RELAY_URL" ]; then
+            echo "RELEASE_PRIVATE_KEY / RELAY_URL not set — skipping manifest publish."
+            exit 0
+          fi
+          SEQ=$(date +%s)
+          pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
+            android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip > manifest.json
+          echo "Publishing manifest (seq $SEQ) to $RELAY_URL"
+          curl -fsS -X POST "$RELAY_URL/version" \
+            -H "authorization: Bearer $RELEASE_SECRET" \
+            -H "content-type: application/json" \
+            --data @manifest.json \
+            || echo "::warning::manifest publish failed (relay down?) — publish it manually when the relay is up"
