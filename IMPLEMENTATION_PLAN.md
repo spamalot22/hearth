@@ -433,7 +433,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - **2026-06-20** — Project named **Hearth** (personal, unlikely to be monetised →
   accepted low trademark risk without formal clearance; it's a common word, so run
   free UK IPO / app-store checks if it ever goes serious). Git initialised on
-  `main`; repo-local identity `spamalot22` + GitHub noreply (global work email
+  `main`; repo-local identity `spamalot22` + GitHub noreply (work email
   untouched). Internal package names stay generic (`core` / `app`).
 - **2026-06-20** — Quality tooling in place: **strict-curated lints**
   (`analysis_options.base.yaml` — strict-casts/inference/raw-types + curated
@@ -447,7 +447,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   interop — now **confirmed** (`@ipld/dag-cbor` reproduces core's canonical signed
   bytes byte-for-byte; Ed25519 verifies cross-language). Node tooling is **pnpm**,
   with the public npmjs registry pinned in `backend/.npmrc` (the global npm
-  registry is work's and must not be used here).
+  registry is a work one and must not be used here).
 - **2026-06-21** *(superseded → everything-encrypted-by-default; see below)* —
   **Encryption scope:** group channels plaintext (signed) by default —
   moderatable/searchable/bot-friendly — with a per-channel **toggle to E2E**; DMs

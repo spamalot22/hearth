@@ -337,10 +337,7 @@ class WebRtcMesh {
     // Version enforcement: share our version + the signed manifest.
     final manifest = versionManifest;
     if (manifest != null) {
-      link.sendControl(VersionControl(
-        version: appVersion,
-        manifest: manifest,
-      ));
+      link.sendControl(VersionControl(version: appVersion, manifest: manifest));
     }
   }
 

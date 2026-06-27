@@ -97,7 +97,8 @@ class SignalControl extends MeshControl {
 class ContactsOnlineControl extends MeshControl {
   const ContactsOnlineControl(this.peers);
 
-  final List<String> peers; // pubkey hex of currently-connected peers (all channels)
+  final List<String>
+  peers; // pubkey hex of currently-connected peers (all channels)
 
   @override
   Map<String, Object?> toJson() => {'t': 'contacts_online', 'peers': peers};

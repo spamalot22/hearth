@@ -93,13 +93,13 @@ class _NetworkStatusState extends State<NetworkStatus>
               label: widget.checkingRelay
                   ? 'checking…'
                   : relayOk
-                      ? 'relay up'
-                      : 'relay down',
+                  ? 'relay up'
+                  : 'relay down',
               color: widget.checkingRelay
                   ? Colors.grey
                   : relayOk
-                      ? Colors.green
-                      : Colors.red,
+                  ? Colors.green
+                  : Colors.red,
             ),
           ],
         ),
@@ -270,7 +270,10 @@ class _MeshPainter extends CustomPainter {
       final extra = TextPainter(
         text: TextSpan(
           text: '+${peerCount - 6}',
-          style: TextStyle(color: nodeColor.withValues(alpha: 0.6), fontSize: 9),
+          style: TextStyle(
+            color: nodeColor.withValues(alpha: 0.6),
+            fontSize: 9,
+          ),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
@@ -280,5 +283,7 @@ class _MeshPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_MeshPainter old) =>
-      old.pulse != pulse || old.peerCount != peerCount || old.relayUp != relayUp;
+      old.pulse != pulse ||
+      old.peerCount != peerCount ||
+      old.relayUp != relayUp;
 }
