@@ -26,6 +26,44 @@ also works; publishing creates and pushes the tag.)
   `hearth-windows.zip`, `hearth-web.zip`. The APK is debug-signed — fine to
   sideload; add a release signing config before targeting the Play Store.
 
+## Auto-update (optional — dormant until armed)
+
+Clients can check the relay for a signed release and install it in-app (Android
+one-tap; Windows self-replace + relaunch). It's **off** until a signing key is
+baked in — without `RELEASE_PUBLIC_KEY` the client never checks, blocks, or
+updates.
+
+To arm it:
+
+1. **Generate a release keypair** (once):
+   ```sh
+   cd backend && pnpm exec tsx src/sign-release.ts keygen
+   ```
+   Keep `privateKey` secret; `publicKey` is safe to expose.
+2. **GitHub → Settings → Secrets and variables → Actions:**
+   - Variable `RELEASE_PUBLIC_KEY` = the public key (baked into every build).
+   - Variable `RELAY_URL` = the relay's public URL (e.g. the Tailscale Funnel one).
+   - Secret `RELEASE_PRIVATE_KEY` = the private key (CI signs the manifest with it).
+   - Secret `RELEASE_SECRET` = any random string (authorises `POST /version`).
+3. **On the relay** (`backend/.env`): the same `RELEASE_SECRET`,
+   `GITHUB_REPO=spamalot22/hearth`, and `GITHUB_TOKEN` = a **read-only** GitHub
+   token (fine-grained, Contents: read). The relay proxies the private release
+   assets to clients with this token — it never leaves the relay.
+
+Once armed, each tag builds key-baked clients, signs a manifest of the assets, and
+POSTs it to the relay; clients on an older version then see an **Install** button.
+A released build that can't reach the relay blocks with "connect to a relay" — the
+deliberate private-phase kill-switch.
+
+### Android updates need a *stable* signing key
+
+CI builds are **debug-signed with an ephemeral key** (regenerated each run), so an
+auto-update APK won't install over a previous one — Android rejects it
+(*signatures do not match*). For Android auto-update to work, add a fixed keystore
+(committed, or a CI secret) and a `signingConfig` in
+`app/android/app/build.gradle.kts` so every build shares one key. Until then an
+Android update is uninstall-then-reinstall. Windows + web are unaffected.
+
 ## Notes
 
 - The `release-app` job ships **whatever platforms build** — one OS failing won't

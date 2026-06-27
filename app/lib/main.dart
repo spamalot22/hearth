@@ -1970,21 +1970,6 @@ class _ChatScreenState extends State<ChatScreen> {
           padding: EdgeInsets.zero,
           children: [
             _brandHeader(),
-            if (_updateInfo != null)
-              MaterialBanner(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 8,
-                ),
-                leading: const Icon(Icons.system_update, color: Colors.amber),
-                content: Text('Update available: v${_updateInfo!.version}'),
-                actions: [
-                  TextButton(
-                    onPressed: () => setState(() => _updateInfo = null),
-                    child: const Text('Dismiss'),
-                  ),
-                ],
-              ),
             _drawerHeader('Channels'),
             for (final s in groups)
               ListTile(
