@@ -187,6 +187,16 @@ IMPLEMENTATION_PLAN.md   Living plan, architecture decisions log, roadmap.
 - **Quality:** `flutter analyze` + Dart/TS tests (`vitest`), `lefthook` pre-commit
   (format + analyze + typecheck).
 
+## License
+
+Hearth is licensed under the **GNU Affero General Public License v3.0**
+(AGPL-3.0) — see [`LICENSE`](LICENSE). You're free to use, study, modify, and
+share it; but any modified version you distribute **or run as a network service**
+must make its source available under the same terms. (It's the license Signal
+uses — it keeps Hearth, and any hosted fork, open.)
+
+© 2026 the Hearth contributors.
+
 ---
 
 ## Getting started
