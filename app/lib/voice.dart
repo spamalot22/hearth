@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:core/core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'mesh_control.dart';
@@ -76,27 +77,30 @@ class VoiceSession {
     // On Windows desktop, plain `audio: true` can pick a non-functional
     // default. Enumerate devices and explicitly target the first audioinput so
     // the native WebRTC layer opens the correct capture device.
+    // On mobile, the OS handles device routing — skip the probe.
     Object audioConstraint = true;
-    try {
-      // Trigger permission grant first (Windows needs this for labels).
-      final probe = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
-        'video': false,
-      });
-      for (final t in probe.getTracks()) {
-        await t.stop();
-      }
-      await probe.dispose();
-      final devices = await navigator.mediaDevices.enumerateDevices();
-      final mics = devices.where((d) => d.kind == 'audioinput').toList();
-      if (mics.isNotEmpty && mics.first.deviceId.isNotEmpty) {
-        audioConstraint = {
-          'deviceId': {'exact': mics.first.deviceId},
-          'autoGainControl': true,
-          'noiseSuppression': true,
-          'echoCancellation': true,
-          if (enhancedNoiseSuppression) 'googNoiseSuppression': true,
-          if (enhancedNoiseSuppression) 'googHighpassFilter': true,
+    if (defaultTargetPlatform != TargetPlatform.android &&
+        defaultTargetPlatform != TargetPlatform.iOS) {
+      try {
+        // Trigger permission grant first (Windows needs this for labels).
+        final probe = await navigator.mediaDevices.getUserMedia({
+          'audio': true,
+          'video': false,
+        });
+        for (final t in probe.getTracks()) {
+          await t.stop();
+        }
+        await probe.dispose();
+        final devices = await navigator.mediaDevices.enumerateDevices();
+        final mics = devices.where((d) => d.kind == 'audioinput').toList();
+        if (mics.isNotEmpty && mics.first.deviceId.isNotEmpty) {
+          audioConstraint = {
+            'deviceId': {'exact': mics.first.deviceId},
+            'autoGainControl': true,
+            'noiseSuppression': true,
+            'echoCancellation': true,
+            if (enhancedNoiseSuppression) 'googNoiseSuppression': true,
+            if (enhancedNoiseSuppression) 'googHighpassFilter': true,
         };
       } else if (enhancedNoiseSuppression) {
         audioConstraint = {
@@ -107,8 +111,15 @@ class VoiceSession {
           'googHighpassFilter': true,
         };
       }
-    } catch (_) {
-      // Fall through with default constraint.
+      } catch (_) {
+        // Fall through with default constraint.
+      }
+    } else if (enhancedNoiseSuppression) {
+      audioConstraint = {
+        'autoGainControl': true,
+        'noiseSuppression': true,
+        'echoCancellation': true,
+      };
     }
     MediaStream? stream;
     // Try the explicit device first; fall back to unconstrained if it fails.
