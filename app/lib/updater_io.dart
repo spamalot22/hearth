@@ -90,6 +90,12 @@ Future<void> _install(String path) async {
       // Hands the APK to the system installer (needs REQUEST_INSTALL_PACKAGES +
       // the user's "install unknown apps" grant for Hearth).
       await OpenFilex.open(path);
+      // Clean up after a short delay (the system installer reads the file async).
+      Future.delayed(const Duration(minutes: 2), () {
+        try {
+          File(path).deleteSync();
+        } catch (_) {}
+      });
     case TargetPlatform.windows:
       await _installWindows(path);
     default:
