@@ -63,8 +63,9 @@ class InferenceBot {
     try {
       final file = File(path);
       final size = await file.length();
-      if (size < 1024 * 1024)
+      if (size < 1024 * 1024) {
         return null; // < 1MB is definitely not a valid model
+      }
       final raf = await file.open();
       final magic = await raf.read(4);
       await raf.close();

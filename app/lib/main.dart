@@ -638,8 +638,9 @@ class _ChatScreenState extends State<ChatScreen> {
             })
             .catchError((Object e) {
               // Model error serving a peer's request — log but don't crash.
-              if (mounted)
+              if (mounted) {
                 _setError('AI model error while serving request: $e');
+              }
             }),
       );
     } else if (control is InferenceResponse) {
