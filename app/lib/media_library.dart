@@ -62,4 +62,7 @@ class MediaLibrary {
     }
     return items;
   }
+
+  /// All blob hashes in the library (for prune-protection).
+  Set<String> allHashes() => _box.keys.cast<String>().toSet();
 }

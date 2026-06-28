@@ -514,6 +514,11 @@ class _ChatScreenState extends State<ChatScreen> {
       _library = library;
       _profile = profile;
       _myName = profile?.name;
+      // Auto-prune old blobs (> 30 days, except bookmarked media).
+      if (blobStore is HiveBlobStore && library != null) {
+        final keep = library.allHashes();
+        unawaited(blobStore.prune(keep: keep));
+      }
       _player = widget.autoPoll ? AudioPlayer() : null;
       _channels = channels;
     });
