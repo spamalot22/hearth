@@ -49,7 +49,7 @@ import 'voice.dart';
 import 'youtube_share.dart';
 
 /// Relay endpoint for local dev (signalling only).
-final Uri kRelayUrl = Uri.parse('http://localhost:8787');
+final Uri kRelayUrl = Uri.parse('https://hearth-relay.tail62d608.ts.net');
 
 /// Held for process lifetime to enforce single-instance.
 // ignore: unused_element
