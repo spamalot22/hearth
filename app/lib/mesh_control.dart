@@ -238,7 +238,11 @@ class InferenceRequest extends MeshControl {
   final String prompt;
 
   @override
-  Map<String, Object?> toJson() => {'t': 'infer_req', 'id': id, 'prompt': prompt};
+  Map<String, Object?> toJson() => {
+    't': 'infer_req',
+    'id': id,
+    'prompt': prompt,
+  };
 }
 
 /// "Here's the LLM response" — sent back to the requester.

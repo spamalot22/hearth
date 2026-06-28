@@ -139,11 +139,11 @@ Future<String?> pickEmoji(BuildContext context, {String? title}) async {
                 InkWell(
                   onTap: () => Navigator.pop(context, emoji),
                   child: Center(
-                child: Text(emoji, style: const TextStyle(fontSize: 24)),
-              ),
-            ),
-        ],
-      ),
+                    child: Text(emoji, style: const TextStyle(fontSize: 24)),
+                  ),
+                ),
+            ],
+          ),
         ],
       ),
     ),

@@ -119,7 +119,8 @@ void main() async {
     final stateFile = File(
       '${(await getApplicationDocumentsDirectory()).path}/.hearth.window',
     );
-    if (stateFile.existsSync() && stateFile.readAsStringSync().contains('max')) {
+    if (stateFile.existsSync() &&
+        stateFile.readAsStringSync().contains('max')) {
       await windowManager.maximize();
     }
     windowManager.addListener(_HearthWindowListener(stateFile));
@@ -201,11 +202,15 @@ Future<void> _initSystemTray() async {
   }
   await tray.setIcon(iconPath);
   await tray.setToolTip('Hearth');
-  await tray.setContextMenu(Menu(items: [
-    MenuItem(key: 'show', label: 'Show'),
-    MenuItem.separator(),
-    MenuItem(key: 'quit', label: 'Quit'),
-  ]));
+  await tray.setContextMenu(
+    Menu(
+      items: [
+        MenuItem(key: 'show', label: 'Show'),
+        MenuItem.separator(),
+        MenuItem(key: 'quit', label: 'Quit'),
+      ],
+    ),
+  );
   tray.addListener(_HearthTrayListener());
 }
 
@@ -414,6 +419,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted) setState(() => _error = null);
     });
   }
+
   UpdateInfo? _updateInfo;
   bool _relayBlocked = false; // released build can't reach the relay to verify
   bool _checkingBlock = false;
@@ -575,44 +581,67 @@ class _ChatScreenState extends State<ChatScreen> {
     session.broadcast(InferenceRequest(id: id, prompt: prompt));
     // Also try locally if we have a model.
     if (_bot != null) {
-      unawaited(_bot!.generate(prompt).then((text) {
-        if (text != null && !completer.isCompleted) {
-          completer.complete(text);
-        }
-      }).catchError((Object e) {
-        if (mounted) _setError('AI model error: $e');
-      }));
+      unawaited(
+        _bot!
+            .generate(prompt)
+            .then((text) {
+              if (text != null && !completer.isCompleted) {
+                completer.complete(text);
+              }
+            })
+            .catchError((Object e) {
+              if (mounted) _setError('AI model error: $e');
+            }),
+      );
     }
     // Timeout after 60s.
-    completer.future.timeout(
-      const Duration(seconds: 60),
-      onTimeout: () => '',
-    ).then((text) {
-      _pendingInference.remove(id);
-      if (text != null && text.isNotEmpty && mounted) {
-        unawaited(_publishTo(session, TextContent('🤖 $text')));
-      } else if (mounted) {
-        _setError('No AI peer responded (is anyone running a model?)');
-      }
-    });
+    completer.future
+        .timeout(const Duration(seconds: 60), onTimeout: () => '')
+        .then((text) {
+          _pendingInference.remove(id);
+          if (text != null && text.isNotEmpty && mounted) {
+            unawaited(_publishTo(session, TextContent('🤖 $text')));
+          } else if (mounted) {
+            _setError('No AI peer responded (is anyone running a model?)');
+          }
+        });
   }
 
-  /// Handles incoming inference controls from peers.
-  void _handleInference(String fromHex, MeshControl control) {
+  // Per-peer cooldown so one peer can't peg our CPU with back-to-back requests.
+  final Map<String, DateTime> _inferCooldown = {};
+
+  /// Handles incoming inference controls from a peer in [channelId].
+  void _handleInference(String fromHex, String channelId, MeshControl control) {
     if (control is InferenceRequest) {
       // A peer wants inference — respond if we have a model and compute is on.
       final bot = _bot;
       if (bot == null || bot.busy) return;
-      unawaited(bot.generate(control.prompt).then((text) {
-        if (text == null || text.isEmpty) return;
-        // Respond on whichever session the request came from.
-        for (final s in _channels?.sessions ?? const <ChannelSession>[]) {
-          s.broadcast(InferenceResponse(id: control.id, text: text));
-        }
-      }).catchError((Object e) {
-        // Model error serving a peer's request — log but don't crash.
-        if (mounted) _setError('AI model error while serving request: $e');
-      }));
+      final now = DateTime.now();
+      final last = _inferCooldown[fromHex];
+      if (last != null && now.difference(last) < const Duration(seconds: 10)) {
+        return; // too soon since this peer's last request
+      }
+      _inferCooldown[fromHex] = now;
+      unawaited(
+        bot
+            .generate(control.prompt)
+            .then((text) {
+              if (text == null || text.isEmpty) return;
+              // Respond only on the channel the request came from — not every session
+              // (which would leak the answer text to unrelated channels' peers).
+              for (final s in _channels?.sessions ?? const <ChannelSession>[]) {
+                if (s.channelId == channelId) {
+                  s.broadcast(InferenceResponse(id: control.id, text: text));
+                  break;
+                }
+              }
+            })
+            .catchError((Object e) {
+              // Model error serving a peer's request — log but don't crash.
+              if (mounted)
+                _setError('AI model error while serving request: $e');
+            }),
+      );
     } else if (control is InferenceResponse) {
       // A peer responded to our request.
       final completer = _pendingInference[control.id];
@@ -753,7 +782,10 @@ class _ChatScreenState extends State<ChatScreen> {
       return [
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Text('Just you so far.', style: Theme.of(context).textTheme.bodySmall),
+          child: Text(
+            'Just you so far.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
         ),
       ];
     }
@@ -765,13 +797,18 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
-    final active = members.where((k) => (now - (lastSeen[k] ?? 0)) < sevenDays).toList();
-    final inactive = members.where((k) => (now - (lastSeen[k] ?? 0)) >= sevenDays).toList();
+    final active = members
+        .where((k) => (now - (lastSeen[k] ?? 0)) < sevenDays)
+        .toList();
+    final inactive = members
+        .where((k) => (now - (lastSeen[k] ?? 0)) >= sevenDays)
+        .toList();
 
     final onlinePeers = _allOnlinePeers();
 
     return [
-      for (final key in active) _memberTile(key, online: onlinePeers.contains(key)),
+      for (final key in active)
+        _memberTile(key, online: onlinePeers.contains(key)),
       if (inactive.isNotEmpty)
         ExpansionTile(
           tilePadding: EdgeInsets.zero,
@@ -782,7 +819,10 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           initiallyExpanded: false,
-          children: [for (final key in inactive) _memberTile(key, online: onlinePeers.contains(key))],
+          children: [
+            for (final key in inactive)
+              _memberTile(key, online: onlinePeers.contains(key)),
+          ],
         ),
     ];
   }
@@ -804,7 +844,10 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: isOnline ? Colors.green : Colors.grey,
-                border: Border.all(color: Theme.of(context).scaffoldBackgroundColor, width: 1.5),
+                border: Border.all(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  width: 1.5,
+                ),
               ),
             ),
           ),
@@ -935,7 +978,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Restores an identity from a recovery code, replacing this device's.
   Future<void> _restoreIdentity() async {
-    final isMobile = Theme.of(context).platform == TargetPlatform.android ||
+    final isMobile =
+        Theme.of(context).platform == TargetPlatform.android ||
         Theme.of(context).platform == TargetPlatform.iOS;
     String? code;
     if (isMobile) {
@@ -944,7 +988,9 @@ class _ChatScreenState extends State<ChatScreen> {
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('Restore identity'),
-          content: const Text('Scan a QR code from another device, or paste a recovery code.'),
+          content: const Text(
+            'Scan a QR code from another device, or paste a recovery code.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
@@ -954,7 +1000,9 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () async {
                 final result = await Navigator.push<String>(
                   ctx,
-                  MaterialPageRoute<String>(builder: (_) => const _QrScanPage()),
+                  MaterialPageRoute<String>(
+                    builder: (_) => const _QrScanPage(),
+                  ),
                 );
                 if (ctx.mounted) Navigator.pop(ctx, result);
               },
@@ -1185,7 +1233,12 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 Expanded(
                   child: TabBarView(
-                    children: [_audioTab(), _identityTab(), _networkTab(), _aiTab()],
+                    children: [
+                      _audioTab(),
+                      _identityTab(),
+                      _networkTab(),
+                      _aiTab(),
+                    ],
                   ),
                 ),
               ],
@@ -1429,7 +1482,9 @@ class _ChatScreenState extends State<ChatScreen> {
     return StatefulBuilder(
       builder: (context, setTabState) {
         return FutureBuilder<Set<String>>(
-          future: InferenceBot.downloadedModels(_kAvailableModels.map((m) => m.id).toList()),
+          future: InferenceBot.downloadedModels(
+            _kAvailableModels.map((m) => m.id).toList(),
+          ),
           builder: (context, snap) {
             final downloaded = snap.data ?? {};
             final activeModel = _settings?.activeModel;
@@ -1460,7 +1515,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                 activeModel == model.id
                                     ? Icons.radio_button_checked
                                     : Icons.radio_button_unchecked,
-                                color: activeModel == model.id ? Theme.of(context).colorScheme.primary : null,
+                                color: activeModel == model.id
+                                    ? Theme.of(context).colorScheme.primary
+                                    : null,
                               )
                             : null,
                         title: Text(model.name),
@@ -1469,7 +1526,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             ? () {
                                 unawaited(_settings?.setActiveModel(model.id));
                                 _bot = null;
-                                InferenceBot.tryCreate(modelId: model.id).then((b) => _bot = b);
+                                InferenceBot.tryCreate(
+                                  modelId: model.id,
+                                ).then((b) => _bot = b);
                                 setTabState(() {});
                               }
                             : null,
@@ -1477,15 +1536,22 @@ class _ChatScreenState extends State<ChatScreen> {
                             ? const SizedBox(
                                 width: 24,
                                 height: 24,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               )
                             : downloaded.contains(model.id)
-                                ? const Icon(Icons.check_circle, color: Colors.green, size: 20)
-                                : IconButton(
-                                    icon: const Icon(Icons.download),
-                                    onPressed: () => unawaited(
-                                        _downloadModel(model, setTabState)),
-                                  ),
+                            ? const Icon(
+                                Icons.check_circle,
+                                color: Colors.green,
+                                size: 20,
+                              )
+                            : IconButton(
+                                icon: const Icon(Icons.download),
+                                onPressed: () => unawaited(
+                                  _downloadModel(model, setTabState),
+                                ),
+                              ),
                       ),
                     ),
                   if (_downloadProgress != null) ...[
@@ -1508,7 +1574,10 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _downloadingModel;
   double? _downloadProgress;
 
-  Future<void> _downloadModel(_ModelInfo model, void Function(void Function()) setTabState) async {
+  Future<void> _downloadModel(
+    _ModelInfo model,
+    void Function(void Function()) setTabState,
+  ) async {
     final path = await InferenceBot.pathFor(model.id);
     final file = File(path);
     setTabState(() {
@@ -1533,17 +1602,17 @@ class _ChatScreenState extends State<ChatScreen> {
       await _settings?.setActiveModel(model.id);
       _bot = await InferenceBot.tryCreate(modelId: model.id);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${model.name} installed ✓')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('${model.name} installed ✓')));
       }
     } catch (e) {
       // Clean up partial download.
       if (await file.exists()) await file.delete();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Download failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Download failed: $e')));
       }
     } finally {
       setTabState(() {
@@ -1563,7 +1632,12 @@ class _ChatScreenState extends State<ChatScreen> {
       action: 'Save',
     );
     if (entered == null) return;
-    final trimmed = entered.trim();
+    var trimmed = entered.trim();
+    if (trimmed.startsWith('http://')) {
+      if (mounted) _setError('HTTP is not supported — use HTTPS');
+      return;
+    }
+    if (!trimmed.startsWith('https://')) trimmed = 'https://$trimmed';
     final parsed = Uri.tryParse(trimmed);
     if (trimmed.isEmpty ||
         parsed == null ||
@@ -1819,7 +1893,8 @@ class _ChatScreenState extends State<ChatScreen> {
       action: 'Add',
     );
     if (name == null || name.trim().isEmpty || !mounted) return;
-    final emoji = await pickEmoji(context, title: 'Pick an icon for this sound') ?? '🔊';
+    final emoji =
+        await pickEmoji(context, title: 'Pick an icon for this sound') ?? '🔊';
     final hash = await store.put(bytes);
     await _publish(SoundContent(hash, name.trim(), emoji));
   }
@@ -1838,7 +1913,9 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
       if (!mounted) return;
-      final emoji = await pickEmoji(context, title: 'Pick an icon for this sound') ?? '🔊';
+      final emoji =
+          await pickEmoji(context, title: 'Pick an icon for this sound') ??
+          '🔊';
       final hash = await store.put(res.bodyBytes);
       await _publish(SoundContent(hash, picked.name, emoji));
     } catch (_) {
@@ -1857,11 +1934,13 @@ class _ChatScreenState extends State<ChatScreen> {
     // Fire-and-forget — don't await so rapid spam isn't serialized.
     unawaited(player.play(BytesSource(bytes)).catchError((_) {}));
     // Kill after 10 seconds max to prevent long clips hogging voice.
-    unawaited(Future.delayed(const Duration(seconds: 10), () async {
-      await player.stop();
-      await player.dispose();
-      _soundPlayers.remove(player);
-    }));
+    unawaited(
+      Future.delayed(const Duration(seconds: 10), () async {
+        await player.stop();
+        await player.dispose();
+        _soundPlayers.remove(player);
+      }),
+    );
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
@@ -2327,7 +2406,14 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_ytIsHost && senderHex.compareTo(widget.identity.publicKeyHex) < 0) {
       return;
     }
-    final isNew = _ytVideoId != control.videoId || _ytHostHex != senderHex;
+    // Never trust a network-supplied id: it's interpolated into the player's
+    // JS, so reject anything that isn't a clean 11-char YouTube id.
+    final videoId = parseYoutubeId(control.videoId);
+    if (videoId == null) return;
+    final position = control.position.isFinite && control.position >= 0
+        ? control.position
+        : 0.0;
+    final isNew = _ytVideoId != videoId || _ytHostHex != senderHex;
     _ytHeartbeat?.cancel(); // someone else hosts now
     _ytHeartbeat = null;
     if (isNew) _ytHidden = false; // a fresh video re-engages everyone
@@ -2335,21 +2421,26 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _ytHostHex = senderHex;
       _ytIsHost = false;
-      _ytVideoId = control.videoId;
+      _ytVideoId = videoId;
       _ytPlaying = control.playing;
-      if (isNew) _ytPosition = control.position;
+      if (isNew) _ytPosition = position;
     });
-    unawaited(_applyRemoteYt(control, isNew));
+    unawaited(_applyRemoteYt(videoId, control.playing, position, isNew));
   }
 
-  Future<void> _applyRemoteYt(YoutubeControl control, bool isNew) async {
+  Future<void> _applyRemoteYt(
+    String videoId,
+    bool playing,
+    double position,
+    bool isNew,
+  ) async {
     final c = _ytController;
     if (c == null || !c.isReady || _ytHidden) return;
     if (!isNew) {
       final cur = await c.currentTime();
-      if ((cur - control.position).abs() > 2.0) await c.seek(control.position);
+      if ((cur - position).abs() > 2.0) await c.seek(position);
     }
-    if (control.playing) {
+    if (playing) {
       await c.play();
     } else {
       await c.pause();
@@ -3512,13 +3603,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     action: 'Connect',
                   );
                   if (url == null || url.trim().isEmpty) return;
-                  final parsed = Uri.tryParse(url.trim());
+                  var relayInput = url.trim();
+                  if (relayInput.startsWith('http://')) {
+                    _setError('HTTP is not supported — use HTTPS');
+                    return;
+                  }
+                  if (!relayInput.startsWith('https://')) {
+                    relayInput = 'https://$relayInput';
+                  }
+                  final parsed = Uri.tryParse(relayInput);
                   if (parsed == null || !parsed.hasScheme) {
                     _setError('Invalid URL');
                     return;
                   }
                   setState(() => _relayUrl = parsed);
-                  await _settings?.setRelayUrl(url.trim());
+                  await _settings?.setRelayUrl(relayInput);
                   unawaited(_retryRelayBlock());
                 },
                 icon: const Icon(Icons.edit),
@@ -3798,9 +3897,10 @@ class _ChatScreenState extends State<ChatScreen> {
     Content content,
   ) {
     return switch (content) {
-      TextContent(:final text) => _isSingleEmoji(text)
-          ? Text(text, style: const TextStyle(fontSize: 48))
-          : Text(text),
+      TextContent(:final text) =>
+        _isSingleEmoji(text)
+            ? Text(text, style: const TextStyle(fontSize: 48))
+            : Text(text),
       GifContent(:final blob) => _imageBlobView(session, blob),
       StickerContent(:final blob) => _imageBlobView(session, blob),
       SoundContent(:final blob, :final name, :final emoji) => _soundView(
@@ -4244,7 +4344,9 @@ class _ContactsPage extends StatefulWidget {
 class _ContactsPageState extends State<_ContactsPage> {
   String _formatLastSeen(int? ms) {
     if (ms == null || ms == 0) return 'Offline';
-    final ago = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));
+    final ago = DateTime.now().difference(
+      DateTime.fromMillisecondsSinceEpoch(ms),
+    );
     if (ago.inMinutes < 1) return 'Last seen just now';
     if (ago.inHours < 1) return 'Last seen ${ago.inMinutes}m ago';
     if (ago.inDays < 1) return 'Last seen ${ago.inHours}h ago';
@@ -4306,9 +4408,7 @@ class _ContactsPageState extends State<_ContactsPage> {
                       return ListTile(
                         leading: Stack(
                           children: [
-                            CircleAvatar(
-                              child: Text(name[0].toUpperCase()),
-                            ),
+                            CircleAvatar(child: Text(name[0].toUpperCase())),
                             Positioned(
                               right: 0,
                               bottom: 0,
@@ -4319,7 +4419,9 @@ class _ContactsPageState extends State<_ContactsPage> {
                                   shape: BoxShape.circle,
                                   color: online ? Colors.green : Colors.grey,
                                   border: Border.all(
-                                    color: Theme.of(context).scaffoldBackgroundColor,
+                                    color: Theme.of(
+                                      context,
+                                    ).scaffoldBackgroundColor,
                                     width: 2,
                                   ),
                                 ),
@@ -4329,10 +4431,11 @@ class _ContactsPageState extends State<_ContactsPage> {
                         ),
                         title: Text(name),
                         subtitle: Text(
-                          online ? 'Online' : _formatLastSeen(widget.lastSeen[pubkeyHex]),
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: online ? Colors.green : null,
-                          ),
+                          online
+                              ? 'Online'
+                              : _formatLastSeen(widget.lastSeen[pubkeyHex]),
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: online ? Colors.green : null),
                         ),
                         trailing: PopupMenuButton<String>(
                           onSelected: (action) => _onAction(action, pubkeyHex),
@@ -4523,8 +4626,22 @@ class _FlamePainter extends CustomPainter {
       // Bezier flame shape — smooth organic curve.
       final path = Path()
         ..moveTo(pos.dx - perp.dx * width * 0.5, pos.dy - perp.dy * width * 0.5)
-        ..cubicTo(cp1.dx, cp1.dy, tip.dx + perp.dx * 0.5, tip.dy + perp.dy * 0.5, tip.dx, tip.dy)
-        ..cubicTo(tip.dx - perp.dx * 0.5, tip.dy - perp.dy * 0.5, cp2.dx, cp2.dy, pos.dx + perp.dx * width * 0.5, pos.dy + perp.dy * width * 0.5)
+        ..cubicTo(
+          cp1.dx,
+          cp1.dy,
+          tip.dx + perp.dx * 0.5,
+          tip.dy + perp.dy * 0.5,
+          tip.dx,
+          tip.dy,
+        )
+        ..cubicTo(
+          tip.dx - perp.dx * 0.5,
+          tip.dy - perp.dy * 0.5,
+          cp2.dx,
+          cp2.dy,
+          pos.dx + perp.dx * width * 0.5,
+          pos.dy + perp.dy * width * 0.5,
+        )
         ..close();
 
       // Warm gradient: red core → orange → yellow tip.
@@ -4554,10 +4671,7 @@ class _FlamePainter extends CustomPainter {
 
     // Outer glow (soft bloom).
     canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        rect.inflate(3),
-        const Radius.circular(27),
-      ),
+      RRect.fromRectAndRadius(rect.inflate(3), const Radius.circular(27)),
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 4

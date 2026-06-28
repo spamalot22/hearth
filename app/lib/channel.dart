@@ -114,7 +114,8 @@ class ChannelSession {
     void Function(String fromHex, List<String> peers)? onContactsOnline,
     void Function(Map<String, Object?> manifest)? onVersionControl,
     void Function(String peerHex, bool typing)? onTyping,
-    void Function(String fromHex, MeshControl control)? onInference,
+    void Function(String fromHex, String channelId, MeshControl control)?
+    onInference,
   }) async {
     final storage = live
         ? await HiveMessageStorage.open(channelId)
@@ -149,7 +150,7 @@ class ChannelSession {
             onTyping?.call(fromHex, control.typing);
           } else if (control is InferenceRequest ||
               control is InferenceResponse) {
-            onInference?.call(fromHex, control);
+            onInference?.call(fromHex, channelId, control);
           }
         },
       );
@@ -315,8 +316,10 @@ class ChannelManager {
   /// exists. The app should show the update gate.
   final void Function(UpdateInfo info)? onForceUpdate;
 
-  /// Fired when an inference request or response arrives from any channel's mesh.
-  final void Function(String fromHex, MeshControl control)? onInference;
+  /// Fired when an inference request or response arrives from a channel's mesh,
+  /// tagged with that channelId so the response goes back to the right channel.
+  final void Function(String fromHex, String channelId, MeshControl control)?
+  onInference;
 
   final Map<String, ChannelSession> _sessions = {};
   String? _activeId;

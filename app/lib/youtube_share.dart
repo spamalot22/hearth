@@ -85,8 +85,14 @@ class WatchPartyController {
     onReady?.call();
   }
 
-  Future<void> load(String videoId, {double start = 0}) async =>
-      _web?.evaluateJavascript(source: 'ytLoad("$videoId", $start);');
+  Future<void> load(String videoId, {double start = 0}) async {
+    // Defence-in-depth: only ever interpolate a validated id / finite number
+    // into JS. Callers validate too, but never trust a value reaching here.
+    if (!RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(videoId)) return;
+    final s = start.isFinite && start >= 0 ? start : 0.0;
+    await _web?.evaluateJavascript(source: 'ytLoad("$videoId", $s);');
+  }
+
   Future<void> play() async => _web?.evaluateJavascript(source: 'ytPlay();');
   Future<void> pause() async => _web?.evaluateJavascript(source: 'ytPause();');
   Future<void> seek(double seconds) async =>
@@ -190,15 +196,22 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
         javaScriptCanOpenWindowsAutomatically: false,
       ),
       shouldOverrideUrlLoading: (controller, action) async {
-        final url = action.request.url?.host ?? '';
-        // Allow YouTube domains (API, player, CDN) but block everything else.
-        if (url.contains('youtube.com') ||
-            url.contains('ytimg.com') ||
-            url.contains('googlevideo.com') ||
-            url.contains('google.com')) {
-          return NavigationActionPolicy.ALLOW;
-        }
-        return NavigationActionPolicy.CANCEL;
+        final host = action.request.url?.host ?? '';
+        // Allow the YouTube player + its CDNs, matching the exact host or a real
+        // subdomain. A substring check would let "youtube.com.evil.com" through;
+        // this blocks navigating the embed off to a hostile page.
+        const allowed = [
+          'youtube.com',
+          'youtube-nocookie.com',
+          'ytimg.com',
+          'googlevideo.com',
+          'google.com',
+          'gstatic.com',
+        ];
+        final ok = allowed.any((d) => host == d || host.endsWith('.$d'));
+        return ok
+            ? NavigationActionPolicy.ALLOW
+            : NavigationActionPolicy.CANCEL;
       },
       onWebViewCreated: (web) {
         widget.controller._attach(web);

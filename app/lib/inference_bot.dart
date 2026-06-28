@@ -63,7 +63,8 @@ class InferenceBot {
     try {
       final file = File(path);
       final size = await file.length();
-      if (size < 1024 * 1024) return null; // < 1MB is definitely not a valid model
+      if (size < 1024 * 1024)
+        return null; // < 1MB is definitely not a valid model
       final raf = await file.open();
       final magic = await raf.read(4);
       await raf.close();
@@ -93,25 +94,30 @@ class InferenceBot {
       final ctx = fileSize > 4 * 1024 * 1024 * 1024 ? 1024 : 2048;
       final completer = Completer<String>();
       String result = '';
-      unawaited(fllamaChat(
-        OpenAiRequest(
-          maxTokens: maxTokens,
-          messages: [
-            Message(Role.system, 'You are a helpful assistant in a group chat called Hearth. Keep responses concise.'),
-            Message(Role.user, prompt),
-          ],
-          numGpuLayers: 99,
-          modelPath: _modelPath,
-          frequencyPenalty: 0.0,
-          presencePenalty: 1.1,
-          topP: 1.0,
-          contextSize: ctx,
+      unawaited(
+        fllamaChat(
+          OpenAiRequest(
+            maxTokens: maxTokens,
+            messages: [
+              Message(
+                Role.system,
+                'You are a helpful assistant in a group chat called Hearth. Keep responses concise.',
+              ),
+              Message(Role.user, prompt),
+            ],
+            numGpuLayers: 99,
+            modelPath: _modelPath,
+            frequencyPenalty: 0.0,
+            presencePenalty: 1.1,
+            topP: 1.0,
+            contextSize: ctx,
+          ),
+          (String partial, String jsonStr, bool done) {
+            result = partial;
+            if (done) completer.complete(result);
+          },
         ),
-        (String partial, String jsonStr, bool done) {
-          result = partial;
-          if (done) completer.complete(result);
-        },
-      ));
+      );
       return await completer.future.timeout(
         const Duration(seconds: 60),
         onTimeout: () => '', // Empty = treated as no response
