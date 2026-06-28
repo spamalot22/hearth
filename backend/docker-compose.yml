@@ -1,4 +1,5 @@
 # Hearth relay stack — the self-hosted cold-start bootstrap. This file IS the IaC.
+# NOTE: keep relay env/volumes in sync with docker-compose.tailscale.yml.
 #
 #   cp .env.example .env       # media keys optional; TUNNEL_TOKEN only for cloudflare
 #   docker compose up -d --build

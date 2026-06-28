@@ -1,5 +1,6 @@
 # Hearth relay — a self-contained, public Tailscale-Funnel stack. Deploy it as a
 # Portainer stack (Git repo or web editor) or `docker compose -f docker-compose.tailscale.yml up -d`.
+# NOTE: keep relay env/volumes in sync with docker-compose.yml.
 # Anyone can run it: it pulls the published relay image and exposes it publicly via
 # Tailscale Funnel — no domain, no port-forward, no Cloudflare. The relay shares the
 # Tailscale container's network namespace, so Funnel reaches it on localhost and the
