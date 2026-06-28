@@ -1688,19 +1688,26 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     await _settings?.setRelayUrl(trimmed);
     if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Relay saved'),
-        content: Text('Restart Hearth to connect via\n$trimmed'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
+    setState(() => _relayUrl = parsed);
+    // Tear down and rebuild the mesh on the new relay.
+    await _channels?.close();
+    final channels = ChannelManager(
+      identity: widget.identity,
+      relayUrl: _relayUrl,
+      live: widget.autoPoll,
+      onUpdate: _onUpdate,
+      blobStore: _blobStore,
+      candidateCache: null,
+      onBackgroundMessage: _notifyBackground,
+      onForceUpdate: (info) {
+        if (mounted) setState(() => _updateInfo = info);
+      },
+      onInference: _handleInference,
     );
+    for (final group in _registry?.all() ?? const <GroupChannel>[]) {
+      await channels.openGroup(group.id, group.key);
+    }
+    if (mounted) setState(() => _channels = channels);
   }
 
   @override
