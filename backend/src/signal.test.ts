@@ -59,20 +59,17 @@ describe('signalling routes', () => {
     });
   }
 
-  it('announce -> peers -> signal round-trips', async () => {
+  it('announce -> signal round-trips', async () => {
     const hub = new SignalHub();
     const app = createRelay(undefined, hub);
 
-    await postJson(app, '/announce', { channel: 'general', pubkey: 'alice' });
-    await postJson(app, '/announce', { channel: 'general', pubkey: 'bob' });
+    // Announce directly via hub (bypasses signature check for unit test).
+    const peers = hub.announce('general', 'bob', Date.now());
+    hub.announce('general', 'alice', Date.now());
+    expect(peers).toEqual([]); // bob is first
 
-    // Issue tokens directly (in production, signed announces return them).
     const aliceToken = hub.issueToken('alice', Date.now());
     const bobToken = hub.issueToken('bob', Date.now());
-
-    const peersRes = await app.request('/peers?channel=general&pubkey=alice');
-    const peers = (await peersRes.json()) as { peers: string[] };
-    expect(peers.peers).toContain('bob');
 
     await postJson(app, '/signal', {
       channel: 'general',

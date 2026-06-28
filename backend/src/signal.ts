@@ -187,15 +187,8 @@ export function addSignalingRoutes(
       const token = hub.issueToken(body.pubkey, now());
       return c.json({ peers, token });
     }
-    // Unsigned announce (backward compat) — works but no token issued.
-    return c.json({ peers: hub.announce(body.channel, body.pubkey, now()) });
-  });
-
-  app.get('/peers', (c) => {
-    const channel = c.req.query('channel');
-    if (!channel) return c.json({ error: 'channel required' }, 400);
-    const exclude = c.req.query('pubkey') ?? '';
-    return c.json({ peers: hub.peers(channel, exclude, now()) });
+    // Unsigned announce — reject (no backward compat needed).
+    return c.json({ error: 'signature required' }, 403);
   });
 
   // Drop an SDP/ICE signal into a recipient's mailbox.
