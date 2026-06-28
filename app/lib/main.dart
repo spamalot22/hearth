@@ -3621,13 +3621,25 @@ class _ChatScreenState extends State<ChatScreen> {
   );
 
   /// Renders a message's content — text, an inline GIF, a sticker, or a sound.
+  /// True if [text] is 1–3 emoji with no other characters.
+  bool _isSingleEmoji(String text) {
+    final t = text.trim();
+    if (t.isEmpty || t.length > 20) return false; // fast bail
+    final chars = t.characters;
+    if (chars.length > 3) return false;
+    // Every grapheme cluster must be non-ASCII (emoji-range).
+    return chars.every((c) => c.runes.first > 0x7F);
+  }
+
   Widget _contentView(
     BuildContext context,
     ChannelSession session,
     Content content,
   ) {
     return switch (content) {
-      TextContent(:final text) => Text(text),
+      TextContent(:final text) => _isSingleEmoji(text)
+          ? Text(text, style: const TextStyle(fontSize: 48))
+          : Text(text),
       GifContent(:final blob) => _imageBlobView(session, blob),
       StickerContent(:final blob) => _imageBlobView(session, blob),
       SoundContent(:final blob, :final name, :final emoji) => _soundView(
