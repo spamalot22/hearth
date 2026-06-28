@@ -2997,7 +2997,7 @@ class _ChatScreenState extends State<ChatScreen> {
           if (session != null && !wide)
             IconButton(
               onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
-              icon: const Icon(Icons.tune),
+              icon: const Icon(Icons.people_outline),
               tooltip: 'Channel controls',
             ),
         ],
