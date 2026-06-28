@@ -127,12 +127,12 @@ describe('tunnel', () => {
       // Drain it
       const res = await app.request('/tunnel?from=alice&to=bob&token=bob');
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = (await res.json()) as { frames: string[] };
       expect(body.frames).toEqual(['msg1']);
 
       // Second drain is empty
       const res2 = await app.request('/tunnel?from=alice&to=bob&token=bob');
-      expect((await res2.json()).frames).toEqual([]);
+      expect(((await res2.json()) as { frames: string[] }).frames).toEqual([]);
     });
   });
 });

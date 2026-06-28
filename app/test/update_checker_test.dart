@@ -3,10 +3,9 @@ import 'dart:convert';
 
 import 'package:core/core.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/update_checker.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-
-import 'package:hearth/update_checker.dart';
 
 void main() {
   group('checkForUpdate', () {
@@ -50,7 +49,7 @@ void main() {
       );
       expect(info.version, '0.5.0');
       expect(info.seq, 100);
-      expect(info.assets['android']!['file'], 'hearth-android.apk');
+      expect((info.assets['android']! as Map)['file'], 'hearth-android.apk');
     });
   });
 
