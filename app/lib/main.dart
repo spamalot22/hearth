@@ -128,6 +128,8 @@ void main() async {
   }
   // Init local notifications for background message toasts.
   await _initNotifications();
+  // Clean up leftover update files from previous versions.
+  unawaited(cleanupOldUpdates());
   runApp(HearthApp(keyStore: SecureKeyStore()));
 }
 

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'update_checker.dart';
 
+
+/// No-op on web.
+Future<void> cleanupOldUpdates() async {}
 /// Web stub — there's no in-app install on the web (it updates by reload), and
 /// `dart:io` isn't available, so this just refuses. The UI only offers Install on
 /// Android/Windows, so this is never reached in practice.

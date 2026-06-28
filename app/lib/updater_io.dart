@@ -11,6 +11,20 @@ import 'package:path_provider/path_provider.dart';
 
 import 'update_checker.dart';
 
+
+/// Deletes any leftover update APKs/ZIPs from previous downloads.
+Future<void> cleanupOldUpdates() async {
+  try {
+    final dir = await getTemporaryDirectory();
+    for (final f in dir.listSync()) {
+      if (f is File &&
+          (f.path.endsWith('.apk') || f.path.endsWith('.zip')) &&
+          f.path.contains('hearth')) {
+        f.deleteSync();
+      }
+    }
+  } catch (_) {}
+}
 /// Downloads this platform's release asset directly from GitHub Releases,
 /// verifies its SHA-256 against the signed manifest, then launches the platform
 /// install. A tampered download is caught by hash mismatch.
