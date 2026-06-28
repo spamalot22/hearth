@@ -1200,19 +1200,35 @@ class _ChatScreenState extends State<ChatScreen> {
   /// until getUserMedia has been called at least once, so we do a quick
   /// acquire-and-release first to trigger the permission prompt.
   Future<List<MediaDeviceInfo>> _enumerateAudioDevices() async {
-    try {
-      final stream = await navigator.mediaDevices.getUserMedia({
-        'audio': true,
-        'video': false,
-      });
-      for (final t in stream.getTracks()) {
-        await t.stop();
-      }
-      await stream.dispose();
-    } catch (_) {
-      // Permission denied — enumerate will return empty labels.
+    // On mobile, trigger permission grant first.
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      try {
+        final stream = await navigator.mediaDevices.getUserMedia({
+          'audio': true,
+          'video': false,
+        });
+        for (final t in stream.getTracks()) {
+          await t.stop();
+        }
+        await stream.dispose();
+      } catch (_) {}
     }
-    return navigator.mediaDevices.enumerateDevices();
+    var devices = await navigator.mediaDevices.enumerateDevices();
+    // On Windows/desktop, enumerateDevices can return empty until a
+    // PeerConnection has been created. Create a throwaway one to kick the
+    // native layer, then re-enumerate.
+    if (devices.where((d) => d.kind == 'audioinput').isEmpty &&
+        (defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.linux)) {
+      try {
+        final pc = await createPeerConnection({});
+        await pc.close();
+        await pc.dispose();
+        devices = await navigator.mediaDevices.enumerateDevices();
+      } catch (_) {}
+    }
+    return devices;
   }
 
   Widget _audioTab() {
