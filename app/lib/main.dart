@@ -744,7 +744,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final inactive = members.where((k) => (now - (lastSeen[k] ?? 0)) >= sevenDays).toList();
 
     return [
-      for (final key in active) _memberTile(key),
+      for (final key in active) _memberTile(key, online: true),
       if (inactive.isNotEmpty)
         ExpansionTile(
           tilePadding: EdgeInsets.zero,
@@ -755,13 +755,13 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           initiallyExpanded: false,
-          children: [for (final key in inactive) _memberTile(key)],
+          children: [for (final key in inactive) _memberTile(key, online: false)],
         ),
     ];
   }
 
-  Widget _memberTile(String key) {
-    final online = _allOnlinePeers().contains(key);
+  Widget _memberTile(String key, {bool? online}) {
+    final isOnline = online ?? _allOnlinePeers().contains(key);
     return ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
@@ -776,7 +776,7 @@ class _ChatScreenState extends State<ChatScreen> {
               height: 8,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: online ? Colors.green : Colors.grey,
+                color: isOnline ? Colors.green : Colors.grey,
                 border: Border.all(color: Theme.of(context).scaffoldBackgroundColor, width: 1.5),
               ),
             ),
@@ -936,7 +936,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
             TextButton.icon(
               onPressed: () async {
-                Navigator.pop(ctx);
+                Navigator.pop(ctx, ''); // sentinel: show text prompt
               },
               icon: const Icon(Icons.paste),
               label: const Text('Paste'),
@@ -944,8 +944,8 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
       );
-      // If "Paste" was chosen (null result from dialog), fall through to text prompt.
-      if (code == null && mounted) {
+      // If "Paste" was chosen (empty sentinel), show text prompt. Cancel = null = abort.
+      if (code != null && code.isEmpty && mounted) {
         code = await _promptText(
           title: 'Restore identity',
           hint: 'paste your recovery code',
@@ -3715,8 +3715,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (t.isEmpty || t.length > 20) return false; // fast bail
     final chars = t.characters;
     if (chars.length > 3) return false;
-    // Every grapheme cluster must be non-ASCII (emoji-range).
-    return chars.every((c) => c.runes.first > 0x7F);
+    // Every grapheme cluster must start in an emoji-range codepoint.
+    return chars.every((c) => c.runes.first > 0x2000);
   }
 
   Widget _contentView(
