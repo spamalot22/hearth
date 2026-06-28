@@ -1311,6 +1311,46 @@ class _ChatScreenState extends State<ChatScreen> {
                   const SizedBox(height: 4),
                   if (mics.isEmpty)
                     const Text('No microphones found')
+                  else if (defaultTargetPlatform == TargetPlatform.android ||
+                      defaultTargetPlatform == TargetPlatform.iOS)
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.mic, size: 20),
+                      title: const Text('Built-in Microphone'),
+                      trailing: TextButton(
+                        child: const Text('Test'),
+                        onPressed: () async {
+                          try {
+                            final stream = await navigator.mediaDevices
+                                .getUserMedia({
+                                  'audio': true,
+                                  'video': false,
+                                });
+                            await Future<void>.delayed(
+                              const Duration(milliseconds: 500),
+                            );
+                            for (final t in stream.getTracks()) {
+                              await t.stop();
+                            }
+                            await stream.dispose();
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('✓ Microphone is working'),
+                                ),
+                              );
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('✗ Mic failed: $e')),
+                              );
+                            }
+                          }
+                        },
+                      ),
+                    )
                   else
                     for (final mic in mics)
                       ListTile(
@@ -1334,7 +1374,6 @@ class _ChatScreenState extends State<ChatScreen> {
                                     },
                                     'video': false,
                                   });
-                              // Record briefly then stop — proves it works.
                               await Future<void>.delayed(
                                 const Duration(milliseconds: 500),
                               );
