@@ -3474,6 +3474,27 @@ class _ChatScreenState extends State<ChatScreen> {
                 icon: const Icon(Icons.refresh),
                 label: const Text('Retry'),
               ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final url = await _promptText(
+                    title: 'Change relay',
+                    hint: 'https://your-relay.example.com',
+                    action: 'Connect',
+                  );
+                  if (url == null || url.trim().isEmpty) return;
+                  final parsed = Uri.tryParse(url.trim());
+                  if (parsed == null || !parsed.hasScheme) {
+                    _setError('Invalid URL');
+                    return;
+                  }
+                  setState(() => _relayUrl = parsed);
+                  await _settings?.setRelayUrl(url.trim());
+                  unawaited(_retryRelayBlock());
+                },
+                icon: const Icon(Icons.edit),
+                label: const Text('Change relay'),
+              ),
             ],
           ),
         ),
