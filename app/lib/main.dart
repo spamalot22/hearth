@@ -3641,7 +3641,6 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await downloadAndInstall(
         _updateInfo!,
-        _relayUrl,
         onProgress: (p) {
           if (mounted) setState(() => _updateProgress = p);
         },

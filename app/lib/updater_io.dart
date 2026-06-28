@@ -11,17 +11,16 @@ import 'package:path_provider/path_provider.dart';
 
 import 'update_checker.dart';
 
-/// Downloads this platform's release asset *through the relay* (which proxies it
-/// from the private repo), verifies its SHA-256 against the signed manifest, then
-/// launches the platform install. The relay can't tamper — a mismatched hash
-/// aborts. Reports download progress (0–1) via [onProgress].
+/// Downloads this platform's release asset directly from GitHub Releases,
+/// verifies its SHA-256 against the signed manifest, then launches the platform
+/// install. A tampered download is caught by hash mismatch.
+/// Reports download progress (0–1) via [onProgress].
 ///
 /// On Windows this replaces the running install and relaunches (it calls
 /// `exit(0)`, so it does not return). On Android it hands the verified APK to the
 /// system package installer.
 Future<void> downloadAndInstall(
-  UpdateInfo info,
-  Uri relayUrl, {
+  UpdateInfo info, {
   void Function(double progress)? onProgress,
 }) async {
   final asset = _platformAsset(info.assets);
@@ -29,16 +28,14 @@ Future<void> downloadAndInstall(
     throw UnsupportedError('No update asset for this platform.');
   }
   final fileName = asset['file'] as String;
-  // Defence-in-depth: the filename is signature-gated, but never let it carry
-  // path separators or shell-special chars into the file write / install script.
   if (!RegExp(r'^[A-Za-z0-9._-]+$').hasMatch(fileName)) {
     throw StateError('unsafe update asset filename: $fileName');
   }
   final expectedHash = (asset['sha256'] as String).toLowerCase();
 
-  final url = relayUrl.replace(
-    path: '/download',
-    queryParameters: {'version': info.version, 'asset': fileName},
+  // Download directly from the public GitHub release.
+  final url = Uri.parse(
+    'https://github.com/spamalot22/hearth/releases/download/${info.version}/$fileName',
   );
   final dir = await getTemporaryDirectory();
   final outFile = File('${dir.path}${Platform.pathSeparator}$fileName');
