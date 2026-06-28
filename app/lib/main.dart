@@ -809,7 +809,10 @@ class _ChatScreenState extends State<ChatScreen> {
     return {
       for (final message in session.repository.ordered())
         if (hex.encode(message.author) != self) hex.encode(message.author),
-    };
+      // Also include currently connected mesh peers (they may not have sent a
+      // message yet but are live in this channel).
+      ...?session.mesh?.peers,
+    }..remove(self);
   }
 
   /// Builds the members list with active (< 7d) and inactive (collapsed) sections.

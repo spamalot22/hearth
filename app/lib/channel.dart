@@ -140,6 +140,7 @@ class ChannelSession {
         onPeerLeft: (_) {
           // Resume relay polling when the last P2P peer drops.
           if (mesh?.peers.isEmpty ?? true) courier?.resume();
+          onUpdate(); // Refresh UI so member online status updates.
         },
         onControl: (fromHex, control) {
           if (control is ContactsOnlineControl) {
@@ -160,6 +161,7 @@ class ChannelSession {
         engine.addPeer(peer);
         courier?.pause(); // P2P is live — no need to poll the relay.
         onPeerConnected?.call();
+        onUpdate(); // Refresh UI so new peer appears in member list.
       });
 
       // Relay courier: polls the relay for messages that arrived while we were
