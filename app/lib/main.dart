@@ -702,6 +702,56 @@ class _ChatScreenState extends State<ChatScreen> {
     };
   }
 
+  /// Builds the members list with active (< 7d) and inactive (collapsed) sections.
+  List<Widget> _membersList(ChannelSession session) {
+    final members = _membersOf(session);
+    if (members.isEmpty) {
+      return [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text('Just you so far.', style: Theme.of(context).textTheme.bodySmall),
+        ),
+      ];
+    }
+    // Get last message time per member.
+    final lastSeen = <String, int>{};
+    for (final message in session.repository.ordered()) {
+      final key = hex.encode(message.author);
+      if (members.contains(key)) lastSeen[key] = message.timestampMs;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    final active = members.where((k) => (now - (lastSeen[k] ?? 0)) < sevenDays).toList();
+    final inactive = members.where((k) => (now - (lastSeen[k] ?? 0)) >= sevenDays).toList();
+
+    return [
+      for (final key in active) _memberTile(key),
+      if (inactive.isNotEmpty)
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: Text(
+            'Inactive (${inactive.length})',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          initiallyExpanded: false,
+          children: [for (final key in inactive) _memberTile(key)],
+        ),
+    ];
+  }
+
+  Widget _memberTile(String key) => ListTile(
+    dense: true,
+    contentPadding: EdgeInsets.zero,
+    leading: _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
+    title: Text(
+      _displayName(Uint8List.fromList(hex.decode(key))),
+      overflow: TextOverflow.ellipsis,
+    ),
+    onTap: () => unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
+  );
+
   /// Prompts you to add a member who joins *after* you're settled in a channel
   /// (joining yourself doesn't flood you — the bulk-add covers existing members).
   /// On first sight of a channel we baseline its members silently after a short
@@ -1023,11 +1073,30 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Enumerates audio devices. On some platforms (Windows), labels are empty
+  /// until getUserMedia has been called at least once, so we do a quick
+  /// acquire-and-release first to trigger the permission prompt.
+  Future<List<MediaDeviceInfo>> _enumerateAudioDevices() async {
+    try {
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+      for (final t in stream.getTracks()) {
+        await t.stop();
+      }
+      await stream.dispose();
+    } catch (_) {
+      // Permission denied — enumerate will return empty labels.
+    }
+    return navigator.mediaDevices.enumerateDevices();
+  }
+
   Widget _audioTab() {
     return StatefulBuilder(
       builder: (context, setTabState) {
         return FutureBuilder<List<MediaDeviceInfo>>(
-          future: navigator.mediaDevices.enumerateDevices(),
+          future: _enumerateAudioDevices(),
           builder: (context, snapshot) {
             final devices = snapshot.data ?? [];
             final mics = devices.where((d) => d.kind == 'audioinput').toList();
@@ -2378,30 +2447,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
                 const Divider(height: 28),
                 Text('MEMBERS', style: theme.textTheme.labelSmall),
-                for (final key in _membersOf(session))
-                  ListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    leading: _avatar(
-                      Uint8List.fromList(hex.decode(key)),
-                      radius: 14,
-                    ),
-                    title: Text(
-                      _displayName(Uint8List.fromList(hex.decode(key))),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    onTap: () => unawaited(
-                      _peerActions(Uint8List.fromList(hex.decode(key))),
-                    ),
-                  ),
-                if (_membersOf(session).isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    child: Text(
-                      'Just you so far.',
-                      style: theme.textTheme.bodySmall,
-                    ),
-                  ),
+                ..._membersList(session),
               ],
             ),
           ),
@@ -4218,74 +4264,87 @@ class _FlamePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
-    // Draw multiple flame tongues around the perimeter.
-    final rng = phase * 2 * 3.14159;
-    final paint = Paint()..style = PaintingStyle.fill;
+    final rng = phase * 2 * pi;
 
-    // Perimeter points: distribute ~24 flame tongues around the rounded rect.
-    const count = 24;
+    // Organic flame tongues around the perimeter — varied sizes, bezier shapes.
+    const count = 32;
     final perimeter = 2 * (size.width + size.height);
     for (var i = 0; i < count; i++) {
       final t = i / count;
-      // Offset each flame by phase for animation.
-      final flicker = sin((t * 12 + rng) * 1.0) * 0.5 + 0.5;
-      final height = 4.0 + flicker * 8.0;
-      final opacity = 0.4 + flicker * 0.5;
+      // Each flame has its own frequency + phase offset for organic motion.
+      final f1 = sin(t * 17.3 + rng * 2.1) * 0.5 + 0.5;
+      final f2 = sin(t * 11.7 + rng * 1.7 + 1.3) * 0.5 + 0.5;
+      final height = 6.0 + f1 * 14.0 + f2 * 6.0;
+      final width = 3.0 + f2 * 4.0;
+      final opacity = 0.5 + f1 * 0.4;
 
       // Position along perimeter.
       final d = t * perimeter;
       late Offset pos;
-      late Offset dir; // outward direction
+      late Offset dir;
 
       if (d < size.width) {
-        // Top edge.
         pos = Offset(d, 0);
         dir = const Offset(0, -1);
       } else if (d < size.width + size.height) {
-        // Right edge.
         pos = Offset(size.width, d - size.width);
         dir = const Offset(1, 0);
       } else if (d < 2 * size.width + size.height) {
-        // Bottom edge.
         pos = Offset(size.width - (d - size.width - size.height), size.height);
         dir = const Offset(0, 1);
       } else {
-        // Left edge.
         pos = Offset(0, size.height - (d - 2 * size.width - size.height));
         dir = const Offset(-1, 0);
       }
 
-      // Draw a teardrop flame tongue.
+      final perp = Offset(-dir.dy, dir.dx);
       final tip = pos + dir * height;
-      final perp = Offset(-dir.dy, dir.dx) * 3.0;
+      final cp1 = pos + dir * (height * 0.6) + perp * (width * 1.2);
+      final cp2 = pos + dir * (height * 0.6) - perp * (width * 1.2);
+
+      // Bezier flame shape — smooth organic curve.
       final path = Path()
-        ..moveTo(pos.dx - perp.dx, pos.dy - perp.dy)
-        ..quadraticBezierTo(tip.dx, tip.dy, pos.dx + perp.dx, pos.dy + perp.dy)
+        ..moveTo(pos.dx - perp.dx * width * 0.5, pos.dy - perp.dy * width * 0.5)
+        ..cubicTo(cp1.dx, cp1.dy, tip.dx + perp.dx * 0.5, tip.dy + perp.dy * 0.5, tip.dx, tip.dy)
+        ..cubicTo(tip.dx - perp.dx * 0.5, tip.dy - perp.dy * 0.5, cp2.dx, cp2.dy, pos.dx + perp.dx * width * 0.5, pos.dy + perp.dy * width * 0.5)
         ..close();
 
-      // Gradient from orange at base to yellow at tip.
-      paint.color = Color.lerp(
-        Colors.deepOrange,
-        Colors.amber,
-        flicker,
+      // Warm gradient: red core → orange → yellow tip.
+      final color = Color.lerp(
+        Color.lerp(Colors.red[700], Colors.deepOrange, f1)!,
+        Colors.yellow[600],
+        f2 * 0.6,
       )!.withValues(alpha: opacity);
-      canvas.drawPath(path, paint);
+
+      canvas.drawPath(path, Paint()..color = color);
     }
 
-    // Glow around the border.
-    final glowPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..shader = LinearGradient(
-        colors: [
-          Colors.orange.withValues(alpha: 0.8),
-          Colors.amber.withValues(alpha: 0.6),
-          Colors.deepOrange.withValues(alpha: 0.8),
-        ],
-      ).createShader(rect);
+    // Warm glow border.
     canvas.drawRRect(
       RRect.fromRectAndRadius(rect, const Radius.circular(24)),
-      glowPaint,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5
+        ..shader = LinearGradient(
+          colors: [
+            Colors.orange.withValues(alpha: 0.9),
+            Colors.yellow.withValues(alpha: 0.7),
+            Colors.deepOrange.withValues(alpha: 0.9),
+          ],
+        ).createShader(rect),
+    );
+
+    // Outer glow (soft bloom).
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        rect.inflate(3),
+        const Radius.circular(27),
+      ),
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4)
+        ..color = Colors.orange.withValues(alpha: 0.3 + sin(rng) * 0.1),
     );
   }
 

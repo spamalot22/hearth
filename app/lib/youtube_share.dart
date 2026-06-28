@@ -189,8 +189,17 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
         transparentBackground: true,
         javaScriptCanOpenWindowsAutomatically: false,
       ),
-      shouldOverrideUrlLoading: (controller, action) async =>
-          NavigationActionPolicy.CANCEL, // lock to the player page
+      shouldOverrideUrlLoading: (controller, action) async {
+        final url = action.request.url?.host ?? '';
+        // Allow YouTube domains (API, player, CDN) but block everything else.
+        if (url.contains('youtube.com') ||
+            url.contains('ytimg.com') ||
+            url.contains('googlevideo.com') ||
+            url.contains('google.com')) {
+          return NavigationActionPolicy.ALLOW;
+        }
+        return NavigationActionPolicy.CANCEL;
+      },
       onWebViewCreated: (web) {
         widget.controller._attach(web);
         web.addJavaScriptHandler(
