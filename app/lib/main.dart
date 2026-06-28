@@ -364,6 +364,7 @@ class _ChatScreenState extends State<ChatScreen> {
   MediaLibrary? _library;
   AudioPlayer? _player;
   VoiceSession? _voice;
+  bool _speakerOn = true;
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
@@ -2666,6 +2667,21 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                         tooltip: voice.isDeafened ? 'Undeafen' : 'Deafen',
                       ),
+                      if (defaultTargetPlatform == TargetPlatform.android ||
+                          defaultTargetPlatform == TargetPlatform.iOS)
+                        IconButton(
+                          onPressed: () async {
+                            final next = !_speakerOn;
+                            await Helper.setSpeakerphoneOn(next);
+                            setState(() => _speakerOn = next);
+                          },
+                          icon: Icon(
+                            _speakerOn
+                                ? Icons.volume_up
+                                : Icons.phone_in_talk,
+                          ),
+                          tooltip: _speakerOn ? 'Earpiece' : 'Speaker',
+                        ),
                       if (_screenShareSupported)
                         IconButton(
                           onPressed: () {
