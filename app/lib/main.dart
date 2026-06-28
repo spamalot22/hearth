@@ -866,7 +866,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _memberTile(String key, {bool? online}) {
     final isOnline = online ?? _allOnlinePeers().contains(key);
-    return ListTile(
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
       dense: true,
       contentPadding: EdgeInsets.zero,
       leading: Stack(
@@ -895,6 +897,7 @@ class _ChatScreenState extends State<ChatScreen> {
         overflow: TextOverflow.ellipsis,
       ),
       onTap: () => unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
+      ),
     );
   }
 
