@@ -1851,7 +1851,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final bytes = session.blobOf(blob);
     if (bytes == null) return;
     // Cap concurrent soundboard players to avoid resource exhaustion.
-    if (_soundPlayers.length >= 10) return;
+    if (_soundPlayers.length >= 20) return;
     final player = AudioPlayer();
     _soundPlayers.add(player);
     // Fire-and-forget — don't await so rapid spam isn't serialized.
