@@ -1175,6 +1175,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ),
                 const TabBar(
+                  isScrollable: true,
                   tabs: [
                     Tab(text: 'Audio'),
                     Tab(text: 'Identity'),
