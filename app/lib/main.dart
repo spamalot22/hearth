@@ -573,7 +573,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }));
     }
     // Timeout after 60s.
-    completer.future.timeout(const Duration(seconds: 60), onTimeout: () => null).then((text) {
+    completer.future.timeout(
+      const Duration(seconds: 60),
+      onTimeout: () => '',
+    ).then((text) {
       _pendingInference.remove(id);
       if (text != null && text.isNotEmpty && mounted) {
         unawaited(_publishTo(session, TextContent('🤖 $text')));
@@ -1466,6 +1469,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _scroll.dispose();
     _typingTimer?.cancel();
     _fireTimer?.cancel();
+    _errorTimer?.cancel();
     super.dispose();
   }
 
