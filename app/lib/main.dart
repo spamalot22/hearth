@@ -1968,12 +1968,18 @@ class _ChatScreenState extends State<ChatScreen> {
     _soundPlayers.add(player);
     // Fire-and-forget — don't await so rapid spam isn't serialized.
     unawaited(player.play(BytesSource(bytes)).catchError((_) {}));
-    // Kill after 10 seconds max to prevent long clips hogging voice.
+    // Clean up when done; 10s safety cap for long clips.
+    player.onPlayerComplete.listen((_) async {
+      await player.dispose();
+      _soundPlayers.remove(player);
+    });
     unawaited(
       Future.delayed(const Duration(seconds: 10), () async {
-        await player.stop();
-        await player.dispose();
-        _soundPlayers.remove(player);
+        if (_soundPlayers.contains(player)) {
+          await player.stop();
+          await player.dispose();
+          _soundPlayers.remove(player);
+        }
       }),
     );
   }
@@ -2279,6 +2285,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _selectedShareHex = null;
     final voice = _voice;
     _voice = null;
+    _speakerOn = true;
     if (mounted) setState(() {});
     for (final view in views) {
       await view.close();
