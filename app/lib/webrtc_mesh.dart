@@ -626,8 +626,13 @@ class _PeerLink implements FrameChannel {
   void _wireChannel(RTCDataChannel channel) {
     _channel = channel;
     channel.onMessage = (message) {
-      if (message.isBinary) return;
-      final split = splitFrame(message.text);
+      final String text;
+      if (message.isBinary) {
+        text = String.fromCharCodes(message.binary);
+      } else {
+        text = message.text;
+      }
+      final split = splitFrame(text);
       if (split.isControl) {
         final control = MeshControl.decodeBody(split.body);
         if (control != null) onControl?.call(peerHex, control);
