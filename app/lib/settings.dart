@@ -44,4 +44,11 @@ class SettingsStore {
 
   Future<void> setContributeCompute(bool enabled) =>
       _box.put(_computeKey, enabled.toString());
+
+  static const _activeModelKey = 'activeModel';
+
+  /// The currently selected model id (null = legacy single file).
+  String? get activeModel => _box.get(_activeModelKey);
+
+  Future<void> setActiveModel(String id) => _box.put(_activeModelKey, id);
 }

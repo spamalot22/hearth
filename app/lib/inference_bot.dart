@@ -33,9 +33,31 @@ class InferenceBot {
     return null;
   }
 
+  /// Returns the path for a specific model id.
+  static Future<String> pathFor(String modelId) async {
+    final dir = await getApplicationDocumentsDirectory();
+    return '${dir.path}/hearth-$modelId.gguf';
+  }
+
+  /// Returns which model ids have been downloaded.
+  static Future<Set<String>> downloadedModels(List<String> ids) async {
+    final result = <String>{};
+    for (final id in ids) {
+      final path = await pathFor(id);
+      if (await File(path).exists()) result.add(id);
+    }
+    return result;
+  }
+
   /// Creates a bot if a valid model file is present. Returns null if no model.
-  static Future<InferenceBot?> tryCreate() async {
-    final path = await modelPath();
+  static Future<InferenceBot?> tryCreate({String? modelId}) async {
+    String? path;
+    if (modelId != null) {
+      path = await pathFor(modelId);
+      if (!await File(path).exists()) path = null;
+    }
+    // Fallback to legacy single-file name.
+    path ??= await modelPath();
     if (path == null) return null;
     // Validate GGUF magic bytes before loading (prevents native crash on corrupt files).
     try {
@@ -63,6 +85,7 @@ class InferenceBot {
   /// Returns null if busy or if inference fails.
   Future<String?> generate(String prompt, {int maxTokens = 256}) async {
     if (_busy) return null;
+    if (!await File(_modelPath).exists()) return null;
     _busy = true;
     try {
       // Reduce context size for large models to avoid OOM.
@@ -91,8 +114,11 @@ class InferenceBot {
       ));
       return await completer.future.timeout(
         const Duration(seconds: 60),
-        onTimeout: () => '',
+        onTimeout: () => '', // Empty = treated as no response
       );
+    } on Error catch (e) {
+      // Native FFI errors (e.g. incompatible model format).
+      throw StateError('Model inference failed: $e');
     } catch (_) {
       return null;
     } finally {

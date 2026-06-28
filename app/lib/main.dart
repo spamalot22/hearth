@@ -469,7 +469,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
     if (widget.autoPoll) await initRecentGifs();
     if (widget.autoPoll && (settings?.contributeCompute ?? true)) {
-      _bot = await InferenceBot.tryCreate();
+      _bot = await InferenceBot.tryCreate(modelId: settings?.activeModel);
     }
     final savedRelay = settings?.relayUrl;
     if (savedRelay != null) {
@@ -572,6 +572,8 @@ class _ChatScreenState extends State<ChatScreen> {
         if (text != null && !completer.isCompleted) {
           completer.complete(text);
         }
+      }).catchError((Object e) {
+        if (mounted) _setError('AI model error: $e');
       }));
     }
     // Timeout after 60s.
@@ -600,6 +602,9 @@ class _ChatScreenState extends State<ChatScreen> {
         for (final s in _channels?.sessions ?? const <ChannelSession>[]) {
           s.broadcast(InferenceResponse(id: control.id, text: text));
         }
+      }).catchError((Object e) {
+        // Model error serving a peer's request — log but don't crash.
+        if (mounted) _setError('AI model error while serving request: $e');
       }));
     } else if (control is InferenceResponse) {
       // A peer responded to our request.
@@ -1395,10 +1400,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _aiTab() {
     return StatefulBuilder(
       builder: (context, setTabState) {
-        return FutureBuilder<String?>(
-          future: InferenceBot.modelPath(),
+        return FutureBuilder<Set<String>>(
+          future: InferenceBot.downloadedModels(_kAvailableModels.map((m) => m.id).toList()),
           builder: (context, snap) {
-            final hasModel = snap.data != null;
+            final downloaded = snap.data ?? {};
+            final activeModel = _settings?.activeModel;
             return Padding(
               padding: const EdgeInsets.all(16),
               child: ListView(
@@ -1416,44 +1422,42 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
                   const Divider(height: 24),
-                  Text('Model', style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(height: 8),
-                  if (hasModel)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.check_circle, color: Colors.green),
-                      title: const Text('Model installed'),
-                      subtitle: Text(
-                        snap.data!.split('/').last,
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    )
-                  else
-                    const ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.warning_amber, color: Colors.orange),
-                      title: Text('No model installed'),
-                      subtitle: Text('@bot will not work until a model is downloaded'),
-                    ),
-                  const SizedBox(height: 8),
-                  Text('Pick a model to download:', style: Theme.of(context).textTheme.bodySmall),
+                  Text('Models', style: Theme.of(context).textTheme.labelLarge),
                   const SizedBox(height: 8),
                   for (final model in _kAvailableModels)
                     Card(
                       child: ListTile(
+                        leading: downloaded.contains(model.id)
+                            ? Icon(
+                                activeModel == model.id
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_unchecked,
+                                color: activeModel == model.id ? Theme.of(context).colorScheme.primary : null,
+                              )
+                            : null,
                         title: Text(model.name),
                         subtitle: Text('${model.size} · ${model.description}'),
+                        onTap: downloaded.contains(model.id)
+                            ? () {
+                                unawaited(_settings?.setActiveModel(model.id));
+                                _bot = null;
+                                InferenceBot.tryCreate(modelId: model.id).then((b) => _bot = b);
+                                setTabState(() {});
+                              }
+                            : null,
                         trailing: _downloadingModel == model.id
                             ? const SizedBox(
                                 width: 24,
                                 height: 24,
                                 child: CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : IconButton(
-                                icon: const Icon(Icons.download),
-                                onPressed: () => unawaited(
-                                    _downloadModel(model, setTabState)),
-                              ),
+                            : downloaded.contains(model.id)
+                                ? const Icon(Icons.check_circle, color: Colors.green, size: 20)
+                                : IconButton(
+                                    icon: const Icon(Icons.download),
+                                    onPressed: () => unawaited(
+                                        _downloadModel(model, setTabState)),
+                                  ),
                       ),
                     ),
                   if (_downloadProgress != null) ...[
@@ -1477,8 +1481,8 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _downloadProgress;
 
   Future<void> _downloadModel(_ModelInfo model, void Function(void Function()) setTabState) async {
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/${InferenceBot.kModelFilename}');
+    final path = await InferenceBot.pathFor(model.id);
+    final file = File(path);
     setTabState(() {
       _downloadingModel = model.id;
       _downloadProgress = 0;
@@ -1497,14 +1501,17 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       }
       await sink.close();
-      // Reinitialise the bot with the new model.
-      _bot = await InferenceBot.tryCreate();
+      // Auto-select the newly downloaded model.
+      await _settings?.setActiveModel(model.id);
+      _bot = await InferenceBot.tryCreate(modelId: model.id);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${model.name} installed ✓')),
         );
       }
     } catch (e) {
+      // Clean up partial download.
+      if (await file.exists()) await file.delete();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Download failed: $e')),
