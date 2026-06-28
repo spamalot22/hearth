@@ -1854,13 +1854,14 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_soundPlayers.length >= 10) return;
     final player = AudioPlayer();
     _soundPlayers.add(player);
-    await player.play(BytesSource(bytes));
+    // Fire-and-forget — don't await so rapid spam isn't serialized.
+    unawaited(player.play(BytesSource(bytes)).catchError((_) {}));
     // Kill after 10 seconds max to prevent long clips hogging voice.
-    Future.delayed(const Duration(seconds: 10), () async {
+    unawaited(Future.delayed(const Duration(seconds: 10), () async {
       await player.stop();
       await player.dispose();
       _soundPlayers.remove(player);
-    });
+    }));
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
@@ -3959,8 +3960,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Plays a sound locally AND broadcasts it to voice peers.
   Future<void> _playSoundToVoice(ChannelSession session, String blob) async {
-    // Play locally.
-    await _playSound(session, blob);
+    // Play locally (fire-and-forget).
+    unawaited(_playSound(session, blob));
     // Broadcast to voice peers via the voice mesh.
     _voice?.sendControl(SoundboardControl(blob: blob));
   }
