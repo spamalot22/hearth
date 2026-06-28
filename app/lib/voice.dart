@@ -324,12 +324,16 @@ class VoiceSession {
       onScreenShare?.call(peerHex, control.active);
     } else if (control is YoutubeControl) {
       onYoutube?.call(peerHex, control);
+    } else if (control is VoiceLeaveControl) {
+      _onPeerLeft(peerHex);
     }
   }
 
   Future<void> leave() async {
     if (_closed) return;
     _closed = true;
+    // Notify peers immediately so they don't wait for ICE timeout.
+    sendControl(VoiceLeaveControl());
     await _sub?.cancel();
     _levelTimer?.cancel();
     await _mesh.close();

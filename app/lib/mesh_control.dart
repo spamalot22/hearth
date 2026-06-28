@@ -66,6 +66,7 @@ sealed class MeshControl {
         'voice_presence' => VoicePresenceControl(
           channelId: json['ch'] as String? ?? '',
         ),
+        'voice_leave' => VoiceLeaveControl(),
         _ => null,
       };
     } catch (_) {
@@ -270,6 +271,13 @@ class VoicePresenceControl extends MeshControl {
 
   @override
   Map<String, Object?> toJson() => {'t': 'voice_presence', 'ch': channelId};
+}
+
+/// Sent over the voice data channel immediately before disconnecting, so the
+/// remote peer removes us without waiting for ICE timeout.
+class VoiceLeaveControl extends MeshControl {
+  @override
+  Map<String, Object?> toJson() => {'t': 'voice_leave'};
 }
 
 /// Tags a gossip frame's text for the data channel.

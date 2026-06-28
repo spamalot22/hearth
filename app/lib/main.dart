@@ -639,7 +639,7 @@ class _ChatScreenState extends State<ChatScreen> {
             if (entry.key != control.channelId) entry.value.remove(fromHex);
           }
         }
-        // Prune stale entries (>30s without refresh).
+        // Prune stale entries (>12s without refresh).
         final cutoff = DateTime.now().subtract(const Duration(seconds: 30));
         _voicePresenceTs.removeWhere((_, ts) => ts.isBefore(cutoff));
         for (final set in _voicePresence.values) {
