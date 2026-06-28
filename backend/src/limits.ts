@@ -62,6 +62,14 @@ export class RateLimiter {
     }
     fresh.push(nowMs);
     this.hits.set(key, fresh);
+    // Lazy prune: when the map grows large, drop keys with no recent hits.
+    if (this.hits.size > 10_000) {
+      for (const [k, v] of this.hits) {
+        if (v.length === 0 || nowMs - v[v.length - 1]! > this.windowMs) {
+          this.hits.delete(k);
+        }
+      }
+    }
     return true;
   }
 }

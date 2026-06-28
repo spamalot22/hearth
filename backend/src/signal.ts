@@ -3,6 +3,7 @@ import { Hono } from 'hono';
 import { randomBytes } from 'node:crypto';
 
 import {
+  MAX_CHANNELS,
   MAX_MAILBOX_SIGNALS,
   RateLimiter,
   SIGNAL_RATE_LIMIT,
@@ -48,8 +49,16 @@ export class SignalHub {
     let chan = this.presence.get(channel);
     if (!chan) {
       chan = new Map();
-      this.presence.set(channel, chan);
+      // LRU eviction: cap unique channels in the presence map.
+      if (this.presence.size > MAX_CHANNELS) {
+        const oldest = this.presence.keys().next().value!;
+        this.presence.delete(oldest);
+      }
+    } else {
+      // Touch: move to end for LRU ordering.
+      this.presence.delete(channel);
     }
+    this.presence.set(channel, chan);
     chan.set(pubkey, nowMs);
     return this.peers(channel, pubkey, nowMs);
   }
