@@ -3763,7 +3763,6 @@ class _ChatScreenState extends State<ChatScreen> {
                           ),
                           label: Text(sound.name),
                           onPressed: () {
-                            Navigator.pop(context);
                             unawaited(_playSoundToVoice(session, sound.blob));
                           },
                         ),
