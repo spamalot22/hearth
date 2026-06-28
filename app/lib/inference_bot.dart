@@ -33,10 +33,29 @@ class InferenceBot {
     return null;
   }
 
-  /// Creates a bot if a model file is present. Returns null if no model.
+  /// Creates a bot if a valid model file is present. Returns null if no model.
   static Future<InferenceBot?> tryCreate() async {
     final path = await modelPath();
     if (path == null) return null;
+    // Validate GGUF magic bytes before loading (prevents native crash on corrupt files).
+    try {
+      final file = File(path);
+      final size = await file.length();
+      if (size < 1024 * 1024) return null; // < 1MB is definitely not a valid model
+      final raf = await file.open();
+      final magic = await raf.read(4);
+      await raf.close();
+      // GGUF magic: 0x47 0x47 0x55 0x46 ("GGUF")
+      if (magic.length < 4 ||
+          magic[0] != 0x47 ||
+          magic[1] != 0x47 ||
+          magic[2] != 0x55 ||
+          magic[3] != 0x46) {
+        return null;
+      }
+    } catch (_) {
+      return null;
+    }
     return InferenceBot._(path);
   }
 
@@ -46,6 +65,9 @@ class InferenceBot {
     if (_busy) return null;
     _busy = true;
     try {
+      // Reduce context size for large models to avoid OOM.
+      final fileSize = await File(_modelPath).length();
+      final ctx = fileSize > 4 * 1024 * 1024 * 1024 ? 1024 : 2048;
       final completer = Completer<String>();
       String result = '';
       unawaited(fllamaChat(
@@ -60,7 +82,7 @@ class InferenceBot {
           frequencyPenalty: 0.0,
           presencePenalty: 1.1,
           topP: 1.0,
-          contextSize: 2048,
+          contextSize: ctx,
         ),
         (String partial, String jsonStr, bool done) {
           result = partial;
