@@ -152,6 +152,11 @@ class VoiceSession {
     session = VoiceSession._(channelId, mesh, stream, onChange);
     // The mesh only starts announcing once peerConnected is listened to.
     session._sub = mesh.peerConnected.listen((_) {});
+    // On mobile, route audio to speaker (not earpiece) by default.
+    if (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS) {
+      await Helper.setSpeakerphoneOn(true);
+    }
     session._levelTimer = Timer.periodic(
       const Duration(milliseconds: 250),
       (_) => unawaited(session._pollLevels()),
