@@ -11,14 +11,14 @@ void main() {
       final frame = HaveFrame(['abc123', 'def456']);
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<HaveFrame>());
-      expect((decoded as HaveFrame).heads, ['abc123', 'def456']);
+      expect((decoded! as HaveFrame).heads, ['abc123', 'def456']);
     });
 
     test('WantFrame round-trips', () {
       final frame = WantFrame(['id1', 'id2', 'id3']);
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<WantFrame>());
-      expect((decoded as WantFrame).ids, ['id1', 'id2', 'id3']);
+      expect((decoded! as WantFrame).ids, ['id1', 'id2', 'id3']);
     });
 
     test('GiveFrame round-trips', () async {
@@ -31,7 +31,7 @@ void main() {
       final frame = GiveFrame(message);
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<GiveFrame>());
-      final give = decoded as GiveFrame;
+      final give = decoded! as GiveFrame;
       expect(give.message.channel, 'ch1');
       expect(await give.message.verify(), isTrue);
     });
@@ -40,7 +40,7 @@ void main() {
       final frame = WantBlobFrame('blobhash123');
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<WantBlobFrame>());
-      expect((decoded as WantBlobFrame).hash, 'blobhash123');
+      expect((decoded! as WantBlobFrame).hash, 'blobhash123');
     });
 
     test('GiveBlobFrame round-trips', () {
@@ -48,7 +48,7 @@ void main() {
       final frame = GiveBlobFrame('blobhash', bytes);
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<GiveBlobFrame>());
-      final give = decoded as GiveBlobFrame;
+      final give = decoded! as GiveBlobFrame;
       expect(give.hash, 'blobhash');
       expect(give.bytes, bytes);
     });
@@ -57,7 +57,7 @@ void main() {
       final frame = HaveFrame([]);
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<HaveFrame>());
-      expect((decoded as HaveFrame).heads, isEmpty);
+      expect((decoded! as HaveFrame).heads, isEmpty);
     });
 
     test('malformed JSON returns null', () {
