@@ -15,7 +15,9 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     hide Message;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
@@ -849,32 +851,42 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Back up your identity'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Save this recovery code somewhere safe. Anyone who has it can '
-              'become you — never share it. It is the only way to restore your '
-              'identity if you lose this device.',
-            ),
-            const SizedBox(height: 12),
-            const Text('Recovery code:', style: TextStyle(fontSize: 12)),
-            const SizedBox(height: 4),
-            SelectableText(
-              codeB64,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Hex: $codeHex',
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 10,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Save this recovery code somewhere safe. Anyone who has it can '
+                'become you — never share it. It is the only way to restore your '
+                'identity if you lose this device.',
               ),
-            ),
-          ],
+              const SizedBox(height: 16),
+              Center(
+                child: QrImageView(
+                  data: codeB64,
+                  size: 200,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text('Recovery code:', style: TextStyle(fontSize: 12)),
+              const SizedBox(height: 4),
+              SelectableText(
+                codeB64,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Hex: $codeHex',
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 10,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -896,11 +908,57 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Restores an identity from a recovery code, replacing this device's.
   Future<void> _restoreIdentity() async {
-    final code = await _promptText(
-      title: 'Restore identity',
-      hint: 'paste your recovery code',
-      action: 'Restore',
-    );
+    final isMobile = Theme.of(context).platform == TargetPlatform.android ||
+        Theme.of(context).platform == TargetPlatform.iOS;
+    String? code;
+    if (isMobile) {
+      // Mobile: offer scan or paste.
+      code = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Restore identity'),
+          content: const Text('Scan a QR code from another device, or paste a recovery code.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton.icon(
+              onPressed: () async {
+                final result = await Navigator.push<String>(
+                  ctx,
+                  MaterialPageRoute<String>(builder: (_) => const _QrScanPage()),
+                );
+                if (ctx.mounted) Navigator.pop(ctx, result);
+              },
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan QR'),
+            ),
+            TextButton.icon(
+              onPressed: () async {
+                Navigator.pop(ctx);
+              },
+              icon: const Icon(Icons.paste),
+              label: const Text('Paste'),
+            ),
+          ],
+        ),
+      );
+      // If "Paste" was chosen (null result from dialog), fall through to text prompt.
+      if (code == null && mounted) {
+        code = await _promptText(
+          title: 'Restore identity',
+          hint: 'paste your recovery code',
+          action: 'Restore',
+        );
+      }
+    } else {
+      code = await _promptText(
+        title: 'Restore identity',
+        hint: 'paste your recovery code',
+        action: 'Restore',
+      );
+    }
     if (code == null || code.trim().isEmpty) return;
     Uint8List? seed;
     final trimmed = code.trim();
@@ -4425,4 +4483,32 @@ class _FlamePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_FlamePainter old) => old.phase != phase;
+}
+
+/// Full-screen camera scanner for QR identity restore (mobile only).
+class _QrScanPage extends StatefulWidget {
+  const _QrScanPage();
+  @override
+  State<_QrScanPage> createState() => _QrScanPageState();
+}
+
+class _QrScanPageState extends State<_QrScanPage> {
+  bool _scanned = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan recovery QR')),
+      body: MobileScanner(
+        onDetect: (capture) {
+          if (_scanned) return;
+          final code = capture.barcodes.firstOrNull?.rawValue;
+          if (code != null && code.trim().isNotEmpty) {
+            _scanned = true;
+            Navigator.pop(context, code.trim());
+          }
+        },
+      ),
+    );
+  }
 }
