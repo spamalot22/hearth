@@ -17,6 +17,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -126,6 +127,12 @@ void main() async {
   }
   // Init local notifications for background message toasts.
   await _initNotifications();
+  // Request microphone permission on mobile (prevents NotAllowedError on first use).
+  if (!kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS)) {
+    await Permission.microphone.request();
+  }
   runApp(HearthApp(keyStore: SecureKeyStore()));
 }
 
@@ -1214,9 +1221,13 @@ class _ChatScreenState extends State<ChatScreen> {
           future: _enumerateAudioDevices(),
           builder: (context, snapshot) {
             final devices = snapshot.data ?? [];
-            final mics = devices.where((d) => d.kind == 'audioinput').toList();
+            final seen = <String>{};
+            final mics = devices
+                .where((d) => d.kind == 'audioinput' && seen.add(d.deviceId))
+                .toList();
+            seen.clear();
             final speakers = devices
-                .where((d) => d.kind == 'audiooutput')
+                .where((d) => d.kind == 'audiooutput' && seen.add(d.deviceId))
                 .toList();
             return Padding(
               padding: const EdgeInsets.all(16),
