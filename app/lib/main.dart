@@ -702,6 +702,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// Members (by id) who've posted in [session], excluding you.
+  /// All peers currently connected across all channel meshes.
+  Set<String> _allOnlinePeers() {
+    final result = <String>{};
+    for (final s in _channels?.sessions ?? <ChannelSession>[]) {
+      result.addAll(s.mesh?.peers ?? []);
+    }
+    return result;
+  }
+
   Set<String> _membersOf(ChannelSession session) {
     final self = hex.encode(widget.identity.publicKey);
     return {
@@ -749,16 +758,36 @@ class _ChatScreenState extends State<ChatScreen> {
     ];
   }
 
-  Widget _memberTile(String key) => ListTile(
-    dense: true,
-    contentPadding: EdgeInsets.zero,
-    leading: _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
-    title: Text(
-      _displayName(Uint8List.fromList(hex.decode(key))),
-      overflow: TextOverflow.ellipsis,
-    ),
-    onTap: () => unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
-  );
+  Widget _memberTile(String key) {
+    final online = _allOnlinePeers().contains(key);
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: Stack(
+        children: [
+          _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
+          Positioned(
+            right: 0,
+            bottom: 0,
+            child: Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: online ? Colors.green : Colors.grey,
+                border: Border.all(color: Theme.of(context).scaffoldBackgroundColor, width: 1.5),
+              ),
+            ),
+          ),
+        ],
+      ),
+      title: Text(
+        _displayName(Uint8List.fromList(hex.decode(key))),
+        overflow: TextOverflow.ellipsis,
+      ),
+      onTap: () => unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
+    );
+  }
 
   /// Prompts you to add a member who joins *after* you're settled in a channel
   /// (joining yourself doesn't flood you — the bulk-add covers existing members).
@@ -2675,6 +2704,7 @@ class _ChatScreenState extends State<ChatScreen> {
           contacts: contacts,
           groups: _groups,
           identity: widget.identity,
+          onlinePeers: _allOnlinePeers(),
           onDm: (pubkeyHex) async {
             await _channels?.openDm(hex.decode(pubkeyHex));
             if (mounted) setState(() {});
@@ -4058,6 +4088,7 @@ class _ContactsPage extends StatefulWidget {
     required this.contacts,
     required this.groups,
     required this.identity,
+    required this.onlinePeers,
     required this.onDm,
     required this.onInvite,
     required this.onRemove,
@@ -4067,6 +4098,7 @@ class _ContactsPage extends StatefulWidget {
   final ContactBook contacts;
   final Map<String, GroupChannel> groups;
   final Identity identity;
+  final Set<String> onlinePeers;
   final Future<void> Function(String pubkeyHex) onDm;
   final void Function(String pubkeyHex, String channelId) onInvite;
   final Future<void> Function(String pubkeyHex) onRemove;
@@ -4127,14 +4159,37 @@ class _ContactsPageState extends State<_ContactsPage> {
                     itemBuilder: (context, i) {
                       final pubkeyHex = entries.keys.elementAt(i);
                       final name = entries.values.elementAt(i);
+                      final online = widget.onlinePeers.contains(pubkeyHex);
                       return ListTile(
-                        leading: CircleAvatar(
-                          child: Text(name[0].toUpperCase()),
+                        leading: Stack(
+                          children: [
+                            CircleAvatar(
+                              child: Text(name[0].toUpperCase()),
+                            ),
+                            Positioned(
+                              right: 0,
+                              bottom: 0,
+                              child: Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: online ? Colors.green : Colors.grey,
+                                  border: Border.all(
+                                    color: Theme.of(context).scaffoldBackgroundColor,
+                                    width: 2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                         title: Text(name),
                         subtitle: Text(
-                          'hearth#${pubkeyHex.substring(0, 8)}',
-                          style: Theme.of(context).textTheme.bodySmall,
+                          online ? 'Online' : 'hearth#${pubkeyHex.substring(0, 8)}',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: online ? Colors.green : null,
+                          ),
                         ),
                         trailing: PopupMenuButton<String>(
                           onSelected: (action) => _onAction(action, pubkeyHex),
