@@ -104,35 +104,46 @@ void recordEmojiUse(String emoji) {
 }
 
 /// Shows a bottom-sheet emoji grid and resolves to the chosen emoji (or null).
-Future<String?> pickEmoji(BuildContext context) async {
+Future<String?> pickEmoji(BuildContext context, {String? title}) async {
   final result = await showModalBottomSheet<String>(
     context: context,
     builder: (context) => SafeArea(
-      child: GridView.count(
-        crossAxisCount: 8,
-        shrinkWrap: true,
-        padding: const EdgeInsets.all(8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Recent row first (if any).
-          for (final emoji in _recentEmoji)
-            InkWell(
-              onTap: () => Navigator.pop(context, emoji),
-              child: Center(
+          if (title != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Text(title, style: Theme.of(context).textTheme.titleSmall),
+            ),
+          GridView.count(
+            crossAxisCount: 8,
+            shrinkWrap: true,
+            padding: const EdgeInsets.all(8),
+            children: [
+              // Recent row first (if any).
+              for (final emoji in _recentEmoji)
+                InkWell(
+                  onTap: () => Navigator.pop(context, emoji),
+                  child: Center(
+                    child: Text(emoji, style: const TextStyle(fontSize: 24)),
+                  ),
+                ),
+              // Pad the recent row to a full 8-wide line.
+              if (_recentEmoji.isNotEmpty)
+                for (var i = 0; i < (8 - _recentEmoji.length % 8) % 8; i++)
+                  const SizedBox.shrink(),
+              // Full emoji set.
+              for (final emoji in kQuickEmoji)
+                InkWell(
+                  onTap: () => Navigator.pop(context, emoji),
+                  child: Center(
                 child: Text(emoji, style: const TextStyle(fontSize: 24)),
               ),
             ),
-          // Pad the recent row to a full 8-wide line.
-          if (_recentEmoji.isNotEmpty)
-            for (var i = 0; i < (8 - _recentEmoji.length % 8) % 8; i++)
-              const SizedBox.shrink(),
-          // Full emoji set.
-          for (final emoji in kQuickEmoji)
-            InkWell(
-              onTap: () => Navigator.pop(context, emoji),
-              child: Center(
-                child: Text(emoji, style: const TextStyle(fontSize: 24)),
-              ),
-            ),
+        ],
+      ),
         ],
       ),
     ),

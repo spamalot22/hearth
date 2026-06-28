@@ -1682,7 +1682,7 @@ class _ChatScreenState extends State<ChatScreen> {
       action: 'Add',
     );
     if (name == null || name.trim().isEmpty || !mounted) return;
-    final emoji = await pickEmoji(context) ?? '🔊';
+    final emoji = await pickEmoji(context, title: 'Pick an icon for this sound') ?? '🔊';
     final hash = await store.put(bytes);
     await _publish(SoundContent(hash, name.trim(), emoji));
   }
@@ -1701,7 +1701,7 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
       if (!mounted) return;
-      final emoji = await pickEmoji(context) ?? '🔊';
+      final emoji = await pickEmoji(context, title: 'Pick an icon for this sound') ?? '🔊';
       final hash = await store.put(res.bodyBytes);
       await _publish(SoundContent(hash, picked.name, emoji));
     } catch (_) {
