@@ -639,7 +639,7 @@ class _ChatScreenState extends State<ChatScreen> {
             if (entry.key != control.channelId) entry.value.remove(fromHex);
           }
         }
-        // Prune stale entries (>12s without refresh).
+        // Prune stale entries (>30s without refresh).
         final cutoff = DateTime.now().subtract(const Duration(seconds: 30));
         _voicePresenceTs.removeWhere((_, ts) => ts.isBefore(cutoff));
         for (final set in _voicePresence.values) {
@@ -872,34 +872,35 @@ class _ChatScreenState extends State<ChatScreen> {
     return Material(
       type: MaterialType.transparency,
       child: ListTile(
-      dense: true,
-      contentPadding: EdgeInsets.zero,
-      leading: Stack(
-        children: [
-          _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
-          Positioned(
-            right: 0,
-            bottom: 0,
-            child: Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isOnline ? Colors.green : Colors.grey,
-                border: Border.all(
-                  color: Theme.of(context).scaffoldBackgroundColor,
-                  width: 1.5,
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        leading: Stack(
+          children: [
+            _avatar(Uint8List.fromList(hex.decode(key)), radius: 14),
+            Positioned(
+              right: 0,
+              bottom: 0,
+              child: Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isOnline ? Colors.green : Colors.grey,
+                  border: Border.all(
+                    color: Theme.of(context).scaffoldBackgroundColor,
+                    width: 1.5,
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
-      ),
-      title: Text(
-        _displayName(Uint8List.fromList(hex.decode(key))),
-        overflow: TextOverflow.ellipsis,
-      ),
-      onTap: () => unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
+          ],
+        ),
+        title: Text(
+          _displayName(Uint8List.fromList(hex.decode(key))),
+          overflow: TextOverflow.ellipsis,
+        ),
+        onTap: () =>
+            unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
       ),
     );
   }
