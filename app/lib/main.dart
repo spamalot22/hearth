@@ -2669,18 +2669,52 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                       if (defaultTargetPlatform == TargetPlatform.android ||
                           defaultTargetPlatform == TargetPlatform.iOS)
-                        IconButton(
-                          onPressed: () async {
-                            final next = !_speakerOn;
-                            await Helper.setSpeakerphoneOn(next);
-                            setState(() => _speakerOn = next);
-                          },
+                        PopupMenuButton<String>(
                           icon: Icon(
                             _speakerOn
                                 ? Icons.volume_up
                                 : Icons.phone_in_talk,
                           ),
-                          tooltip: _speakerOn ? 'Earpiece' : 'Speaker',
+                          tooltip: 'Audio output',
+                          onSelected: (value) async {
+                            if (value == 'speaker') {
+                              await Helper.setSpeakerphoneOn(true);
+                              setState(() => _speakerOn = true);
+                            } else if (value == 'earpiece') {
+                              await Helper.setSpeakerphoneOn(false);
+                              setState(() => _speakerOn = false);
+                            } else if (value == 'bluetooth') {
+                              await Helper
+                                  .setSpeakerphoneOnButPreferBluetooth();
+                              setState(() => _speakerOn = true);
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'speaker',
+                              child: ListTile(
+                                dense: true,
+                                leading: Icon(Icons.volume_up),
+                                title: Text('Speaker'),
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'earpiece',
+                              child: ListTile(
+                                dense: true,
+                                leading: Icon(Icons.phone_in_talk),
+                                title: Text('Earpiece'),
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'bluetooth',
+                              child: ListTile(
+                                dense: true,
+                                leading: Icon(Icons.bluetooth_audio),
+                                title: Text('Bluetooth'),
+                              ),
+                            ),
+                          ],
                         ),
                       if (_screenShareSupported)
                         IconButton(
