@@ -132,6 +132,9 @@ Future<void> _installWindows(String zipPath) async {
       'powershell -NoProfile -Command "Expand-Archive -LiteralPath '
       "'$zipPath' -DestinationPath '$extractDir' -Force\"",
     )
+    // Wipe old install (handles removed DLLs), then copy new build in.
+    ..writeln('rmdir /S /Q "$exeDir" 2>nul')
+    ..writeln('mkdir "$exeDir"')
     ..writeln('xcopy /E /Y /I "$extractDir\\*" "$exeDir" >nul')
     ..writeln('rmdir /S /Q "$extractDir" 2>nul')
     ..writeln('start "" "$exeDir\\hearth.exe"')
