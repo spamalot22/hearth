@@ -128,12 +128,6 @@ void main() async {
   }
   // Init local notifications for background message toasts.
   await _initNotifications();
-  // Request microphone permission on mobile (prevents NotAllowedError on first use).
-  if (!kIsWeb &&
-      (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.iOS)) {
-    await Permission.microphone.request();
-  }
   runApp(HearthApp(keyStore: SecureKeyStore()));
 }
 
@@ -2220,6 +2214,16 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Joins (or switches to) voice in [channelId], requesting the mic.
   Future<void> _joinVoice(String channelId) async {
     if (_voice != null) await _leaveVoice();
+    // Ensure mic permission on mobile before attempting getUserMedia.
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      final status = await Permission.microphone.request();
+      if (!status.isGranted) {
+        _setError('Microphone permission denied');
+        return;
+      }
+    }
     try {
       _voice = await VoiceSession.join(
         channelId: channelId,
