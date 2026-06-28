@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
@@ -642,6 +643,10 @@ class _PeerLink implements FrameChannel {
       }
       final frame = SyncFrame.decode(split.body);
       if (frame != null && !_frames.isClosed) _frames.add(frame);
+      if (frame == null && message.isBinary) {
+        debugPrint('[hearth] dropped malformed binary frame '
+            '(${message.binary.length} bytes) from $peerHex');
+      }
     };
     channel.onDataChannelState = (state) {
       if (state == RTCDataChannelState.RTCDataChannelOpen && !_opened) {

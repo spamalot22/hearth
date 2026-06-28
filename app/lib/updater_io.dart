@@ -25,6 +25,7 @@ Future<void> cleanupOldUpdates() async {
     }
   } catch (_) {}
 }
+
 /// Downloads this platform's release asset directly from GitHub Releases,
 /// verifies its SHA-256 against the signed manifest, then launches the platform
 /// install. A tampered download is caught by hash mismatch.
@@ -132,6 +133,8 @@ Future<void> _installWindows(String zipPath) async {
       'powershell -NoProfile -Command "Expand-Archive -LiteralPath '
       "'$zipPath' -DestinationPath '$extractDir' -Force\"",
     )
+    // Abort if the extract failed (don't wipe a working install).
+    ..writeln('if not exist "$extractDir\\hearth.exe" (echo Extract failed & exit /b 1)')
     // Wipe old install (handles removed DLLs), then copy new build in.
     ..writeln('rmdir /S /Q "$exeDir" 2>nul')
     ..writeln('mkdir "$exeDir"')

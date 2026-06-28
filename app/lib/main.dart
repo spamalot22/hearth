@@ -49,7 +49,10 @@ import 'voice.dart';
 import 'youtube_share.dart';
 
 /// Relay endpoint for local dev (signalling only).
-final Uri kRelayUrl = Uri.parse('https://hearth-relay.tail62d608.ts.net');
+final Uri kRelayUrl = Uri.parse(const String.fromEnvironment(
+  'RELAY_URL',
+  defaultValue: 'http://localhost:8787',
+));
 
 /// Held for process lifetime to enforce single-instance.
 // ignore: unused_element
@@ -372,6 +375,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _speakerOn = true;
   // Voice presence: who's in voice per channel (learned via gossip mesh).
   final Map<String, Set<String>> _voicePresence = {}; // channelId -> peerHexes
+  final Map<String, DateTime> _voicePresenceTs = {}; // peerHex -> last seen
   Timer? _voicePresenceTimer;
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
@@ -515,7 +519,7 @@ class _ChatScreenState extends State<ChatScreen> {
       onForceUpdate: (info) {
         if (mounted) setState(() => _updateInfo = info);
       },
-      onInference: _handleInference,
+      onInference: _handleMeshControl,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -550,7 +554,11 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(_refresh());
   }
 
-  void _onUpdate() => unawaited(_refresh());
+  void _onUpdate() {
+    // Re-broadcast voice presence to newly-connected peers immediately.
+    if (_voice != null) _broadcastVoicePresence(_voice!.channelId);
+    unawaited(_refresh());
+  }
 
   void _notifyBackground(String channelId) {
     if (!mounted) return;
@@ -614,7 +622,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, DateTime> _inferCooldown = {};
 
   /// Handles incoming inference controls from a peer in [channelId].
-  void _handleInference(String fromHex, String channelId, MeshControl control) {
+  void _handleMeshControl(String fromHex, String channelId, MeshControl control) {
     if (control is VoicePresenceControl) {
       setState(() {
         if (control.channelId.isEmpty) {
@@ -622,12 +630,20 @@ class _ChatScreenState extends State<ChatScreen> {
           for (final set in _voicePresence.values) {
             set.remove(fromHex);
           }
+          _voicePresenceTs.remove(fromHex);
         } else {
           (_voicePresence[control.channelId] ??= {}).add(fromHex);
+          _voicePresenceTs[fromHex] = DateTime.now();
           // Remove from other channels (can only be in one).
           for (final entry in _voicePresence.entries) {
             if (entry.key != control.channelId) entry.value.remove(fromHex);
           }
+        }
+        // Prune stale entries (>30s without refresh).
+        final cutoff = DateTime.now().subtract(const Duration(seconds: 30));
+        _voicePresenceTs.removeWhere((_, ts) => ts.isBefore(cutoff));
+        for (final set in _voicePresence.values) {
+          set.removeWhere((h) => !_voicePresenceTs.containsKey(h));
         }
       });
       return;
@@ -1710,6 +1726,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     setState(() => _relayUrl = parsed);
     // Tear down and rebuild the mesh on the new relay.
+    final cache = _channels?.candidateCache;
     await _channels?.close();
     final channels = ChannelManager(
       identity: widget.identity,
@@ -1717,12 +1734,12 @@ class _ChatScreenState extends State<ChatScreen> {
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: _blobStore,
-      candidateCache: null,
+      candidateCache: cache,
       onBackgroundMessage: _notifyBackground,
       onForceUpdate: (info) {
         if (mounted) setState(() => _updateInfo = info);
       },
-      onInference: _handleInference,
+      onInference: _handleMeshControl,
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);
@@ -2003,15 +2020,15 @@ class _ChatScreenState extends State<ChatScreen> {
     unawaited(player.play(BytesSource(bytes)).catchError((_) {}));
     // Clean up when done; 10s safety cap for long clips.
     player.onPlayerComplete.listen((_) async {
-      await player.dispose();
-      _soundPlayers.remove(player);
+      if (_soundPlayers.remove(player)) {
+        await player.dispose();
+      }
     });
     unawaited(
       Future.delayed(const Duration(seconds: 10), () async {
-        if (_soundPlayers.contains(player)) {
+        if (_soundPlayers.remove(player)) {
           await player.stop();
           await player.dispose();
-          _soundPlayers.remove(player);
         }
       }),
     );

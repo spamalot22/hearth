@@ -81,7 +81,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build apk --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
+          flutter build apk --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }} --dart-define=RELAY_URL=${{ vars.RELAY_URL }}
       - run: mv app/build/app/outputs/flutter-apk/app-release.apk hearth-android.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -102,7 +102,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build windows --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
+          flutter build windows --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }} --dart-define=RELAY_URL=${{ vars.RELAY_URL }}
       - name: Zip
         run: Compress-Archive -Path app/build/windows/x64/runner/Release/* -DestinationPath hearth-windows.zip
       - uses: actions/upload-artifact@v4
@@ -123,7 +123,7 @@ jobs:
         working-directory: app
         run: |
           flutter pub get
-          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }}
+          flutter build web --release --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }} --dart-define=RELAY_URL=${{ vars.RELAY_URL }}
       - name: Zip
         run: cd app/build/web && zip -r "$GITHUB_WORKSPACE/hearth-web.zip" .
       - uses: actions/upload-artifact@v4
