@@ -713,6 +713,19 @@ class _ChatScreenState extends State<ChatScreen> {
     return result;
   }
 
+  /// Last message timestamp per peer across all sessions.
+  Map<String, int> _computeLastSeen() {
+    final result = <String, int>{};
+    for (final s in _channels?.sessions ?? <ChannelSession>[]) {
+      for (final msg in s.repository.ordered()) {
+        final key = hex.encode(msg.author);
+        final ts = msg.timestampMs;
+        if (ts > (result[key] ?? 0)) result[key] = ts;
+      }
+    }
+    return result;
+  }
+
   Set<String> _membersOf(ChannelSession session) {
     final self = hex.encode(widget.identity.publicKey);
     return {
@@ -743,8 +756,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final active = members.where((k) => (now - (lastSeen[k] ?? 0)) < sevenDays).toList();
     final inactive = members.where((k) => (now - (lastSeen[k] ?? 0)) >= sevenDays).toList();
 
+    final onlinePeers = _allOnlinePeers();
+
     return [
-      for (final key in active) _memberTile(key, online: true),
+      for (final key in active) _memberTile(key, online: onlinePeers.contains(key)),
       if (inactive.isNotEmpty)
         ExpansionTile(
           tilePadding: EdgeInsets.zero,
@@ -755,7 +770,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           initiallyExpanded: false,
-          children: [for (final key in inactive) _memberTile(key, online: false)],
+          children: [for (final key in inactive) _memberTile(key, online: onlinePeers.contains(key))],
         ),
     ];
   }
@@ -2763,6 +2778,7 @@ class _ChatScreenState extends State<ChatScreen> {
           groups: _groups,
           identity: widget.identity,
           onlinePeers: _allOnlinePeers(),
+          lastSeen: _computeLastSeen(),
           onDm: (pubkeyHex) async {
             await _channels?.openDm(hex.decode(pubkeyHex));
             if (mounted) setState(() {});
@@ -4147,6 +4163,7 @@ class _ContactsPage extends StatefulWidget {
     required this.groups,
     required this.identity,
     required this.onlinePeers,
+    required this.lastSeen,
     required this.onDm,
     required this.onInvite,
     required this.onRemove,
@@ -4157,6 +4174,7 @@ class _ContactsPage extends StatefulWidget {
   final Map<String, GroupChannel> groups;
   final Identity identity;
   final Set<String> onlinePeers;
+  final Map<String, int> lastSeen; // pubkeyHex -> epoch ms
   final Future<void> Function(String pubkeyHex) onDm;
   final void Function(String pubkeyHex, String channelId) onInvite;
   final Future<void> Function(String pubkeyHex) onRemove;
@@ -4167,6 +4185,16 @@ class _ContactsPage extends StatefulWidget {
 }
 
 class _ContactsPageState extends State<_ContactsPage> {
+  String _formatLastSeen(int? ms) {
+    if (ms == null || ms == 0) return 'Offline';
+    final ago = DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ms));
+    if (ago.inMinutes < 1) return 'Last seen just now';
+    if (ago.inHours < 1) return 'Last seen ${ago.inMinutes}m ago';
+    if (ago.inDays < 1) return 'Last seen ${ago.inHours}h ago';
+    if (ago.inDays < 7) return 'Last seen ${ago.inDays}d ago';
+    return 'Last seen over a week ago';
+  }
+
   @override
   Widget build(BuildContext context) {
     final selfHex = widget.identity.publicKeyHex;
@@ -4244,7 +4272,7 @@ class _ContactsPageState extends State<_ContactsPage> {
                         ),
                         title: Text(name),
                         subtitle: Text(
-                          online ? 'Online' : 'hearth#${pubkeyHex.substring(0, 8)}',
+                          online ? 'Online' : _formatLastSeen(widget.lastSeen[pubkeyHex]),
                           style: Theme.of(context).textTheme.bodySmall?.copyWith(
                             color: online ? Colors.green : null,
                           ),

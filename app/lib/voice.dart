@@ -78,6 +78,15 @@ class VoiceSession {
     // the native WebRTC layer opens the correct capture device.
     Object audioConstraint = true;
     try {
+      // Trigger permission grant first (Windows needs this for labels).
+      final probe = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+      for (final t in probe.getTracks()) {
+        await t.stop();
+      }
+      await probe.dispose();
       final devices = await navigator.mediaDevices.enumerateDevices();
       final mics = devices.where((d) => d.kind == 'audioinput').toList();
       if (mics.isNotEmpty && mics.first.deviceId.isNotEmpty) {
