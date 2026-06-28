@@ -205,6 +205,9 @@ class WebRtcMesh {
 
   String? _authToken;
 
+  /// The current announce token (valid for ~60s, refreshed each announce cycle).
+  String? get authToken => _authToken;
+
   /// Forces an immediate re-announce (e.g. after relay recovery).
   void forceAnnounce() {
     _announceTimer?.cancel();

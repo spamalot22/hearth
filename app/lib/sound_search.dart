@@ -23,11 +23,13 @@ class _SoundResult {
   final String? unavailable;
 }
 
-Future<_SoundResult> _search(Uri relayUrl, String query) async {
+Future<_SoundResult> _search(Uri relayUrl, String query, String? token) async {
   final http.Response res;
   try {
+    final params = <String, String>{'q': query};
+    if (token != null) params['token'] = token;
     res = await http.get(
-      relayUrl.replace(path: '/sound/search', queryParameters: {'q': query}),
+      relayUrl.replace(path: '/sound/search', queryParameters: params),
     );
   } catch (_) {
     return const _SoundResult.unavailable(
@@ -50,19 +52,22 @@ Future<_SoundResult> _search(Uri relayUrl, String query) async {
 /// Shows a sound search sheet; resolves to the chosen clip (url + name), or null.
 Future<({String url, String name})?> pickSound(
   BuildContext context,
-  Uri relayUrl,
-) {
+  Uri relayUrl, {
+  String? Function()? tokenProvider,
+}) {
   return showModalBottomSheet<({String url, String name})>(
     context: context,
     isScrollControlled: true,
-    builder: (context) => _SoundSearchSheet(relayUrl: relayUrl),
+    builder: (context) =>
+        _SoundSearchSheet(relayUrl: relayUrl, tokenProvider: tokenProvider),
   );
 }
 
 class _SoundSearchSheet extends StatefulWidget {
-  const _SoundSearchSheet({required this.relayUrl});
+  const _SoundSearchSheet({required this.relayUrl, this.tokenProvider});
 
   final Uri relayUrl;
+  final String? Function()? tokenProvider;
 
   @override
   State<_SoundSearchSheet> createState() => _SoundSearchSheetState();
@@ -85,7 +90,7 @@ class _SoundSearchSheetState extends State<_SoundSearchSheet> {
     // Block body: an arrow here would *return* the Future to setState, which
     // throws "callback returned a Future".
     setState(() {
-      _results = _search(widget.relayUrl, q);
+      _results = _search(widget.relayUrl, q, widget.tokenProvider?.call());
     });
   }
 

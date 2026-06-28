@@ -41,6 +41,7 @@ class RelayTransport implements Transport {
   RelayTransport({
     required this.baseUrl,
     required this.channel,
+    this.tokenProvider,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
   }) : _client = client ?? http.Client();
@@ -49,6 +50,9 @@ class RelayTransport implements Transport {
   final String channel;
   final Duration pollInterval;
   final http.Client _client;
+
+  /// Returns the current auth token (from announce). Poll is skipped if null.
+  final String? Function()? tokenProvider;
 
   late final StreamController<Message> _incoming =
       StreamController<Message>.broadcast(onListen: _startPolling);
@@ -106,11 +110,13 @@ class RelayTransport implements Transport {
   /// One poll round: fetches messages newer than the cursor, returns only those
   /// that verify, and advances the cursor.
   Future<List<Message>> poll() async {
+    final token = tokenProvider?.call();
+    // Skip poll if no token available yet (announce hasn't completed).
+    if (token == null && tokenProvider != null) return [];
+    final params = <String, String>{'channel': channel, 'since': '$_since'};
+    if (token != null) params['token'] = token;
     final res = await _client.get(
-      baseUrl.replace(
-        path: '/poll',
-        queryParameters: {'channel': channel, 'since': '$_since'},
-      ),
+      baseUrl.replace(path: '/poll', queryParameters: params),
     );
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');

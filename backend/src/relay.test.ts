@@ -47,6 +47,28 @@ function post(app: ReturnType<typeof createRelay>, wire: WireMessage) {
   });
 }
 
+/** Performs a signed announce and returns the auth token. */
+async function getToken(
+  app: ReturnType<typeof createRelay>,
+  channel = 'general',
+): Promise<string> {
+  const seed = ed.utils.randomPrivateKey();
+  const pubkey = await ed.getPublicKeyAsync(seed);
+  const pubkeyHex = Buffer.from(pubkey).toString('hex');
+  const ts = Date.now();
+  const msg = new TextEncoder().encode(
+    `announce|${channel}|${pubkeyHex}|${ts}`,
+  );
+  const sig = Buffer.from(await ed.signAsync(msg, seed)).toString('hex');
+  const res = await app.request('/announce', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ channel, pubkey: pubkeyHex, ts, sig }),
+  });
+  const body = (await res.json()) as { token: string };
+  return body.token;
+}
+
 describe('relay', () => {
   it('accepts a valid message and returns it on poll', async () => {
     const app = createRelay();
@@ -54,7 +76,8 @@ describe('relay', () => {
 
     expect((await post(app, wire)).status).toBe(200);
 
-    const res = await app.request('/poll?channel=general&since=0');
+    const token = await getToken(app);
+    const res = await app.request(`/poll?channel=general&since=0&token=${token}`);
     const data = (await res.json()) as { messages: WireMessage[]; seq: number };
     expect(data.messages).toHaveLength(1);
     expect(data.messages[0]!.id).toBe(wire.id);
@@ -84,13 +107,15 @@ describe('relay', () => {
 
   it('returns only messages newer than `since`', async () => {
     const app = createRelay();
+    const token = await getToken(app);
     await post(app, await makeWire('m1'));
-    const first = (await (await app.request('/poll?channel=general&since=0'))
-      .json()) as { seq: number };
+    const first = (await (await app.request(
+      `/poll?channel=general&since=0&token=${token}`,
+    )).json()) as { seq: number };
 
     await post(app, await makeWire('m2'));
     const second = (await (await app.request(
-      `/poll?channel=general&since=${first.seq}`,
+      `/poll?channel=general&since=${first.seq}&token=${token}`,
     )).json()) as { messages: WireMessage[] };
 
     expect(second.messages).toHaveLength(1);
@@ -113,9 +138,10 @@ describe('relay', () => {
 
   it('rate-limits the media-search proxy', async () => {
     const app = createRelay();
+    const token = await getToken(app);
     let limited = false;
     for (let i = 0; i < 40; i++) {
-      if ((await app.request('/gif/search?q=x')).status === 429) {
+      if ((await app.request(`/gif/search?q=x&token=${token}`)).status === 429) {
         limited = true;
         break;
       }

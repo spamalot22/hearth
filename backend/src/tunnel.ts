@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from 'hono';
 
+import { RateLimiter, TUNNEL_RATE_LIMIT, TUNNEL_RATE_WINDOW_MS } from './limits';
+
 /**
  * Relay tunnel for symmetric-NAT pairs: when ICE fails completely, two peers
  * can tunnel their already-encrypted gossip frames through the relay. The relay
@@ -47,6 +49,8 @@ export function addTunnelRoutes(
   hub: TunnelHub,
   verifyToken: (token: string, nowMs: number) => string | null,
 ): void {
+  const tunnelLimiter = new RateLimiter(TUNNEL_RATE_LIMIT, TUNNEL_RATE_WINDOW_MS);
+
   // A peer sends a frame through the relay to another peer.
   app.post('/tunnel', async (c) => {
     const body = (await c.req.json()) as {
@@ -62,6 +66,11 @@ export function addTunnelRoutes(
     const owner = verifyToken(body.token, Date.now());
     if (owner !== body.from) {
       return c.json({ error: 'invalid or expired token' }, 403);
+    }
+    // Per-pair bandwidth cap.
+    const pairKey = `${body.from}|${body.to}`;
+    if (!tunnelLimiter.allow(pairKey, Date.now())) {
+      return c.json({ error: 'rate limited' }, 429);
     }
     hub.post(body.from, body.to, body.data, Date.now());
     return c.json({ ok: true });

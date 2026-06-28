@@ -1828,7 +1828,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendGif() async {
     final store = _blobStore;
     if (store == null) return;
-    final url = await pickGif(context, _relayUrl);
+    final url = await pickGif(context, _relayUrl,
+        tokenProvider: () => _channels?.active?.mesh?.authToken);
     if (url == null) return;
     try {
       final res = await http.get(Uri.parse(url));
@@ -1996,7 +1997,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _searchSound() async {
     final store = _blobStore;
     if (store == null) return;
-    final picked = await pickSound(context, _relayUrl);
+    final picked = await pickSound(context, _relayUrl,
+        tokenProvider: () => _channels?.active?.mesh?.authToken);
     if (picked == null) return;
     try {
       final res = await http.get(Uri.parse(picked.url));

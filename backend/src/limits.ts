@@ -15,6 +15,9 @@ export const MAX_MAILBOX_SIGNALS = 64;
 /** Keep at most this many courier messages per channel. */
 export const MAX_CHANNEL_MESSAGES = 5000;
 
+/** Maximum unique channels before LRU eviction kicks in. */
+export const MAX_CHANNELS = 10_000;
+
 /** Media-search requests allowed per [SEARCH_RATE_WINDOW_MS] (relay-wide). */
 export const SEARCH_RATE_LIMIT = 30;
 export const SEARCH_RATE_WINDOW_MS = 60_000;
@@ -26,6 +29,14 @@ export const SIGNAL_RATE_WINDOW_MS = 10_000;
 /** Per-pubkey: max message POSTs per window. */
 export const MESSAGE_RATE_LIMIT = 30;
 export const MESSAGE_RATE_WINDOW_MS = 10_000;
+
+/** Per-IP: global request cap (catches keypair-rotating attackers). */
+export const IP_RATE_LIMIT = 60;
+export const IP_RATE_WINDOW_MS = 60_000;
+
+/** Per-pair tunnel: max frames per window (bandwidth cap). */
+export const TUNNEL_RATE_LIMIT = 120;
+export const TUNNEL_RATE_WINDOW_MS = 60_000;
 
 /**
  * A simple sliding-window rate limiter. Keyed (e.g. by pubkey, or a constant for a

@@ -4,8 +4,11 @@ import { cors } from 'hono/cors';
 
 import { addGifRoutes } from './gif';
 import {
+  IP_RATE_LIMIT,
+  IP_RATE_WINDOW_MS,
   MAX_BODY_BYTES,
   MAX_CHANNEL_MESSAGES,
+  MAX_CHANNELS,
   MESSAGE_RATE_LIMIT,
   MESSAGE_RATE_WINDOW_MS,
   RateLimiter,
@@ -39,11 +42,21 @@ export class RelayStore {
       list.splice(0, list.length - MAX_CHANNEL_MESSAGES);
     }
     this.byChannel.set(message.channel, list);
+    // LRU eviction: if over the cap, drop the oldest-accessed channel.
+    if (this.byChannel.size > MAX_CHANNELS) {
+      const oldest = this.byChannel.keys().next().value!;
+      this.byChannel.delete(oldest);
+    }
     return stored.seq;
   }
 
   since(channel: string, since: number): StoredMessage[] {
-    return (this.byChannel.get(channel) ?? []).filter((m) => m.seq > since);
+    const list = this.byChannel.get(channel);
+    if (!list) return [];
+    // Touch: move to end for LRU ordering.
+    this.byChannel.delete(channel);
+    this.byChannel.set(channel, list);
+    return list.filter((m) => m.seq > since);
   }
 }
 
@@ -75,14 +88,39 @@ export function createRelay(
 
   app.get('/health', (c) => c.json({ ok: true }));
 
+  // Per-IP global rate limit — catches keypair-rotating attackers. Applied to
+  // all routes except /health (which load balancers hit frequently).
+  const ipLimiter = new RateLimiter(IP_RATE_LIMIT, IP_RATE_WINDOW_MS);
+  const limitIp: MiddlewareHandler = async (c, next) => {
+    const ip =
+      c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ??
+      c.req.header('x-real-ip') ??
+      'unknown';
+    if (!ipLimiter.allow(ip, Date.now())) {
+      return c.json({ error: 'rate limited' }, 429);
+    }
+    await next();
+  };
+  app.use('/announce', limitIp);
+  app.use('/signal', limitIp);
+  app.use('/messages', limitIp);
+  app.use('/poll', limitIp);
+  app.use('/tunnel', limitIp);
+  app.use('/gif/*', limitIp);
+  app.use('/sound/*', limitIp);
+
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
   addSignalingRoutes(app, signalHub);
 
   // Cap the media-search proxies relay-wide so a stranger can't drain the provider
-  // quota (these calls carry no identity to key on). Registered before the routes
-  // so it runs ahead of them.
+  // quota. Also requires a valid announce token (proves you're a Hearth client, not
+  // a random scraper).
   const searchLimiter = new RateLimiter(SEARCH_RATE_LIMIT, SEARCH_RATE_WINDOW_MS);
   const limitSearch: MiddlewareHandler = async (c, next) => {
+    const token = c.req.query('token');
+    if (!token || !signalHub.verifyToken(token, Date.now())) {
+      return c.json({ error: 'token required' }, 403);
+    }
     if (!searchLimiter.allow('search', Date.now())) {
       return c.json({ error: 'rate limited' }, 429);
     }
@@ -132,9 +170,16 @@ export function createRelay(
   });
 
   // Short-poll: messages in a channel with seq greater than `since`.
+  // Requires a valid announce token to prevent strangers from observing channel
+  // activity (metadata leak).
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
     if (!channel) return c.json({ error: 'channel required' }, 400);
+    const token = c.req.query('token');
+    if (!token) return c.json({ error: 'token required' }, 403);
+    if (!signalHub.verifyToken(token, Date.now())) {
+      return c.json({ error: 'invalid or expired token' }, 403);
+    }
     const sinceRaw = Number(c.req.query('since') ?? '0');
     const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
     const fresh = store.since(channel, since);

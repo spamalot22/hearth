@@ -63,11 +63,13 @@ void recordGifSent(String url, [String? preview]) {
   _saveRecents();
 }
 
-Future<_GifResult> _search(Uri relayUrl, String query) async {
+Future<_GifResult> _search(Uri relayUrl, String query, String? token) async {
   final http.Response res;
   try {
+    final params = <String, String>{'q': query};
+    if (token != null) params['token'] = token;
     res = await http.get(
-      relayUrl.replace(path: '/gif/search', queryParameters: {'q': query}),
+      relayUrl.replace(path: '/gif/search', queryParameters: params),
     );
   } catch (_) {
     return const _GifResult.unavailable(
@@ -92,18 +94,24 @@ Future<_GifResult> _search(Uri relayUrl, String query) async {
 }
 
 /// Shows a GIF search sheet; resolves to the chosen GIF's URL, or null.
-Future<String?> pickGif(BuildContext context, Uri relayUrl) {
+Future<String?> pickGif(
+  BuildContext context,
+  Uri relayUrl, {
+  String? Function()? tokenProvider,
+}) {
   return showModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
-    builder: (context) => _GifSearchSheet(relayUrl: relayUrl),
+    builder: (context) =>
+        _GifSearchSheet(relayUrl: relayUrl, tokenProvider: tokenProvider),
   );
 }
 
 class _GifSearchSheet extends StatefulWidget {
-  const _GifSearchSheet({required this.relayUrl});
+  const _GifSearchSheet({required this.relayUrl, this.tokenProvider});
 
   final Uri relayUrl;
+  final String? Function()? tokenProvider;
 
   @override
   State<_GifSearchSheet> createState() => _GifSearchSheetState();
@@ -127,7 +135,7 @@ class _GifSearchSheetState extends State<_GifSearchSheet> {
     // Block body: an arrow here would *return* the Future to setState, which
     // throws "callback returned a Future".
     setState(() {
-      _results = _search(widget.relayUrl, q);
+      _results = _search(widget.relayUrl, q, widget.tokenProvider?.call());
     });
   }
 
