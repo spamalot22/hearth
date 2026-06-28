@@ -63,6 +63,9 @@ sealed class MeshControl {
           id: json['id'] as String? ?? '',
           text: json['text'] as String? ?? '',
         ),
+        'voice_presence' => VoicePresenceControl(
+          channelId: json['ch'] as String? ?? '',
+        ),
         _ => null,
       };
     } catch (_) {
@@ -257,6 +260,16 @@ class InferenceResponse extends MeshControl {
 
   @override
   Map<String, Object?> toJson() => {'t': 'infer_res', 'id': id, 'text': text};
+}
+
+/// "I'm currently in voice on this channel" — broadcast over the gossip mesh so
+/// peers see who's in voice before joining.
+class VoicePresenceControl extends MeshControl {
+  VoicePresenceControl({required this.channelId});
+  final String channelId; // empty = left voice
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'voice_presence', 'ch': channelId};
 }
 
 /// Tags a gossip frame's text for the data channel.

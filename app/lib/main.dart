@@ -370,6 +370,9 @@ class _ChatScreenState extends State<ChatScreen> {
   AudioPlayer? _player;
   VoiceSession? _voice;
   bool _speakerOn = true;
+  // Voice presence: who's in voice per channel (learned via gossip mesh).
+  final Map<String, Set<String>> _voicePresence = {}; // channelId -> peerHexes
+  Timer? _voicePresenceTimer;
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
@@ -612,6 +615,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Handles incoming inference controls from a peer in [channelId].
   void _handleInference(String fromHex, String channelId, MeshControl control) {
+    if (control is VoicePresenceControl) {
+      setState(() {
+        if (control.channelId.isEmpty) {
+          // Peer left voice — remove from all channels.
+          for (final set in _voicePresence.values) {
+            set.remove(fromHex);
+          }
+        } else {
+          (_voicePresence[control.channelId] ??= {}).add(fromHex);
+          // Remove from other channels (can only be in one).
+          for (final entry in _voicePresence.entries) {
+            if (entry.key != control.channelId) entry.value.remove(fromHex);
+          }
+        }
+      });
+      return;
+    }
     if (control is InferenceRequest) {
       // A peer wants inference — respond if we have a model and compute is on.
       final bot = _bot;
@@ -1712,6 +1732,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _voicePresenceTimer?.cancel();
     unawaited(_channels?.close());
     unawaited(_broadcast?.stop());
     for (final view in _screenViews.values) {
@@ -2250,6 +2271,7 @@ class _ChatScreenState extends State<ChatScreen> {
         relayUrl: _relayUrl,
         onChange: _voiceChanged,
         enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
+        candidateCache: _channels?.candidateCache,
       );
       _voice!.onSoundboard = (blob) {
         final session = _channels?.active;
@@ -2263,6 +2285,12 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       };
       _voice!.onYoutube = _onYoutubeControl;
+      // Broadcast presence over gossip mesh so peers see us in voice.
+      _broadcastVoicePresence(channelId);
+      _voicePresenceTimer = Timer.periodic(
+        const Duration(seconds: 15),
+        (_) => _broadcastVoicePresence(channelId),
+      );
       if (mounted) setState(() {});
     } catch (_) {
       if (mounted) {
@@ -2277,6 +2305,12 @@ class _ChatScreenState extends State<ChatScreen> {
     _pruneWatchParty();
     _reannounceYtToNewPeers();
     if (mounted) setState(() {});
+  }
+
+  void _broadcastVoicePresence(String channelId) {
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      session.broadcast(VoicePresenceControl(channelId: channelId));
+    }
   }
 
   Future<void> _leaveVoice() async {
@@ -2295,6 +2329,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final views = _screenViews.values.toList();
     _screenViews.clear();
     _selectedShareHex = null;
+    _voicePresenceTimer?.cancel();
+    _voicePresenceTimer = null;
+    // Broadcast leave (empty channelId).
+    _broadcastVoicePresence('');
     final voice = _voice;
     _voice = null;
     _speakerOn = true;
@@ -2665,12 +2703,21 @@ class _ChatScreenState extends State<ChatScreen> {
                 const Divider(height: 28),
                 Text('VOICE', style: theme.textTheme.labelSmall),
                 const SizedBox(height: 8),
-                if (!inCall)
+                if (!inCall) ...[
                   FilledButton.icon(
                     onPressed: () => unawaited(_joinVoice(session.channelId)),
                     icon: const Icon(Icons.call),
                     label: const Text('Join voice'),
-                  )
+                  ),
+                  if (_voicePresence[session.channelId]?.isNotEmpty ?? false)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        '🔊 ${_voicePresence[session.channelId]!.map((h) => _contacts?.nameFor(h) ?? h.substring(0, 8)).join(', ')}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                ]
                 else ...[
                   Row(
                     children: [

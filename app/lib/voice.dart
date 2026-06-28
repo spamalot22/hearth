@@ -8,6 +8,7 @@ import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'candidate_cache.dart';
 import 'mesh_control.dart';
 import 'webrtc_mesh.dart';
 
@@ -73,6 +74,7 @@ class VoiceSession {
     required Uri relayUrl,
     required void Function() onChange,
     bool enhancedNoiseSuppression = false,
+    CandidateCache? candidateCache,
   }) async {
     // On Windows desktop, plain `audio: true` can pick a non-functional
     // default. Enumerate devices and explicitly target the first audioinput so
@@ -144,6 +146,7 @@ class VoiceSession {
       channel: 'voice:$channelId',
       identity: identity,
       localStream: stream,
+      candidateCache: candidateCache,
       onRemoteStream: (peerHex, remote) =>
           unawaited(session._onRemote(peerHex, remote)),
       onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),

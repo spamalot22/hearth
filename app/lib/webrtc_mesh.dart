@@ -406,6 +406,8 @@ class WebRtcMesh {
         break; // Handled by the external onControl callback (app layer).
       case InferenceResponse():
         break; // Handled by the external onControl callback (app layer).
+      case VoicePresenceControl():
+        break; // Handled by the external onControl callback (app layer).
     }
   }
 

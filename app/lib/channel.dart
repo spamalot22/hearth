@@ -151,6 +151,8 @@ class ChannelSession {
           } else if (control is InferenceRequest ||
               control is InferenceResponse) {
             onInference?.call(fromHex, channelId, control);
+          } else if (control is VoicePresenceControl) {
+            onInference?.call(fromHex, channelId, control);
           }
         },
       );
