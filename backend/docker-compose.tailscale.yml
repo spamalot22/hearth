@@ -48,6 +48,8 @@ services:
       GIPHY_KEY: ${GIPHY_KEY:-}
       FREESOUND_KEY: ${FREESOUND_KEY:-}
       RELEASE_SECRET: ${RELEASE_SECRET:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     volumes:
       - relay-data:/app/data
     network_mode: service:tailscale # share Tailscale's netns; Funnel → localhost:8787
