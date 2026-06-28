@@ -2128,11 +2128,57 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Joins a channel from a pasted invite code.
   Future<void> _joinViaInvite() async {
-    final code = await _promptText(
-      title: 'Join via invite',
-      hint: 'paste the invite code',
-      action: 'Join',
-    );
+    String? code;
+    // On mobile, offer QR scan as an alternative to pasting.
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      code = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Join via invite'),
+          content: const Text('Scan an invite QR code or paste the text.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            TextButton.icon(
+              onPressed: () async {
+                final result = await Navigator.push<String>(
+                  ctx,
+                  MaterialPageRoute<String>(
+                    builder: (_) => const _QrScanPage(title: 'Scan invite QR'),
+                  ),
+                );
+                if (ctx.mounted) Navigator.pop(ctx, result);
+              },
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan QR'),
+            ),
+            TextButton.icon(
+              onPressed: () => Navigator.pop(ctx, ''),
+              icon: const Icon(Icons.paste),
+              label: const Text('Paste'),
+            ),
+          ],
+        ),
+      );
+      if (code == null) return;
+      if (code.isEmpty && mounted) {
+        code = await _promptText(
+          title: 'Join via invite',
+          hint: 'paste the invite code',
+          action: 'Join',
+        );
+      }
+    } else {
+      code = await _promptText(
+        title: 'Join via invite',
+        hint: 'paste the invite code',
+        action: 'Join',
+      );
+    }
     if (code == null || code.trim().isEmpty) return;
     final parsed = GroupChannel.fromInvite(code.trim());
     if (parsed == null) {
@@ -2211,13 +2257,16 @@ class _ChatScreenState extends State<ChatScreen> {
         title: const Text('Invite to this channel'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             const Text('Anyone with this code can join and read messages.'),
+            const SizedBox(height: 16),
+            QrImageView(data: invite, size: 200),
             const SizedBox(height: 12),
             SelectableText(
               invite,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -4871,7 +4920,8 @@ class _FlamePainter extends CustomPainter {
 
 /// Full-screen camera scanner for QR identity restore (mobile only).
 class _QrScanPage extends StatefulWidget {
-  const _QrScanPage();
+  const _QrScanPage({this.title = 'Scan recovery QR'});
+  final String title;
   @override
   State<_QrScanPage> createState() => _QrScanPageState();
 }
@@ -4882,7 +4932,7 @@ class _QrScanPageState extends State<_QrScanPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scan recovery QR')),
+      appBar: AppBar(title: Text(widget.title)),
       body: MobileScanner(
         onDetect: (capture) {
           if (_scanned) return;
