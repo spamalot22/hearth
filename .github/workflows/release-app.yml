@@ -195,5 +195,4 @@ jobs:
           curl -fsS -X POST "$RELAY_URL/version" \
             -H "authorization: Bearer $RELEASE_SECRET" \
             -H "content-type: application/json" \
-            --data @manifest.json \
-            || echo "::warning::manifest publish failed (relay down?) — publish it manually when the relay is up"
+            --data @manifest.json
