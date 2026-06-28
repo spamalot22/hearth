@@ -153,6 +153,7 @@ jobs:
   # or relay URL isn't configured, and never fails the release if the relay's down.
   publish-manifest:
     needs: [android, windows, release]
+    if: always() && needs.android.result == 'success' && needs.windows.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
