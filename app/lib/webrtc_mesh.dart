@@ -628,7 +628,7 @@ class _PeerLink implements FrameChannel {
     channel.onMessage = (message) {
       final String text;
       if (message.isBinary) {
-        text = String.fromCharCodes(message.binary);
+        text = utf8.decode(message.binary, allowMalformed: true);
       } else {
         text = message.text;
       }
