@@ -152,7 +152,7 @@ jobs:
   # relay so clients see the new version. No-ops gracefully when the signing key
   # or relay URL isn't configured, and never fails the release if the relay's down.
   publish-manifest:
-    needs: [android, windows, web, release]
+    needs: [android, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
