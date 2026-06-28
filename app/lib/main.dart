@@ -1426,15 +1426,6 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) setState(() => _composerOnFire = false);
       });
     }
-    // Always scroll to show your own message.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_scroll.hasClients) return;
-      _scroll.animateTo(
-        _scroll.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 150),
-        curve: Curves.easeOut,
-      );
-    });
   }
 
   void _scrollToBottom() {
@@ -1674,7 +1665,17 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {
       if (mounted) _setError('send failed');
     } finally {
-      if (mounted) setState(() => _sending = false);
+      if (mounted) {
+        setState(() => _sending = false);
+        // Scroll to show the just-sent message.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scroll.hasClients) {
+              _scroll.jumpTo(_scroll.position.maxScrollExtent);
+            }
+          });
+        });
+      }
     }
   }
 
