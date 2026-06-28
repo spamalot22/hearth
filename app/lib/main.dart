@@ -121,7 +121,10 @@ void main() async {
     );
     if (stateFile.existsSync() &&
         stateFile.readAsStringSync().contains('max')) {
-      await windowManager.maximize();
+      // Slight delay lets the native window finish initialising.
+      Future.delayed(const Duration(milliseconds: 200), () {
+        windowManager.maximize();
+      });
     }
     windowManager.addListener(_HearthWindowListener(stateFile));
     await _initSystemTray();
