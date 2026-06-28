@@ -481,7 +481,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _settings = settings;
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
     if (widget.autoPoll) await initRecentGifs();
-    if (widget.autoPoll && (settings?.contributeCompute ?? true)) {
+    if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
       _bot = await InferenceBot.tryCreate(modelId: settings?.activeModel);
     }
     final savedRelay = settings?.relayUrl;
@@ -1201,7 +1201,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (context) => Dialog(
         child: DefaultTabController(
-          length: 4,
+          length: kIsWeb ? 3 : 4,
           child: SizedBox(
             width: 400,
             height: 480,
@@ -1229,7 +1229,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     Tab(text: 'Audio'),
                     Tab(text: 'Identity'),
                     Tab(text: 'Network'),
-                    Tab(text: 'AI'),
+                    if (!kIsWeb) Tab(text: 'AI'),
                   ],
                 ),
                 Expanded(
@@ -1238,7 +1238,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       _audioTab(),
                       _identityTab(),
                       _networkTab(),
-                      _aiTab(),
+                      if (!kIsWeb) _aiTab(),
                     ],
                   ),
                 ),
