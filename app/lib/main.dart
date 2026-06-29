@@ -381,6 +381,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // Read receipts: per-peer watermark (channelId -> (peerHex -> messageIdHex))
   final Map<String, Map<String, String>> _readWatermarks = {};
   final Set<String> _readReceiptsDisabled = {}; // DM channelIds with receipts off
+  final Map<String, String> _lastBroadcastWatermark = {}; // channelId -> last sent
+  // Cached watermark message timestamps for O(1) tick rendering.
+  // channelId -> (messageIdHex -> timestampMs)
+  final Map<String, Map<String, int>> _watermarkTs = {};
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
@@ -665,6 +669,18 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         (_readWatermarks[control.channelId] ??= {})[fromHex] =
             control.messageId;
+        // Cache the timestamp for O(1) tick rendering.
+        final session = _channels?.sessions
+            .where((s) => s.channelId == control.channelId)
+            .firstOrNull;
+        if (session != null) {
+          final msg = session.repository.ordered().cast<Message?>().firstWhere(
+              (m) => m!.idHex == control.messageId, orElse: () => null);
+          if (msg != null) {
+            (_watermarkTs[control.channelId] ??= {})[control.messageId] =
+                msg.timestampMs;
+          }
+        }
       });
       return;
     }
@@ -4192,7 +4208,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (ordered.isNotEmpty) {
       final lastId = ordered.last.idHex;
       _unread?.markRead(session.channelId, lastId);
-      if (!_readReceiptsDisabled.contains(session.channelId)) {
+      if (!_readReceiptsDisabled.contains(session.channelId) &&
+          _lastBroadcastWatermark[session.channelId] != lastId) {
+        _lastBroadcastWatermark[session.channelId] = lastId;
         session.broadcast(ReadWatermarkControl(
             channelId: session.channelId, messageId: lastId));
       }
@@ -4442,13 +4460,15 @@ class _ChatScreenState extends State<ChatScreen> {
     final watermarks = _readWatermarks[channelId] ?? {};
     final members = _membersOf(session);
     final peers = session.mesh?.peers ?? [];
-    final ordered = session.repository.ordered();
-    final msgIndex = ordered.indexWhere((m) => m.idHex == message.idHex);
+    final msgTs = message.timestampMs;
 
+    // Count members whose watermark is at or past this message (by timestamp).
     var readBy = 0;
-    for (final wm in watermarks.values) {
-      final wIdx = ordered.indexWhere((m) => m.idHex == wm);
-      if (wIdx >= msgIndex) readBy++;
+    for (final wmId in watermarks.values) {
+      // Watermark is always the latest message they saw — compare timestamps.
+      // The watermark timestamp is cached in _watermarkTs for O(1) lookup.
+      final wmTs = _watermarkTs[channelId]?[wmId];
+      if (wmTs != null && wmTs >= msgTs) readBy++;
     }
 
     final delivered = peers.isNotEmpty;
@@ -4478,9 +4498,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _showReadDetails(ChannelSession session, Message message) {
     final watermarks = _readWatermarks[session.channelId] ?? {};
+    final wmTs = _watermarkTs[session.channelId] ?? {};
     final members = _membersOf(session);
-    final ordered = session.repository.ordered();
-    final msgIndex = ordered.indexWhere((m) => m.idHex == message.idHex);
+    final msgTs = message.timestampMs;
     final peers = session.mesh?.peers ?? [];
 
     showModalBottomSheet<void>(
@@ -4503,10 +4523,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 title: Text(_displayName(
                     Uint8List.fromList(hex.decode(member)))),
                 trailing: Builder(builder: (_) {
-                  final wm = watermarks[member];
-                  if (wm != null) {
-                    final wIdx = ordered.indexWhere((m) => m.idHex == wm);
-                    if (wIdx >= msgIndex) {
+                  final wmId = watermarks[member];
+                  if (wmId != null) {
+                    final ts = wmTs[wmId] ?? 0;
+                    if (ts >= msgTs) {
                       return const Text('Read',
                           style: TextStyle(color: Colors.blue, fontSize: 12));
                     }
