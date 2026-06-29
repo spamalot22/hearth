@@ -313,7 +313,7 @@ class ChannelManager {
 
   final Identity identity;
   final Uri relayUrl;
-  final List<Uri> fallbackUrls;
+  List<Uri> fallbackUrls;
   final bool live;
   final void Function() onUpdate;
   final BlobStore? blobStore;
@@ -513,6 +513,14 @@ class ChannelManager {
   }
 
   /// Kicks all sessions to re-announce to the relay (e.g. after relay recovers).
+  /// Updates the fallback relay URLs on all live sessions.
+  void updateFallbackUrls(List<Uri> urls) {
+    fallbackUrls = urls;
+    for (final session in _sessions.values) {
+      session.mesh?.fallbackUrls = urls;
+    }
+  }
+
   void reconnect() {
     for (final session in _sessions.values) {
       session.reconnect();

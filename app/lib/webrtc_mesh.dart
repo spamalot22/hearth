@@ -60,7 +60,7 @@ class WebRtcMesh {
   final Uri baseUrl;
 
   /// Additional relay URLs to try if the primary is unreachable.
-  final List<Uri> fallbackUrls;
+  List<Uri> fallbackUrls;
 
   /// The relay URL currently in use (may differ from baseUrl after failover).
   late Uri _activeUrl = baseUrl;

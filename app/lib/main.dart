@@ -1525,6 +1525,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           final list = [..._settings!.fallbackRelays]
                             ..remove(url);
                           unawaited(_settings!.setFallbackRelays(list));
+                          _channels?.updateFallbackUrls(
+                              list.map(Uri.parse).toList());
                           setTabState(() {});
                         },
                       ),
@@ -1543,6 +1545,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
                       final list = [..._settings!.fallbackRelays, input];
                       await _settings!.setFallbackRelays(list);
+                      _channels?.updateFallbackUrls(
+                          list.map(Uri.parse).toList());
                       setTabState(() {});
                     },
                     icon: const Icon(Icons.add),
