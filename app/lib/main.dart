@@ -3168,6 +3168,8 @@ class _ChatScreenState extends State<ChatScreen> {
       onLongPress: key == 'self'
           ? null
           : () {
+              // Can't unmute a blocked user — they stay muted.
+              if (_blocked.contains(key)) return;
               setState(() {
                 if (_voiceMuted.contains(key)) {
                   _voiceMuted.remove(key);
@@ -3287,6 +3289,8 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Tapped a peer's name: offer to DM them or give them a local name.
   Future<void> _peerActions(Uint8List author) async {
     final authorHex = hex.encode(author);
+    // Can't act on yourself.
+    if (authorHex == widget.identity.publicKeyHex) return;
     final isBlocked = _blocked.contains(authorHex);
     final action = await showModalBottomSheet<String>(
       context: context,
