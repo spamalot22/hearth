@@ -15,20 +15,16 @@ RUN pnpm install --frozen-lockfile
 # Source.
 COPY tsconfig.json ./
 COPY src ./src
+COPY data ./data
 
 # Bundle to a single ESM file. All deps are pure JS — no native addons.
-RUN npx esbuild src/dev-server.ts \
+# Uses server.ts (prod entry, no dotenv — env injected by Docker).
+RUN npx esbuild src/server.ts \
       --bundle \
       --platform=node \
       --format=esm \
       --target=node24 \
-      --outfile=dist/server.mjs \
-      --external:dotenv
-
-# dotenv is the only runtime dep that reads .env from disk (optional in prod).
-# Include it as a node_modules entry for the import to resolve.
-RUN mkdir -p dist/node_modules && \
-    cp -r node_modules/dotenv dist/node_modules/dotenv
+      --outfile=dist/server.mjs
 
 # --- Stage 2: runtime (distroless, no shell) ---
 FROM gcr.io/distroless/nodejs24-debian12:latest
@@ -36,6 +32,8 @@ FROM gcr.io/distroless/nodejs24-debian12:latest
 WORKDIR /app
 
 COPY --from=build /app/dist ./
+# Version manifest (optional — self-heals from GitHub if absent).
+COPY --from=build /app/data ./data
 
 ENV PORT=8787
 EXPOSE 8787
