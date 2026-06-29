@@ -385,6 +385,7 @@ class _ChatScreenState extends State<ChatScreen> {
   // Cached watermark message timestamps for O(1) tick rendering.
   // channelId -> (messageIdHex -> timestampMs)
   final Map<String, Map<String, int>> _watermarkTs = {};
+  final Map<String, int> _lastPeerCount = {}; // channelId -> last known peers
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
@@ -577,14 +578,19 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onUpdate() {
     // Re-broadcast voice presence to newly-connected peers immediately.
     if (_voice != null) _broadcastVoicePresence(_voice!.channelId);
-    // Re-broadcast read watermark so new peers see our read status.
+    // Re-broadcast read watermark only when peer count increased (new peer).
     final active = _channels?.active;
     if (active != null) {
-      final wm = _lastBroadcastWatermark[active.channelId];
-      if (wm != null && !_readReceiptsDisabled.contains(active.channelId)) {
-        active.broadcast(ReadWatermarkControl(
-            channelId: active.channelId, messageId: wm));
+      final peerCount = active.mesh?.peers.length ?? 0;
+      final lastCount = _lastPeerCount[active.channelId] ?? 0;
+      if (peerCount > lastCount) {
+        final wm = _lastBroadcastWatermark[active.channelId];
+        if (wm != null && !_readReceiptsDisabled.contains(active.channelId)) {
+          active.broadcast(ReadWatermarkControl(
+              channelId: active.channelId, messageId: wm));
+        }
       }
+      _lastPeerCount[active.channelId] = peerCount;
     }
     unawaited(_refresh());
   }
