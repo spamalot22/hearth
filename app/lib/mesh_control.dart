@@ -67,6 +67,10 @@ sealed class MeshControl {
           channelId: json['ch'] as String? ?? '',
         ),
         'voice_leave' => VoiceLeaveControl(),
+        'read' => ReadWatermarkControl(
+          channelId: json['ch'] as String? ?? '',
+          messageId: json['msg'] as String? ?? '',
+        ),
         _ => null,
       };
     } catch (_) {
@@ -278,6 +282,18 @@ class VoicePresenceControl extends MeshControl {
 class VoiceLeaveControl extends MeshControl {
   @override
   Map<String, Object?> toJson() => {'t': 'voice_leave'};
+}
+
+/// Broadcasts the sender's latest read message in a channel (watermark).
+/// Recipients update their per-peer read state for tick rendering.
+class ReadWatermarkControl extends MeshControl {
+  ReadWatermarkControl({required this.channelId, required this.messageId});
+  final String channelId;
+  final String messageId; // hex id of the latest message read
+
+  @override
+  Map<String, Object?> toJson() =>
+      {'t': 'read', 'ch': channelId, 'msg': messageId};
 }
 
 /// Tags a gossip frame's text for the data channel.
