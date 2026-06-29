@@ -2266,7 +2266,7 @@ class _ChatScreenState extends State<ChatScreen> {
               height: 200,
               child: QrImageView(
                 data: invite,
-                padding: EdgeInsets.zero,
+                padding: const EdgeInsets.all(12),
                 backgroundColor: Colors.white,
               ),
             ),
