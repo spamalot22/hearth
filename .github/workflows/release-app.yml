@@ -138,28 +138,6 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - run: ls -lR dist
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-
-  # Sign a manifest of the built assets (SHA-256 + Ed25519) and publish it to the
-  # relay so clients see the new version. No-ops gracefully when the signing key
-  # or relay URL isn't configured, and never fails the release if the relay's down.
-  publish-manifest:
-    needs: [android, windows, web, release]
-    if: |
-      always() &&
-      needs.android.result == 'success' &&
-      needs.windows.result == 'success' &&
-      needs.web.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
@@ -176,28 +154,48 @@ jobs:
       - name: Install backend deps
         working-directory: backend
         run: pnpm install --frozen-lockfile
-      - name: Sign + publish manifest
+      - name: Sign manifest
+        if: env.RELEASE_PRIVATE_KEY != ''
         working-directory: backend
         env:
           RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_PRIVATE_KEY }}
+        run: |
+          SEQ=$(date +%s)
+          pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
+            android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip > ../dist/manifest.json
+      - run: ls -lR dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  # Publish the signed manifest to the relay so clients see the new version.
+  # The manifest was already uploaded as a release asset by the release job.
+  publish-manifest:
+    needs: [android, windows, web, release]
+    if: |
+      always() &&
+      needs.android.result == 'success' &&
+      needs.windows.result == 'success' &&
+      needs.web.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download manifest from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ github.ref_name }}" -p manifest.json -R "${{ github.repository }}"
+      - name: Publish to relay
+        env:
           RELEASE_SECRET: ${{ secrets.RELEASE_SECRET }}
           RELAY_URL: ${{ vars.RELAY_URL }}
         run: |
-          if [ -z "$RELEASE_PRIVATE_KEY" ] || [ -z "$RELAY_URL" ]; then
-            echo "RELEASE_PRIVATE_KEY / RELAY_URL not set — skipping manifest publish."
+          if [ -z "$RELEASE_SECRET" ] || [ -z "$RELAY_URL" ]; then
+            echo "RELEASE_SECRET / RELAY_URL not set — skipping."
             exit 0
           fi
-          echo "::add-mask::$RELAY_URL"   # keep the relay URL out of public Actions logs
-          SEQ=$(date +%s)
-          pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
-            android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip > manifest.json
-          echo "Publishing manifest (seq $SEQ) to the relay"
+          echo "::add-mask::$RELAY_URL"
+          echo "Publishing manifest to the relay"
           curl -fsS -X POST "$RELAY_URL/version" \
             -H "authorization: Bearer $RELEASE_SECRET" \
             -H "content-type: application/json" \
             --data @manifest.json
-      - name: Upload manifest as release asset
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" backend/manifest.json --clobber
