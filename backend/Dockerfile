@@ -1,29 +1,44 @@
-# Hearth relay — the cold-start signalling mailbox + media-search proxies.
-# In-memory and stateless; runs the Hono app directly with tsx (no compile step),
-# so tsx is a runtime dependency here, not just a dev one.
-FROM node:22-alpine
+# Hearth relay — multi-stage build: esbuild bundle → distroless runtime.
+# No shell, no package manager, no attack surface in the final image.
 
-# pnpm via corepack, version pinned by package.json "packageManager".
+# --- Stage 1: build ---
+FROM node:24-alpine AS build
+
 RUN corepack enable && corepack prepare pnpm@11.3.0 --activate
 
 WORKDIR /app
 
-# Dependencies first — this layer caches unless the lockfile changes. esbuild's
-# post-install (tsx needs it) is approved via pnpm-workspace.yaml's
-# onlyBuiltDependencies, so a plain install succeeds.
+# Dependencies (cached layer).
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# App source (tests + .env excluded via .dockerignore — no secrets in the image).
+# Source.
 COPY tsconfig.json ./
 COPY src ./src
 
-# The platform (Compose / the tunnel) injects PORT; 8787 is the local default.
+# Bundle to a single ESM file. All deps are pure JS — no native addons.
+RUN npx esbuild src/dev-server.ts \
+      --bundle \
+      --platform=node \
+      --format=esm \
+      --target=node24 \
+      --outfile=dist/server.mjs \
+      --external:dotenv
+
+# dotenv is the only runtime dep that reads .env from disk (optional in prod).
+# Include it as a node_modules entry for the import to resolve.
+RUN mkdir -p dist/node_modules && \
+    cp -r node_modules/dotenv dist/node_modules/dotenv
+
+# --- Stage 2: runtime (distroless, no shell) ---
+FROM gcr.io/distroless/nodejs24-debian12
+
+WORKDIR /app
+
+COPY --from=build /app/dist ./
+
 ENV PORT=8787
 EXPOSE 8787
 
-# Drop privileges to the image's built-in non-root user.
-USER node
-
-# Run tsx directly (no pnpm process at runtime); tsx caches transpiles to /tmp.
-CMD ["node_modules/.bin/tsx", "src/dev-server.ts"]
+# Distroless runs as non-root (uid 65534) by default.
+CMD ["server.mjs"]
