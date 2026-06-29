@@ -379,6 +379,15 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
             content-address-verified. *Unit-tested.* Remaining (needs live verify +
             deps): app-side Hive blob store, upload (`file_picker`), inline render,
             soundboard playback (`audioplayers`).
+- [ ] **Block & mute (no channel ownership)** — purely local controls:
+      - **Voice mute** (ephemeral, per-channel): mute another member's audio
+        in a voice session (local only, resets on leave). Separate from the
+        per-user volume slider — shows a mute icon on their speaking indicator.
+      - **Block** (global, persistent): blocks a pubkey across all interactions.
+        Future group messages shown as redacted (still stored in DAG for unblock);
+        DMs silently dropped (never stored); auto-muted in voice. Accessible from
+        channel member list + contacts. Unblock restores group messages.
+      - No hierarchy, no owner, no kick — the blocked person doesn't know.
 - [ ] Optional federation between communities.
 - [ ] Spam resistance (proof-of-work / invite gating / web-of-trust).
 - [ ] Plugins (WASM) and local bots.
@@ -715,3 +724,16 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   `numGpuLayers: 99` enables Metal (macOS) or CUDA (Linux/Windows) offload
   automatically when available. Easy to rip out: inference_bot.dart + control
   frames + ~30 lines in main.dart.
+- **2026-06-29** — **Block & mute — no channel ownership.** Rejected the
+  "channel owner can kick" model entirely. Hearth has no hierarchy — channels are
+  capabilities, not property. Instead: (1) **Voice mute** — ephemeral per-session
+  toggle that zeroes a member's audio and replaces their speaking bar with a mute
+  icon; resets on leave; purely local. (2) **Block** — global persistent action
+  against a pubkey. Future messages in shared group channels render as redacted
+  placeholders (message stays in DAG for unblock); DMs from the blocked user are
+  silently dropped on receive (never stored — gone permanently). Auto-muted in
+  voice (persistent across sessions). Accessible from member list or contacts menu.
+  Unblock restores redacted group messages instantly. No MeshControl needed — this
+  is entirely client-side state. The blocked person's client continues normally;
+  they have no signal they've been blocked. Storage: `blockedUsers` key in Hive
+  settings (comma-separated pubkey hexes).
