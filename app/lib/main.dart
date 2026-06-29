@@ -381,6 +381,8 @@ class _ChatScreenState extends State<ChatScreen> {
   // Read receipts: per-peer watermark (channelId -> (peerHex -> messageIdHex))
   final Map<String, Map<String, String>> _readWatermarks = {};
   final Set<String> _readReceiptsDisabled = {}; // DM channelIds with receipts off
+  final Set<String> _blocked = {}; // globally blocked pubkey hexes
+  final Set<String> _voiceMuted = {}; // per-session muted peers (cleared on leave)
   final Map<String, String> _lastBroadcastWatermark = {}; // channelId -> last sent
   // Cached watermark message timestamps for O(1) tick rendering.
   // channelId -> (messageIdHex -> timestampMs)
@@ -497,6 +499,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _settings = settings;
     if (settings != null) {
       _readReceiptsDisabled.addAll(settings.allReadReceiptsDisabled);
+      _blocked.addAll(settings.blockedUsers);
     }
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
     if (widget.autoPoll) await initRecentGifs();
@@ -600,6 +603,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final session = _channels?.sessions
         .where((s) => s.channelId == channelId)
         .firstOrNull;
+    // Suppress notifications for DMs from blocked users.
+    if (session != null && session.isDm && session.peerPubkey != null &&
+        _blocked.contains(hex.encode(session.peerPubkey!))) {
+      return;
+    }
     final name = session != null ? _channelTitle(session) : 'a channel';
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -1303,7 +1311,7 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (context) => Dialog(
         child: DefaultTabController(
-          length: kIsWeb ? 3 : 4,
+          length: kIsWeb ? 4 : 5,
           child: SizedBox(
             width: 400,
             height: 480,
@@ -1331,6 +1339,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     Tab(text: 'Audio'),
                     Tab(text: 'Identity'),
                     Tab(text: 'Network'),
+                    Tab(text: 'Privacy'),
                     if (!kIsWeb) Tab(text: 'AI'),
                   ],
                 ),
@@ -1340,6 +1349,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       _audioTab(),
                       _identityTab(),
                       _networkTab(),
+                      _privacyTab(),
                       if (!kIsWeb) _aiTab(),
                     ],
                   ),
@@ -1670,6 +1680,43 @@ class _ChatScreenState extends State<ChatScreen> {
             },
             onRefresh: () => unawaited(_checkRelay()),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _privacyTab() {
+    return StatefulBuilder(
+      builder: (context, setLocal) => ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text('Blocked users', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          if (_blocked.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Text('No blocked users',
+                  style: TextStyle(color: Colors.grey)),
+            )
+          else
+            for (final pubHex in _blocked.toList())
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: _avatar(
+                    Uint8List.fromList(hex.decode(pubHex)), radius: 14),
+                title: Text(
+                    _displayName(Uint8List.fromList(hex.decode(pubHex)))),
+                trailing: TextButton(
+                  onPressed: () {
+                    setState(() => _blocked.remove(pubHex));
+                    setLocal(() {});
+                    unawaited(_settings?.unblockUser(pubHex));
+                  },
+                  child: const Text('Unblock',
+                      style: TextStyle(color: Colors.green)),
+                ),
+              ),
         ],
       ),
     );
@@ -2501,6 +2548,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _voiceChanged() {
+    // Auto-mute blocked users joining voice.
+    final voice = _voice;
+    if (voice != null) {
+      for (final peer in voice.peerHexes) {
+        if (_blocked.contains(peer) && voice.volumeOf(peer) > 0) {
+          unawaited(voice.setVolume(peer, 0.0));
+        }
+      }
+    }
     _pruneScreenViews();
     _reannounceShareToNewPeers();
     _pruneWatchParty();
@@ -2536,6 +2592,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _broadcastVoicePresence('');
     final voice = _voice;
     _voice = null;
+    _voiceMuted.clear();
     _speakerOn = true;
     if (mounted) setState(() {});
     for (final view in views) {
@@ -3096,7 +3153,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// One voice participant: avatar (green ring when speaking) + name + level
-  /// bar. Tapping a peer opens their volume slider.
+  /// bar. Tapping a peer opens their volume slider. Long-press to mute.
   Widget _participantTile(
     VoiceSession voice,
     String key,
@@ -3104,8 +3161,23 @@ class _ChatScreenState extends State<ChatScreen> {
     String name,
   ) {
     final speaking = voice.speaking(key);
+    final isMuted = key != 'self' &&
+        (_voiceMuted.contains(key) || _blocked.contains(key));
     return InkWell(
       onTap: key == 'self' ? null : () => unawaited(_peerVolume(key, name)),
+      onLongPress: key == 'self'
+          ? null
+          : () {
+              setState(() {
+                if (_voiceMuted.contains(key)) {
+                  _voiceMuted.remove(key);
+                  _voice?.setVolume(key, 1.0);
+                } else {
+                  _voiceMuted.add(key);
+                  _voice?.setVolume(key, 0.0);
+                }
+              });
+            },
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(
@@ -3114,7 +3186,9 @@ class _ChatScreenState extends State<ChatScreen> {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: speaking ? Colors.greenAccent : Colors.transparent,
+                  color: speaking && !isMuted
+                      ? Colors.greenAccent
+                      : Colors.transparent,
                   width: 2,
                 ),
               ),
@@ -3128,15 +3202,18 @@ class _ChatScreenState extends State<ChatScreen> {
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
             ),
-            SizedBox(
-              width: 44,
-              child: LinearProgressIndicator(
-                value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
-                minHeight: 4,
-                backgroundColor: Colors.white24,
-                color: Colors.greenAccent,
+            if (isMuted)
+              const Icon(Icons.mic_off, size: 16, color: Colors.redAccent)
+            else
+              SizedBox(
+                width: 44,
+                child: LinearProgressIndicator(
+                  value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
+                  minHeight: 4,
+                  backgroundColor: Colors.white24,
+                  color: Colors.greenAccent,
+                ),
               ),
-            ),
           ],
         ),
       ),
@@ -3209,6 +3286,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Tapped a peer's name: offer to DM them or give them a local name.
   Future<void> _peerActions(Uint8List author) async {
+    final authorHex = hex.encode(author);
+    final isBlocked = _blocked.contains(authorHex);
     final action = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
@@ -3225,6 +3304,14 @@ class _ChatScreenState extends State<ChatScreen> {
               title: const Text('Set a name'),
               onTap: () => Navigator.pop(context, 'name'),
             ),
+            ListTile(
+              leading: Icon(
+                isBlocked ? Icons.check_circle_outline : Icons.block,
+                color: isBlocked ? Colors.green : Colors.red,
+              ),
+              title: Text(isBlocked ? 'Unblock' : 'Block'),
+              onTap: () => Navigator.pop(context, 'block'),
+            ),
           ],
         ),
       ),
@@ -3233,6 +3320,19 @@ class _ChatScreenState extends State<ChatScreen> {
       await _channels?.openDm(author);
     } else if (action == 'name') {
       await _renameContact(author);
+    } else if (action == 'block') {
+      setState(() {
+        if (isBlocked) {
+          _blocked.remove(authorHex);
+        } else {
+          _blocked.add(authorHex);
+        }
+      });
+      if (isBlocked) {
+        await _settings?.unblockUser(authorHex);
+      } else {
+        await _settings?.blockUser(authorHex);
+      }
     }
   }
 
@@ -3263,6 +3363,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 leading: const Icon(Icons.person_outline),
                 title: Text(entry.value),
                 onTap: () => Navigator.pop(context, entry.key),
+                onLongPress: () {
+                  Navigator.pop(context);
+                  unawaited(
+                      _peerActions(Uint8List.fromList(hex.decode(entry.key))));
+                },
               ),
           ],
         ),
@@ -4589,6 +4694,44 @@ class _ChatScreenState extends State<ChatScreen> {
     Message message,
   ) {
     final mine = listEquals(message.author, widget.identity.publicKey);
+    final authorHex = hex.encode(message.author);
+
+    // Blocked users in group channels: show redacted placeholder.
+    if (!mine && !session.isDm && _blocked.contains(authorHex)) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Container(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width * 0.72,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHigh
+                  .withAlpha(100),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(12),
+                topRight: Radius.circular(12),
+                bottomRight: Radius.circular(12),
+              ),
+            ),
+            child: Text(
+              'Blocked message',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    // Blocked users in DMs: skip entirely (invisible).
+    if (!mine && session.isDm && _blocked.contains(authorHex)) {
+      return const SizedBox.shrink();
+    }
+
     final scheme = Theme.of(context).colorScheme;
     const radius = Radius.circular(12);
     final bubble = Container(

@@ -64,6 +64,32 @@ class SettingsStore {
 
   Future<void> setActiveModel(String id) => _box.put(_activeModelKey, id);
 
+  // --- Blocked users (global, persistent) ---
+  static const _blockedKey = 'blockedUsers';
+
+  /// All globally blocked pubkey hexes.
+  Set<String> get blockedUsers {
+    final v = _box.get(_blockedKey);
+    if (v == null || v.trim().isEmpty) return {};
+    return v.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toSet();
+  }
+
+  Future<void> setBlockedUsers(Set<String> pubkeys) => pubkeys.isEmpty
+      ? _box.delete(_blockedKey)
+      : _box.put(_blockedKey, pubkeys.join(','));
+
+  Future<void> blockUser(String pubkeyHex) async {
+    final current = blockedUsers;
+    current.add(pubkeyHex);
+    await setBlockedUsers(current);
+  }
+
+  Future<void> unblockUser(String pubkeyHex) async {
+    final current = blockedUsers;
+    current.remove(pubkeyHex);
+    await setBlockedUsers(current);
+  }
+
   // --- Per-channel preferences ---
   // Stored as "channel:<channelId>:<key>" for clean namespacing.
 
