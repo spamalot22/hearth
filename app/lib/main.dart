@@ -378,6 +378,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, DateTime> _voicePresenceTs = {}; // peerHex -> last seen
   Timer? _voicePresenceTimer;
   Timer? _updateCheckTimer;
+  // Read receipts: per-peer watermark (channelId -> (peerHex -> messageIdHex))
+  final Map<String, Map<String, String>> _readWatermarks = {};
+  final Set<String> _readReceiptsDisabled = {}; // DM channelIds with receipts off
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
@@ -655,6 +658,13 @@ class _ChatScreenState extends State<ChatScreen> {
         for (final set in _voicePresence.values) {
           set.removeWhere((h) => !_voicePresenceTs.containsKey(h));
         }
+      });
+      return;
+    }
+    if (control is ReadWatermarkControl && control.messageId.isNotEmpty) {
+      setState(() {
+        (_readWatermarks[control.channelId] ??= {})[fromHex] =
+            control.messageId;
       });
       return;
     }
@@ -4162,7 +4172,12 @@ class _ChatScreenState extends State<ChatScreen> {
   void _markRead(ChannelSession session) {
     final ordered = session.repository.ordered();
     if (ordered.isNotEmpty) {
-      _unread?.markRead(session.channelId, ordered.last.idHex);
+      final lastId = ordered.last.idHex;
+      _unread?.markRead(session.channelId, lastId);
+      if (!_readReceiptsDisabled.contains(session.channelId)) {
+        session.broadcast(ReadWatermarkControl(
+            channelId: session.channelId, messageId: lastId));
+      }
     }
   }
 
@@ -4404,6 +4419,94 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _tickIcon(ChannelSession session, Message message) {
+    final channelId = session.channelId;
+    final watermarks = _readWatermarks[channelId] ?? {};
+    final members = _membersOf(session);
+    final peers = session.mesh?.peers ?? [];
+    final ordered = session.repository.ordered();
+    final msgIndex = ordered.indexWhere((m) => m.idHex == message.idHex);
+
+    var readBy = 0;
+    for (final wm in watermarks.values) {
+      final wIdx = ordered.indexWhere((m) => m.idHex == wm);
+      if (wIdx >= msgIndex) readBy++;
+    }
+
+    final delivered = peers.isNotEmpty;
+    final readAll = members.isNotEmpty && readBy >= members.length;
+    final readSome = readBy > 0;
+
+    final Color color;
+    final IconData icon;
+    if (readAll) {
+      color = Colors.blue;
+      icon = Icons.done_all;
+    } else if (readSome) {
+      color = Colors.blue.shade200;
+      icon = Icons.done_all;
+    } else if (delivered) {
+      color = Colors.grey;
+      icon = Icons.done_all;
+    } else {
+      color = Colors.grey;
+      icon = Icons.done;
+    }
+    return GestureDetector(
+      onTap: () => _showReadDetails(session, message),
+      child: Icon(icon, size: 14, color: color),
+    );
+  }
+
+  void _showReadDetails(ChannelSession session, Message message) {
+    final watermarks = _readWatermarks[session.channelId] ?? {};
+    final members = _membersOf(session);
+    final ordered = session.repository.ordered();
+    final msgIndex = ordered.indexWhere((m) => m.idHex == message.idHex);
+    final peers = session.mesh?.peers ?? [];
+
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Message status',
+                style: Theme.of(ctx).textTheme.titleSmall),
+            const SizedBox(height: 12),
+            for (final member in members)
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: _avatar(
+                    Uint8List.fromList(hex.decode(member)), radius: 14),
+                title: Text(_displayName(
+                    Uint8List.fromList(hex.decode(member)))),
+                trailing: Builder(builder: (_) {
+                  final wm = watermarks[member];
+                  if (wm != null) {
+                    final wIdx = ordered.indexWhere((m) => m.idHex == wm);
+                    if (wIdx >= msgIndex) {
+                      return const Text('Read',
+                          style: TextStyle(color: Colors.blue, fontSize: 12));
+                    }
+                  }
+                  if (peers.contains(member)) {
+                    return const Text('Delivered',
+                        style: TextStyle(color: Colors.grey, fontSize: 12));
+                  }
+                  return const Text('Sent',
+                      style: TextStyle(color: Colors.grey, fontSize: 12));
+                }),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _bubble(
     BuildContext context,
     ChannelSession session,
@@ -4445,12 +4548,21 @@ class _ChatScreenState extends State<ChatScreen> {
             alignment: Alignment.centerRight,
             child: Padding(
               padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                _time(message.timestampMs),
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
-                  fontSize: 10,
-                ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _time(message.timestampMs),
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontSize: 10,
+                    ),
+                  ),
+                  if (mine) Padding(
+                    padding: const EdgeInsets.only(left: 3),
+                    child: _tickIcon(session, message),
+                  ),
+                ],
               ),
             ),
           ),
