@@ -31,7 +31,7 @@ RUN mkdir -p dist/node_modules && \
     cp -r node_modules/dotenv dist/node_modules/dotenv
 
 # --- Stage 2: runtime (distroless, no shell) ---
-FROM gcr.io/distroless/nodejs24-debian12
+FROM gcr.io/distroless/nodejs24-debian12:latest
 
 WORKDIR /app
 
