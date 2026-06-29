@@ -511,6 +511,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: _relayUrl,
+      fallbackUrls: (_settings?.fallbackRelays ?? [])
+          .map(Uri.parse)
+          .toList(),
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: blobStore,
@@ -1498,6 +1501,53 @@ class _ChatScreenState extends State<ChatScreen> {
                       setTabState(() {});
                     },
                   ),
+                  const Divider(height: 24),
+                  Text(
+                    'Fallback relays',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Tried if the primary relay is unreachable.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 8),
+                  for (final url
+                      in _settings?.fallbackRelays ?? <String>[])
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.dns_outlined, size: 20),
+                      title: Text(url, overflow: TextOverflow.ellipsis),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          final list = [..._settings!.fallbackRelays]
+                            ..remove(url);
+                          unawaited(_settings!.setFallbackRelays(list));
+                          setTabState(() {});
+                        },
+                      ),
+                    ),
+                  TextButton.icon(
+                    onPressed: () async {
+                      final url = await _promptText(
+                        title: 'Add fallback relay',
+                        hint: 'https://relay.example.com',
+                        action: 'Add',
+                      );
+                      if (url == null || url.trim().isEmpty) return;
+                      var input = url.trim();
+                      if (!input.startsWith('https://')) {
+                        input = 'https://$input';
+                      }
+                      final list = [..._settings!.fallbackRelays, input];
+                      await _settings!.setFallbackRelays(list);
+                      setTabState(() {});
+                    },
+                    icon: const Icon(Icons.add),
+                    label: const Text('Add relay'),
+                  ),
                 ],
               ),
             );
@@ -1738,6 +1788,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: _relayUrl,
+      fallbackUrls: (_settings?.fallbackRelays ?? [])
+          .map(Uri.parse)
+          .toList(),
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: _blobStore,

@@ -11,6 +11,7 @@ class SettingsStore {
   final Box<String> _box;
 
   static const _relayKey = 'relayUrl';
+  static const _fallbackRelaysKey = 'fallbackRelays';
   static const _noiseKey = 'noiseSuppression';
 
   static Future<SettingsStore> open() async {
@@ -29,6 +30,17 @@ class SettingsStore {
   Future<void> setRelayUrl(String? url) => (url == null || url.trim().isEmpty)
       ? _box.delete(_relayKey)
       : _box.put(_relayKey, url.trim());
+
+  /// Fallback relay URLs (tried if the primary is unreachable).
+  List<String> get fallbackRelays {
+    final v = _box.get(_fallbackRelaysKey);
+    if (v == null || v.trim().isEmpty) return [];
+    return v.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+  }
+
+  Future<void> setFallbackRelays(List<String> urls) => urls.isEmpty
+      ? _box.delete(_fallbackRelaysKey)
+      : _box.put(_fallbackRelaysKey, urls.join(','));
 
   /// Whether enhanced noise suppression is enabled (off by default).
   bool get noiseSuppression => _box.get(_noiseKey) == 'true';

@@ -104,6 +104,7 @@ class ChannelSession {
     required String channelId,
     required Identity identity,
     required Uri relayUrl,
+    List<Uri> fallbackUrls = const [],
     required bool live,
     required void Function() onUpdate,
     required ChannelCipher cipher,
@@ -134,6 +135,7 @@ class ChannelSession {
     if (live) {
       mesh = WebRtcMesh(
         baseUrl: relayUrl,
+        fallbackUrls: fallbackUrls,
         channel: channelId,
         identity: identity,
         candidateCache: candidateCache,
@@ -299,6 +301,7 @@ class ChannelManager {
   ChannelManager({
     required this.identity,
     required this.relayUrl,
+    this.fallbackUrls = const [],
     required this.live,
     required this.onUpdate,
     this.blobStore,
@@ -310,6 +313,7 @@ class ChannelManager {
 
   final Identity identity;
   final Uri relayUrl;
+  final List<Uri> fallbackUrls;
   final bool live;
   final void Function() onUpdate;
   final BlobStore? blobStore;
@@ -432,6 +436,7 @@ class ChannelManager {
         channelId: id,
         identity: identity,
         relayUrl: relayUrl,
+        fallbackUrls: fallbackUrls,
         live: live,
         onUpdate: () => _onSessionUpdate(id),
         cipher: GroupChannelCipher(key),
@@ -456,6 +461,7 @@ class ChannelManager {
         channelId: id,
         identity: identity,
         relayUrl: relayUrl,
+        fallbackUrls: fallbackUrls,
         live: live,
         onUpdate: () => _onSessionUpdate(id),
         cipher: DmChannelCipher(identity, peerPubkey),
