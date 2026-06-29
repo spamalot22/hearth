@@ -494,6 +494,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final profile = widget.autoPoll ? await ProfileStore.open() : null;
     final settings = widget.autoPoll ? await SettingsStore.open() : null;
     _settings = settings;
+    if (settings != null) {
+      _readReceiptsDisabled.addAll(settings.allReadReceiptsDisabled);
+    }
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
     if (widget.autoPoll) await initRecentGifs();
     if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
@@ -2908,6 +2911,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           _readReceiptsDisabled.add(session.channelId);
                         }
                       });
+                      unawaited(_settings?.setReadReceiptsDisabled(
+                          session.channelId, !v));
                     },
                   ),
                 if (session.isDm) const Divider(height: 28),

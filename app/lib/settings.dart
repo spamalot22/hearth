@@ -63,4 +63,42 @@ class SettingsStore {
   String? get activeModel => _box.get(_activeModelKey);
 
   Future<void> setActiveModel(String id) => _box.put(_activeModelKey, id);
+
+  // --- Per-channel preferences ---
+  // Stored as "channel:<channelId>:<key>" for clean namespacing.
+
+  static String _channelKey(String channelId, String key) =>
+      'channel:$channelId:$key';
+
+  /// Whether read receipts are disabled for [channelId].
+  bool readReceiptsDisabled(String channelId) =>
+      _box.get(_channelKey(channelId, 'noReadReceipts')) == 'true';
+
+  Future<void> setReadReceiptsDisabled(String channelId, bool disabled) =>
+      disabled
+          ? _box.put(_channelKey(channelId, 'noReadReceipts'), 'true')
+          : _box.delete(_channelKey(channelId, 'noReadReceipts'));
+
+  /// All channel IDs with read receipts disabled.
+  Set<String> get allReadReceiptsDisabled {
+    final result = <String>{};
+    for (final key in _box.keys) {
+      if (key is String && key.endsWith(':noReadReceipts')) {
+        final parts = key.split(':');
+        if (parts.length == 3 && _box.get(key) == 'true') {
+          result.add(parts[1]);
+        }
+      }
+    }
+    return result;
+  }
+
+  /// Generic per-channel string preference (for future expansion).
+  String? channelPref(String channelId, String key) =>
+      _box.get(_channelKey(channelId, key));
+
+  Future<void> setChannelPref(String channelId, String key, String? value) =>
+      value == null
+          ? _box.delete(_channelKey(channelId, key))
+          : _box.put(_channelKey(channelId, key), value);
 }
