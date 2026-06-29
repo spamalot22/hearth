@@ -2261,7 +2261,11 @@ class _ChatScreenState extends State<ChatScreen> {
           children: [
             const Text('Anyone with this code can join and read messages.'),
             const SizedBox(height: 16),
-            QrImageView(data: invite, size: 200),
+            SizedBox(
+              width: 200,
+              height: 200,
+              child: QrImageView(data: invite, padding: EdgeInsets.zero),
+            ),
             const SizedBox(height: 12),
             SelectableText(
               invite,
