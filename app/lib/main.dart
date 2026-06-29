@@ -2866,6 +2866,24 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 ],
                 const Divider(height: 28),
+                if (session.isDm)
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Read receipts'),
+                    subtitle: const Text('Let them see when you\'ve read'),
+                    value: !_readReceiptsDisabled.contains(session.channelId),
+                    onChanged: (v) {
+                      setState(() {
+                        if (v) {
+                          _readReceiptsDisabled.remove(session.channelId);
+                        } else {
+                          _readReceiptsDisabled.add(session.channelId);
+                        }
+                      });
+                    },
+                  ),
+                if (session.isDm) const Divider(height: 28),
                 Text('VOICE', style: theme.textTheme.labelSmall),
                 const SizedBox(height: 8),
                 if (!inCall) ...[
