@@ -1540,6 +1540,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       );
                       if (url == null || url.trim().isEmpty) return;
                       var input = url.trim();
+                      if (input.startsWith('http://')) {
+                        _setError('HTTP is not supported — use HTTPS');
+                        return;
+                      }
                       if (!input.startsWith('https://')) {
                         input = 'https://$input';
                       }

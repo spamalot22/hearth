@@ -155,7 +155,7 @@ jobs:
         working-directory: backend
         run: pnpm install --frozen-lockfile
       - name: Sign manifest
-        if: env.RELEASE_PRIVATE_KEY != ''
+        if: ${{ secrets.RELEASE_PRIVATE_KEY != '' }}
         working-directory: backend
         env:
           RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_PRIVATE_KEY }}
