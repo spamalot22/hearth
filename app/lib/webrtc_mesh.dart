@@ -241,14 +241,16 @@ class WebRtcMesh {
         'sig': sig,
       });
       // Try active URL first, then fallbacks.
-      final urls = {...{_activeUrl}, ...fallbackUrls, baseUrl}.toList();
+      final urls = {_activeUrl, ...fallbackUrls, baseUrl}.toList();
       for (final url in urls) {
         try {
-          final res = await _client.post(
-            url.replace(path: '/announce'),
-            headers: const {'content-type': 'application/json'},
-            body: payload,
-          );
+          final res = await _client
+              .post(
+                url.replace(path: '/announce'),
+                headers: const {'content-type': 'application/json'},
+                body: payload,
+              )
+              .timeout(const Duration(seconds: 5));
           if (res.statusCode != 200) continue;
           _activeUrl = url;
           final body = jsonDecode(res.body) as Map<String, dynamic>;

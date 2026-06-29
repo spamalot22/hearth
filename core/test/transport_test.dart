@@ -167,5 +167,101 @@ void main() {
         await transport.close();
       },
     );
+
+    test('poll passes token query parameter when tokenProvider returns a value',
+        () async {
+      String? capturedToken;
+      final client = MockClient((req) async {
+        capturedToken = req.url.queryParameters['token'];
+        return http.Response(
+          jsonEncode({'messages': <Object?>[], 'seq': 0}),
+          200,
+        );
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'general',
+        client: client,
+        tokenProvider: () => 'test-token-123',
+      );
+
+      await transport.poll();
+      expect(capturedToken, 'test-token-123');
+    });
+
+    test('poll skips when tokenProvider is set but returns null', () async {
+      var called = false;
+      final client = MockClient((req) async {
+        called = true;
+        return http.Response(
+          jsonEncode({'messages': <Object?>[], 'seq': 0}),
+          200,
+        );
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'general',
+        client: client,
+        tokenProvider: () => null,
+      );
+
+      final result = await transport.poll();
+      expect(result, isEmpty);
+      expect(called, isFalse);
+    });
+
+    test('baseUrlProvider overrides baseUrl for poll and send', () async {
+      final captured = <Uri>[];
+      final client = MockClient((req) async {
+        captured.add(req.url);
+        if (req.method == 'POST') {
+          return http.Response(jsonEncode({'ok': true, 'seq': 1}), 200);
+        }
+        return http.Response(
+          jsonEncode({'messages': <Object?>[], 'seq': 0}),
+          200,
+        );
+      });
+      final fallback = Uri.parse('http://fallback.test');
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://primary.test'),
+        channel: 'ch1',
+        client: client,
+        baseUrlProvider: () => fallback,
+      );
+
+      await transport.poll();
+      final m = await Message.create(
+        author: author,
+        channel: 'ch1',
+        payload: _b('hi'),
+      );
+      await transport.send(m);
+
+      expect(captured[0].host, 'fallback.test');
+      expect(captured[0].path, '/poll');
+      expect(captured[1].host, 'fallback.test');
+      expect(captured[1].path, '/messages');
+    });
+
+    test('baseUrlProvider null falls back to baseUrl', () async {
+      Uri? capturedUrl;
+      final client = MockClient((req) async {
+        capturedUrl = req.url;
+        return http.Response(
+          jsonEncode({'messages': <Object?>[], 'seq': 0}),
+          200,
+        );
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://primary.test'),
+        channel: 'ch1',
+        client: client,
+        baseUrlProvider: null,
+      );
+
+      await transport.poll();
+      expect(capturedUrl!.host, 'primary.test');
+    });
   });
 }
