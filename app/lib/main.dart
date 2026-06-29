@@ -840,14 +840,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
+    final onlinePeers = _allOnlinePeers();
     final active = members
-        .where((k) => (now - (lastSeen[k] ?? 0)) < sevenDays)
+        .where((k) =>
+            onlinePeers.contains(k) ||
+            (now - (lastSeen[k] ?? 0)) < sevenDays)
         .toList();
     final inactive = members
-        .where((k) => (now - (lastSeen[k] ?? 0)) >= sevenDays)
+        .where((k) =>
+            !onlinePeers.contains(k) &&
+            (now - (lastSeen[k] ?? 0)) >= sevenDays)
         .toList();
-
-    final onlinePeers = _allOnlinePeers();
 
     return [
       for (final key in active)
