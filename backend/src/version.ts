@@ -21,10 +21,35 @@ export class VersionStore {
     try {
       if (existsSync(this.path)) {
         this.manifest = JSON.parse(readFileSync(this.path, 'utf-8'));
+        console.log(`[version] loaded manifest from ${this.path}`);
+      } else {
+        console.log(`[version] no manifest at ${this.path}, will try GitHub`);
+        this.fetchFromGitHub();
       }
-    } catch {
-      // Corrupt or missing file — start empty.
+    } catch (e) {
+      console.error(`[version] failed to read ${this.path}:`, e);
+      this.fetchFromGitHub();
     }
+  }
+
+  /** Fetches manifest.json from the latest GitHub release as a fallback. */
+  private fetchFromGitHub() {
+    const repo = process.env['GITHUB_REPO'];
+    if (!repo) return;
+    const url =
+      `https://github.com/${repo}/releases/latest/download/manifest.json`;
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const m = (await res.json()) as Record<string, unknown>;
+        if (m.version && m.seq && m.sig) {
+          this.set(m as object);
+          console.log(`[version] recovered manifest from GitHub (${m.version})`);
+        }
+      })
+      .catch((e) => {
+        console.log(`[version] GitHub fallback failed: ${e}`);
+      });
   }
 
   get() { return this.manifest; }
@@ -34,8 +59,9 @@ export class VersionStore {
     try {
       mkdirSync(dirname(this.path), { recursive: true });
       writeFileSync(this.path, JSON.stringify(m, null, 2));
-    } catch {
-      // Write failure is non-fatal — manifest is still in memory for this run.
+      console.log(`[version] persisted manifest to ${this.path}`);
+    } catch (e) {
+      console.error(`[version] failed to persist manifest to ${this.path}:`, e);
     }
   }
 }

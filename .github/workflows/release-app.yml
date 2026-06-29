@@ -196,3 +196,8 @@ jobs:
             -H "authorization: Bearer $RELEASE_SECRET" \
             -H "content-type: application/json" \
             --data @manifest.json
+      - name: Upload manifest as release asset
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" backend/manifest.json --clobber
