@@ -3164,7 +3164,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final isMuted = key != 'self' &&
         (_voiceMuted.contains(key) || _blocked.contains(key));
     return InkWell(
-      onTap: key == 'self' ? null : () => unawaited(_peerVolume(key, name)),
+      onTap: key == 'self' || isMuted
+          ? null
+          : () => unawaited(_peerVolume(key, name)),
       onLongPress: key == 'self'
           ? null
           : () {
@@ -3330,6 +3332,10 @@ class _ChatScreenState extends State<ChatScreen> {
           _blocked.remove(authorHex);
         } else {
           _blocked.add(authorHex);
+          // Immediately mute in voice if in a call.
+          if (_voice != null && _voice!.volumeOf(authorHex) > 0) {
+            unawaited(_voice!.setVolume(authorHex, 0.0));
+          }
         }
       });
       if (isBlocked) {
