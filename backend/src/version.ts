@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Hono } from 'hono';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { timingSafeEqual } from 'node:crypto';
 import { dirname } from 'node:path';
 
 const DEFAULT_MANIFEST_PATH = './data/version.json';
@@ -78,7 +79,14 @@ export function addVersionRoutes(app: Hono, store: VersionStore): void {
   app.post('/version', async (c) => {
     const secret = c.req.header('authorization');
     const expected = process.env['RELEASE_SECRET'];
-    if (!expected || secret !== `Bearer ${expected}`) {
+    if (!expected || !secret) {
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+    const expectedFull = `Bearer ${expected}`;
+    if (
+      secret.length !== expectedFull.length ||
+      !timingSafeEqual(Buffer.from(secret), Buffer.from(expectedFull))
+    ) {
       return c.json({ error: 'unauthorized' }, 401);
     }
     const body = await c.req.json();
