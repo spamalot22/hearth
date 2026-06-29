@@ -172,6 +172,7 @@ class ChannelSession {
         channel: channelId,
         pollInterval: const Duration(seconds: 10),
         tokenProvider: () => mesh?.authToken,
+        baseUrlProvider: () => mesh?.activeUrl ?? relayUrl,
       );
     }
 

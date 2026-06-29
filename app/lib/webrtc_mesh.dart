@@ -32,6 +32,7 @@ import 'update_checker.dart';
 class WebRtcMesh {
   WebRtcMesh({
     required this.baseUrl,
+    this.fallbackUrls = const [],
     required this.channel,
     required this.identity,
     this.localStream,
@@ -57,6 +58,15 @@ class WebRtcMesh {
 
   /// Base URL of the relay used for signalling (e.g. `http://localhost:8787`).
   final Uri baseUrl;
+
+  /// Additional relay URLs to try if the primary is unreachable.
+  final List<Uri> fallbackUrls;
+
+  /// The relay URL currently in use (may differ from baseUrl after failover).
+  late Uri _activeUrl = baseUrl;
+
+  /// The relay currently being used (follows failover).
+  Uri get activeUrl => _activeUrl;
 
   /// Channel everyone in this mesh shares.
   final String channel;
@@ -224,26 +234,35 @@ class WebRtcMesh {
         utf8.encode('announce|$channel|$selfPubkeyHex|$ts'),
       );
       final sig = hex.encode(sigBytes);
-      final res = await _client.post(
-        baseUrl.replace(path: '/announce'),
-        headers: const {'content-type': 'application/json'},
-        body: jsonEncode({
-          'channel': channel,
-          'pubkey': selfPubkeyHex,
-          'ts': ts,
-          'sig': sig,
-        }),
-      );
-      if (res.statusCode != 200) return;
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      _authToken = body['token'] as String?;
-      for (final peer in (body['peers'] as List).cast<String>().take(
-        _kMaxPeerFanout,
-      )) {
-        _maybeInitiate(peer);
+      final payload = jsonEncode({
+        'channel': channel,
+        'pubkey': selfPubkeyHex,
+        'ts': ts,
+        'sig': sig,
+      });
+      // Try active URL first, then fallbacks.
+      final urls = {...{_activeUrl}, ...fallbackUrls, baseUrl}.toList();
+      for (final url in urls) {
+        try {
+          final res = await _client.post(
+            url.replace(path: '/announce'),
+            headers: const {'content-type': 'application/json'},
+            body: payload,
+          );
+          if (res.statusCode != 200) continue;
+          _activeUrl = url;
+          final body = jsonDecode(res.body) as Map<String, dynamic>;
+          _authToken = body['token'] as String?;
+          for (final peer in (body['peers'] as List).cast<String>().take(
+            _kMaxPeerFanout,
+          )) {
+            _maybeInitiate(peer);
+          }
+          return; // success
+        } catch (_) {
+          continue; // try next
+        }
       }
-    } catch (_) {
-      // Transient (relay down, blip) — the next tick retries.
     } finally {
       _announcing = false;
     }
@@ -261,7 +280,7 @@ class WebRtcMesh {
       };
       if (_authToken != null) params['token'] = _authToken!;
       final res = await _client.get(
-        baseUrl.replace(path: '/signal', queryParameters: params),
+        _activeUrl.replace(path: '/signal', queryParameters: params),
       );
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -422,7 +441,7 @@ class WebRtcMesh {
   void _openTunnel(String peerHex) {
     if (_tunnels.containsKey(peerHex)) return; // already tunnelling
     final tunnel = RelayTunnel(
-      baseUrl: baseUrl,
+      baseUrl: _activeUrl,
       selfPubkeyHex: selfPubkeyHex,
       peerPubkeyHex: peerHex,
       authToken: _authToken,
@@ -444,7 +463,7 @@ class WebRtcMesh {
     };
     try {
       await _client.post(
-        baseUrl.replace(path: '/signal'),
+        _activeUrl.replace(path: '/signal'),
         headers: const {'content-type': 'application/json'},
         body: jsonEncode({
           'channel': channel,

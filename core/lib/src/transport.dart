@@ -42,6 +42,7 @@ class RelayTransport implements Transport {
     required this.baseUrl,
     required this.channel,
     this.tokenProvider,
+    this.baseUrlProvider,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
   }) : _client = client ?? http.Client();
@@ -53,6 +54,11 @@ class RelayTransport implements Transport {
 
   /// Returns the current auth token (from announce). Poll is skipped if null.
   final String? Function()? tokenProvider;
+
+  /// Returns the active relay URL (follows failover). Falls back to [baseUrl].
+  final Uri Function()? baseUrlProvider;
+
+  Uri get _url => baseUrlProvider?.call() ?? baseUrl;
 
   late final StreamController<Message> _incoming =
       StreamController<Message>.broadcast(onListen: _startPolling);
@@ -96,7 +102,7 @@ class RelayTransport implements Transport {
   @override
   Future<void> send(Message message) async {
     final res = await _client.post(
-      baseUrl.replace(path: '/messages'),
+      _url.replace(path: '/messages'),
       headers: const {'content-type': 'application/json'},
       body: jsonEncode(message.toJson()),
     );
@@ -116,7 +122,7 @@ class RelayTransport implements Transport {
     final params = <String, String>{'channel': channel, 'since': '$_since'};
     if (token != null) params['token'] = token;
     final res = await _client.get(
-      baseUrl.replace(path: '/poll', queryParameters: params),
+      _url.replace(path: '/poll', queryParameters: params),
     );
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
