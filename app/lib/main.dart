@@ -377,6 +377,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final Map<String, Set<String>> _voicePresence = {}; // channelId -> peerHexes
   final Map<String, DateTime> _voicePresenceTs = {}; // peerHex -> last seen
   Timer? _voicePresenceTimer;
+  Timer? _updateCheckTimer;
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
@@ -500,6 +501,12 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (widget.autoPoll) unawaited(_checkRelay());
     if (widget.autoPoll) await _checkUpdate();
+    if (_updateInfo == null && widget.autoPoll) {
+      _updateCheckTimer = Timer.periodic(
+        const Duration(minutes: 30),
+        (_) => unawaited(_checkUpdate()),
+      );
+    }
     if (_updateInfo != null) {
       // Force update: don't proceed to load channels — show the gate screen.
       if (mounted) setState(() {});
@@ -1821,6 +1828,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _voicePresenceTimer?.cancel();
+    _updateCheckTimer?.cancel();
     unawaited(_channels?.close());
     unawaited(_broadcast?.stop());
     for (final view in _screenViews.values) {
