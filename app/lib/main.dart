@@ -574,6 +574,15 @@ class _ChatScreenState extends State<ChatScreen> {
   void _onUpdate() {
     // Re-broadcast voice presence to newly-connected peers immediately.
     if (_voice != null) _broadcastVoicePresence(_voice!.channelId);
+    // Re-broadcast read watermark so new peers see our read status.
+    final active = _channels?.active;
+    if (active != null) {
+      final wm = _lastBroadcastWatermark[active.channelId];
+      if (wm != null && !_readReceiptsDisabled.contains(active.channelId)) {
+        active.broadcast(ReadWatermarkControl(
+            channelId: active.channelId, messageId: wm));
+      }
+    }
     unawaited(_refresh());
   }
 
@@ -734,6 +743,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _indexProfiles(active);
       _detectNewMembers(active);
       _markRead(active);
+      // Backfill any watermark timestamps that were unresolved when received.
+      _backfillWatermarkTs(active);
       // Publish our own name into a channel the first time we're active in it.
       if (_myName != null && _announced.add(active.channelId)) {
         await _announceName(active);
@@ -4214,6 +4225,22 @@ class _ChatScreenState extends State<ChatScreen> {
         session.broadcast(ReadWatermarkControl(
             channelId: session.channelId, messageId: lastId));
       }
+    }
+  }
+
+  /// Resolves any watermark message IDs that weren't in our DAG when received.
+  void _backfillWatermarkTs(ChannelSession session) {
+    final ch = session.channelId;
+    final watermarks = _readWatermarks[ch];
+    if (watermarks == null) return;
+    final cache = _watermarkTs[ch] ??= {};
+    final uncached = watermarks.values.where((id) => !cache.containsKey(id));
+    if (uncached.isEmpty) return;
+    final ordered = session.repository.ordered();
+    final tsMap = <String, int>{for (final m in ordered) m.idHex: m.timestampMs};
+    for (final id in uncached) {
+      final ts = tsMap[id];
+      if (ts != null) cache[id] = ts;
     }
   }
 
