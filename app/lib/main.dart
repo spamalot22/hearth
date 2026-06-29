@@ -2264,7 +2264,11 @@ class _ChatScreenState extends State<ChatScreen> {
             SizedBox(
               width: 200,
               height: 200,
-              child: QrImageView(data: invite, padding: EdgeInsets.zero),
+              child: QrImageView(
+                data: invite,
+                padding: EdgeInsets.zero,
+                backgroundColor: Colors.white,
+              ),
             ),
             const SizedBox(height: 12),
             SelectableText(
