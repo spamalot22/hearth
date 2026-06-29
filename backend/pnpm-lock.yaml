@@ -6,7 +6,6 @@ settings:
 
 overrides:
   vite: '>=6.4.3'
-  esbuild: '>=0.25.0'
 
 importers:
 
@@ -595,7 +594,7 @@ packages:
     peerDependencies:
       '@types/node': ^20.19.0 || >=22.12.0
       '@vitejs/devtools': ^0.3.0
-      esbuild: '>=0.25.0'
+      esbuild: ^0.27.0 || ^0.28.0
       jiti: '>=1.21.0'
       less: ^4.0.0
       sass: ^1.70.0

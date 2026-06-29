@@ -5,10 +5,8 @@ allowBuilds:
   esbuild: true
 
 # Security floors for transitive build tooling. The stale lockfile pinned vitest's
-# vite to a vulnerable 5.x (+ esbuild 0.21.x); these force patched versions across
-# the whole tree, clearing the Dependabot advisories (vite server.fs.deny bypass /
-# path traversal, esbuild dev-server request smuggling). pnpm 11 reads overrides
-# here, not from package.json's "pnpm" field.
+# vite to a vulnerable 5.x; this forces a patched version across the whole tree,
+# clearing the Dependabot advisory (vite server.fs.deny bypass / path traversal).
+# esbuild override removed — direct devDependency ^0.28.1 satisfies the floor.
 overrides:
   vite: '>=6.4.3'
-  esbuild: '>=0.25.0'
