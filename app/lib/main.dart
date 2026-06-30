@@ -2017,6 +2017,10 @@ class _ChatScreenState extends State<ChatScreen> {
     if (store == null) return;
 
     final stickers = library?.byKind(MediaKind.sticker) ?? [];
+    // Pre-fetch blob bytes so FutureBuilder doesn't re-fire on rebuild.
+    final stickerFutures = [
+      for (final item in stickers) store.get(item.hash),
+    ];
 
     final picked = await showModalBottomSheet<String>(
       context: context,
@@ -2072,7 +2076,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemBuilder: (context, i) {
                       final item = stickers[i];
                       return FutureBuilder<Uint8List?>(
-                        future: store.get(item.hash),
+                        future: stickerFutures[i],
                         builder: (context, snap) {
                           final bytes = snap.data;
                           if (bytes == null) {
