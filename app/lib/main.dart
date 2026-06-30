@@ -439,6 +439,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String? _error;
   Timer? _errorTimer;
   bool _sending = false;
+  Message? _replyTo; // message being replied to (shown above composer)
 
   /// Persists relay state for the background fetch isolate.
   Future<void> _saveBackgroundState() async {
@@ -2040,7 +2041,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _typingLocally = false;
       _channels?.active?.sendTyping(false);
     }
-    await _publish(TextContent(text));
+    await _publish(TextContent(text, replyTo: _replyTo?.idHex));
+    setState(() => _replyTo = null);
     _composerFocus.requestFocus();
     // @bot trigger — broadcast an inference request to the mesh.
     if (text.startsWith('@bot ')) {
@@ -5025,21 +5027,85 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ],
       ),
     );
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      child: mine
-          ? Align(alignment: Alignment.centerRight, child: bubble)
-          : Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
-                  onTap: () => unawaited(_peerActions(message.author)),
-                  child: _avatar(message.author),
-                ),
-                const SizedBox(width: 8),
-                Flexible(child: bubble),
-              ],
+    // Quoted reply preview above the bubble if this message is a reply.
+    final content = session.contentOf(message);
+    Widget? quoteWidget;
+    if (content.replyTo != null) {
+      final original = session.repository.ordered().cast<Message?>().firstWhere(
+          (m) => m!.idHex == content.replyTo, orElse: () => null);
+      if (original != null) {
+        final origContent = session.contentOf(original);
+        final origText = origContent is TextContent
+            ? origContent.text
+            : origContent is GifContent
+                ? 'GIF'
+                : origContent is StickerContent
+                    ? 'Sticker'
+                    : origContent is SoundContent
+                        ? '🔊 ${origContent.name}'
+                        : 'Message';
+        final origName = _displayName(original.author);
+        quoteWidget = Container(
+          margin: const EdgeInsets.only(bottom: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                color: _userColor(original.author),
+                width: 3,
+              ),
             ),
+            color: Theme.of(context).colorScheme.surfaceContainerHigh
+                .withAlpha(80),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(origName,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: _userColor(original.author),
+                  )),
+              Text(
+                origText.length > 60
+                    ? '${origText.substring(0, 60)}…'
+                    : origText,
+                style: const TextStyle(fontSize: 11),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        );
+      }
+    }
+    final bubbleWithQuote = quoteWidget != null
+        ? Column(
+            crossAxisAlignment:
+                mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [quoteWidget, bubble],
+          )
+        : bubble;
+    return GestureDetector(
+      onLongPress: () => setState(() => _replyTo = message),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        child: mine
+            ? Align(alignment: Alignment.centerRight, child: bubbleWithQuote)
+            : Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  GestureDetector(
+                    onTap: () => unawaited(_peerActions(message.author)),
+                    child: _avatar(message.author),
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(child: bubbleWithQuote),
+                ],
+              ),
+      ),
     );
   }
 
@@ -5074,6 +5140,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  String _replyPreview(ChannelSession session) {
+    final msg = _replyTo;
+    if (msg == null) return '';
+    final content = session.contentOf(msg);
+    if (content is TextContent) {
+      return content.text.length > 60
+          ? '${content.text.substring(0, 60)}…'
+          : content.text;
+    }
+    if (content is GifContent) return 'GIF';
+    if (content is StickerContent) return 'Sticker';
+    if (content is SoundContent) return '🔊 ${content.name}';
+    if (content is FileContent) return '📎 ${content.name}';
+    return 'Message';
+  }
+
   Widget _composer(BuildContext context, ChannelSession session) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
@@ -5084,9 +5166,52 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          IconButton(
+          if (_replyTo != null)
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+              color: scheme.surfaceContainerHigh.withAlpha(120),
+              child: Row(
+                children: [
+                  Container(
+                    width: 3,
+                    height: 28,
+                    color: _userColor(_replyTo!.author),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _displayName(_replyTo!.author),
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: _userColor(_replyTo!.author),
+                          ),
+                        ),
+                        Text(
+                          _replyPreview(session),
+                          style: const TextStyle(fontSize: 11),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 16),
+                    onPressed: () => setState(() => _replyTo = null),
+                  ),
+                ],
+              ),
+            ),
+          Row(
+            children: [
+              IconButton(
             onPressed: () => unawaited(_insertEmoji()),
             icon: const Icon(Icons.emoji_emotions_outlined),
             tooltip: 'Emoji',
@@ -5166,6 +5291,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             onPressed: _sending ? null : () => unawaited(_send()),
             icon: const Icon(Icons.send),
           ),
+        ],
+      ),
         ],
       ),
     );

@@ -6,17 +6,23 @@ import 'dart:convert';
 /// encryption (we encrypt the envelope) and needs no change to the signed
 /// [Message] schema. New types (sticker, sound) slot in here.
 sealed class Content {
-  const Content();
+  const Content({this.replyTo});
+
+  /// If this message is a reply, the hex ID of the message being replied to.
+  final String? replyTo;
 
   Map<String, Object?> toJson();
 
   /// Serialises to payload bytes.
-  List<int> encode() => utf8.encode(jsonEncode(toJson()));
+  List<int> encode() => utf8.encode(jsonEncode({
+        ...toJson(),
+        if (replyTo != null) 'replyTo': replyTo,
+      }));
 }
 
 /// Plain text (which already includes emoji — they're just Unicode).
 class TextContent extends Content {
-  const TextContent(this.text);
+  const TextContent(this.text, {super.replyTo});
 
   final String text;
 
@@ -102,9 +108,11 @@ Content parseContent(List<int> payload) {
   try {
     final decoded = jsonDecode(utf8.decode(payload));
     if (decoded is Map) {
+      final replyTo = decoded['replyTo'] as String?;
       switch (decoded['t']) {
         case 'text':
-          return TextContent(decoded['text'] as String? ?? '');
+          return TextContent(decoded['text'] as String? ?? '',
+              replyTo: replyTo);
         case 'gif':
           return GifContent(decoded['blob'] as String? ?? '');
         case 'sticker':
