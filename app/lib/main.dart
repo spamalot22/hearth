@@ -368,7 +368,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _input = TextEditingController();
   final FocusNode _composerFocus = FocusNode();
   final ScrollController _scroll = ScrollController();
@@ -489,6 +489,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _input.addListener(_onInputChanged);
     _scroll.addListener(_onScroll);
     unawaited(_init());
@@ -1996,7 +1997,17 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      // Save fresh token for background fetch before the app sleeps.
+      unawaited(_saveBackgroundState());
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _voicePresenceTimer?.cancel();
     _updateCheckTimer?.cancel();
     unawaited(_channels?.close());
