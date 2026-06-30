@@ -3847,6 +3847,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ],
         ),
         actions: [
+          if (session != null)
+            IconButton(
+              onPressed: () => _openSearch(session),
+              icon: const Icon(Icons.search),
+              tooltip: 'Search messages',
+            ),
           if (session != null && !wide)
             IconButton(
               onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
@@ -5012,6 +5018,94 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final pins = _pinnedMessages[channelId] ?? {};
     unawaited(_settings?.setChannelPref(
         channelId, 'pinned', pins.isEmpty ? null : pins.join(',')));
+  }
+
+  /// Opens a search dialog for the current channel's messages.
+  void _openSearch(ChannelSession session) {
+    var query = '';
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.4,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (ctx, scrollController) => StatefulBuilder(
+          builder: (ctx, setLocal) {
+            final results = query.isEmpty
+                ? <Message>[]
+                : session.repository.ordered().where((m) {
+                    final content = session.contentOf(m);
+                    if (content is TextContent) {
+                      return content.text
+                          .toLowerCase()
+                          .contains(query.toLowerCase());
+                    }
+                    return false;
+                  }).toList().reversed.toList();
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  TextField(
+                    autofocus: true,
+                    decoration: const InputDecoration(
+                      hintText: 'Search messages…',
+                      prefixIcon: Icon(Icons.search),
+                      isDense: true,
+                    ),
+                    onChanged: (v) => setLocal(() => query = v),
+                  ),
+                  const SizedBox(height: 12),
+                  Expanded(
+                    child: results.isEmpty
+                        ? Center(
+                            child: Text(
+                              query.isEmpty
+                                  ? 'Type to search'
+                                  : 'No results',
+                              style: const TextStyle(color: Colors.grey),
+                            ),
+                          )
+                        : ListView.builder(
+                            controller: scrollController,
+                            itemCount: results.length,
+                            itemBuilder: (ctx, i) {
+                              final msg = results[i];
+                              final text =
+                                  (session.contentOf(msg) as TextContent).text;
+                              return ListTile(
+                                dense: true,
+                                leading:
+                                    _avatar(msg.author, radius: 12),
+                                title: Text(
+                                  _displayName(msg.author),
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                subtitle: Text(
+                                  text,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                                trailing: Text(
+                                  _time(msg.timestampMs),
+                                  style: const TextStyle(
+                                      fontSize: 10, color: Colors.grey),
+                                ),
+                                onTap: () => Navigator.pop(ctx),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 
   void _showPinned(ChannelSession session) {
