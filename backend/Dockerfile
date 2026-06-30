@@ -15,7 +15,9 @@ RUN pnpm install --frozen-lockfile
 # Source.
 COPY tsconfig.json ./
 COPY src ./src
-COPY data ./data
+
+# Seed version manifest (self-heals from GitHub at runtime if stale).
+RUN mkdir -p data && echo '{"version":"0.0.0","seq":0,"assets":{},"sig":""}' > data/version.json
 
 # Bundle to a single ESM file. All deps are pure JS — no native addons.
 # Uses server.ts (prod entry, no dotenv — env injected by Docker).
