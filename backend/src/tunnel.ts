@@ -6,7 +6,7 @@ import { RateLimiter, TUNNEL_RATE_LIMIT, TUNNEL_RATE_WINDOW_MS } from './limits'
 /** Extracts a Bearer token from the Authorization header, or null. */
 function bearerToken(c: { req: { header(name: string): string | undefined } }): string | null {
   const h = c.req.header('authorization');
-  if (!h?.startsWith('Bearer ')) return null;
+  if (!h || h.length < 8 || h.slice(0, 7).toLowerCase() !== 'bearer ') return null;
   return h.slice(7);
 }
 
