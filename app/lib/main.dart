@@ -442,9 +442,10 @@ class _ChatScreenState extends State<ChatScreen> {
   void _copyAndClear(String text) {
     Clipboard.setData(ClipboardData(text: text));
     Future.delayed(const Duration(seconds: 30), () {
+      // Clipboard.getData may throw on web (no user gesture for read access).
       Clipboard.getData('text/plain').then((data) {
         if (data?.text == text) Clipboard.setData(const ClipboardData(text: ''));
-      });
+      }).catchError((_) {});
     });
   }
 
