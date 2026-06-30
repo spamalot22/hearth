@@ -391,6 +391,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, Map<String, String>> _readWatermarks = {};
   final Set<String> _readReceiptsDisabled = {}; // DM channelIds with receipts off
   final Set<String> _mutedChannels = {}; // channels with notifications suppressed
+  final Map<String, Set<String>> _pinnedMessages = {}; // channelId -> pinned msg IDs
   final Set<String> _blocked = {}; // globally blocked pubkey hexes
   final Set<String> _voiceMuted = {}; // per-session muted peers (cleared on leave)
   final Map<String, String> _lastBroadcastWatermark = {}; // channelId -> last sent
@@ -607,6 +608,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // unread counts from history that was loaded before the user opened the app.
     for (final session in channels.sessions) {
       _markRead(session);
+      // Load pinned messages for this channel.
+      final pinsCsv = settings?.channelPref(session.channelId, 'pinned');
+      if (pinsCsv != null && pinsCsv.isNotEmpty) {
+        _pinnedMessages[session.channelId] =
+            pinsCsv.split(',').where((s) => s.isNotEmpty).toSet();
+      }
     }
     // Decrypt the active channel's loaded history: the onUpdate calls during the
     // open loop above ran before _channels was set, so they were no-ops.
@@ -3209,6 +3216,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         session.channelId, 'muted', v ? 'true' : null));
                   },
                 ),
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.push_pin_outlined, size: 20),
+                  title: const Text('Pinned messages'),
+                  trailing: Text(
+                    '${(_pinnedMessages[session.channelId] ?? {}).length}',
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                  onTap: () => _showPinned(session),
+                ),
                 const Divider(height: 28),
                 Text('VOICE', style: theme.textTheme.labelSmall),
                 const SizedBox(height: 8),
@@ -4931,9 +4949,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  /// Long-press menu on a message: Reply or React.
+  /// Long-press menu on a message: Reply, React, or Pin.
   void _messageActions(ChannelSession session, Message message) {
     final quickEmojis = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+    final pinned = _pinnedMessages[session.channelId] ?? {};
+    final isPinned = pinned.contains(message.idHex);
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -4966,10 +4986,90 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 setState(() => _replyTo = message);
               },
             ),
+            ListTile(
+              leading: Icon(isPinned ? Icons.push_pin : Icons.push_pin_outlined),
+              title: Text(isPinned ? 'Unpin' : 'Pin'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _togglePin(session.channelId, message.idHex);
+              },
+            ),
           ],
         ),
       ),
     );
+  }
+
+  void _togglePin(String channelId, String messageId) {
+    setState(() {
+      final pins = _pinnedMessages[channelId] ??= {};
+      if (pins.contains(messageId)) {
+        pins.remove(messageId);
+      } else {
+        pins.add(messageId);
+      }
+    });
+    final pins = _pinnedMessages[channelId] ?? {};
+    unawaited(_settings?.setChannelPref(
+        channelId, 'pinned', pins.isEmpty ? null : pins.join(',')));
+  }
+
+  void _showPinned(ChannelSession session) {
+    final pins = _pinnedMessages[session.channelId] ?? {};
+    final ordered = session.repository.ordered();
+    final pinned = ordered.where((m) => pins.contains(m.idHex)).toList();
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Pinned messages',
+                  style: Theme.of(ctx).textTheme.titleMedium),
+              const SizedBox(height: 12),
+              if (pinned.isEmpty)
+                const Text('No pinned messages',
+                    style: TextStyle(color: Colors.grey))
+              else
+                for (final msg in pinned)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: _avatar(msg.author, radius: 12),
+                    title: Text(_displayName(msg.author),
+                        style: const TextStyle(fontSize: 12)),
+                    subtitle: Text(
+                      _contentPreview(session, msg),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.push_pin, size: 16),
+                      onPressed: () {
+                        _togglePin(session.channelId, msg.idHex);
+                        Navigator.pop(ctx);
+                      },
+                    ),
+                  ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _contentPreview(ChannelSession session, Message msg) {
+    final content = session.contentOf(msg);
+    if (content is TextContent) return content.text;
+    if (content is GifContent) return 'GIF';
+    if (content is StickerContent) return 'Sticker';
+    if (content is SoundContent) return '🔊 ${content.name}';
+    if (content is FileContent) return '📎 ${content.name}';
+    return 'Message';
   }
 
   /// Computes reactions for a message: {emoji: [authorHex, ...]}.
@@ -5080,6 +5180,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if ((_pinnedMessages[session.channelId] ?? {})
+                      .contains(message.idHex))
+                    Padding(
+                      padding: const EdgeInsets.only(right: 3),
+                      child: Icon(Icons.push_pin, size: 10,
+                          color: scheme.onSurfaceVariant),
+                    ),
                   Text(
                     _time(message.timestampMs),
                     style: Theme.of(context).textTheme.labelSmall?.copyWith(
