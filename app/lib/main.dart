@@ -3835,6 +3835,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
+        flexibleSpace: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                _channelAccent(session).withAlpha(30),
+                Colors.transparent,
+              ],
+            ),
+          ),
+        ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -4861,6 +4873,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return HSLColor.fromAHSL(1, hue, 0.5, 0.62).toColor();
   }
 
+  /// A unique accent colour for a channel, derived from its ID.
+  /// DMs use the peer's colour; groups derive from channel ID bytes.
+  Color _channelAccent(ChannelSession? session) {
+    if (session == null) return Colors.deepPurple;
+    if (session.isDm && session.peerPubkey != null) {
+      return _userColor(Uint8List.fromList(session.peerPubkey!));
+    }
+    final bytes = session.channelId.codeUnits;
+    final hue = (bytes.isNotEmpty ? bytes[0] + bytes[1] : 0) * 360.0 / 512.0;
+    return HSLColor.fromAHSL(1, hue, 0.45, 0.55).toColor();
+  }
+
   /// A small colour-coded avatar (initial of the display name).
   Widget _avatar(Uint8List author, {double radius = 16}) {
     final label = _displayName(author).replaceFirst('hearth#', '');
@@ -5602,6 +5626,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(width: 8),
           IconButton.filled(
+            style: IconButton.styleFrom(
+              backgroundColor: _channelAccent(session),
+            ),
             onPressed: _sending ? null : () => unawaited(_send()),
             icon: const Icon(Icons.send),
           ),
