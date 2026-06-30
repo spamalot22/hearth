@@ -5411,23 +5411,32 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       GestureDetector(
                         onTap: () => unawaited(_publish(
                             ReactionContent(message.idHex, entry.key))),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: entry.value.contains(
-                                    widget.identity.publicKeyHex)
-                                ? Theme.of(context)
-                                    .colorScheme
-                                    .primaryContainer
-                                : Theme.of(context)
-                                    .colorScheme
-                                    .surfaceContainerHigh,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: Text(
-                            '${entry.key} ${entry.value.length}',
-                            style: const TextStyle(fontSize: 12),
+                        child: TweenAnimationBuilder<double>(
+                          key: ValueKey(
+                              '${entry.key}:${entry.value.length}'),
+                          tween: Tween(begin: 1.3, end: 1.0),
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.elasticOut,
+                          builder: (context, scale, child) =>
+                              Transform.scale(scale: scale, child: child),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: entry.value.contains(
+                                      widget.identity.publicKeyHex)
+                                  ? Theme.of(context)
+                                      .colorScheme
+                                      .primaryContainer
+                                  : Theme.of(context)
+                                      .colorScheme
+                                      .surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              '${entry.key} ${entry.value.length}',
+                              style: const TextStyle(fontSize: 12),
+                            ),
                           ),
                         ),
                       ),
