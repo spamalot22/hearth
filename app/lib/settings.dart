@@ -127,4 +127,17 @@ class SettingsStore {
       value == null
           ? _box.delete(_channelKey(channelId, key))
           : _box.put(_channelKey(channelId, key), value);
+
+  /// All channel IDs where [key] is set to 'true'.
+  Set<String> channelIdsWithPref(String key) {
+    final suffix = ':$key';
+    final result = <String>{};
+    for (final k in _box.keys) {
+      if (k is String && k.endsWith(suffix) && _box.get(k) == 'true') {
+        final parts = k.split(':');
+        if (parts.length == 3) result.add(parts[1]);
+      }
+    }
+    return result;
+  }
 }

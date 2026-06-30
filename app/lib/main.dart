@@ -390,6 +390,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   // Read receipts: per-peer watermark (channelId -> (peerHex -> messageIdHex))
   final Map<String, Map<String, String>> _readWatermarks = {};
   final Set<String> _readReceiptsDisabled = {}; // DM channelIds with receipts off
+  final Set<String> _mutedChannels = {}; // channels with notifications suppressed
   final Set<String> _blocked = {}; // globally blocked pubkey hexes
   final Set<String> _voiceMuted = {}; // per-session muted peers (cleared on leave)
   final Map<String, String> _lastBroadcastWatermark = {}; // channelId -> last sent
@@ -532,6 +533,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (settings != null) {
       _readReceiptsDisabled.addAll(settings.allReadReceiptsDisabled);
       _blocked.addAll(settings.blockedUsers);
+      _mutedChannels.addAll(settings.channelIdsWithPref('muted'));
     }
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
     if (widget.autoPoll) await initRecentGifs();
@@ -635,6 +637,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _notifyBackground(String channelId) {
     if (!mounted) return;
+    // Muted channels: no notification.
+    if (_mutedChannels.contains(channelId)) return;
     final session = _channels?.sessions
         .where((s) => s.channelId == channelId)
         .firstOrNull;
@@ -3183,6 +3187,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                   ),
                 if (session.isDm) const Divider(height: 28),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Mute notifications'),
+                  subtitle: const Text('Silence this channel'),
+                  value: _mutedChannels.contains(session.channelId),
+                  onChanged: (v) {
+                    setState(() {
+                      if (v) {
+                        _mutedChannels.add(session.channelId);
+                      } else {
+                        _mutedChannels.remove(session.channelId);
+                      }
+                    });
+                    unawaited(_settings?.setChannelPref(
+                        session.channelId, 'muted', v ? 'true' : null));
+                  },
+                ),
+                const Divider(height: 28),
                 Text('VOICE', style: theme.textTheme.labelSmall),
                 const SizedBox(height: 8),
                 if (!inCall) ...[
