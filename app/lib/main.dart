@@ -144,10 +144,7 @@ final FlutterLocalNotificationsPlugin _notifications =
     FlutterLocalNotificationsPlugin();
 
 Future<void> _initNotifications() async {
-  if (kIsWeb) {
-    unawaited(requestWebNotificationPermission());
-    return;
-  }
+  if (kIsWeb) return;
   await _notifications.initialize(
     settings: const InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
@@ -184,6 +181,7 @@ Future<void> showLocalNotification(String title, String body) async {
 }
 
 int _notificationId = 0;
+bool _webNotifRequested = false;
 
 class _HearthWindowListener extends WindowListener {
   _HearthWindowListener(this._stateFile);
@@ -2344,6 +2342,11 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _publish(Content content) async {
     final session = _channels?.active;
     if (_sending || session == null) return;
+    // Request web notification permission on first user action.
+    if (kIsWeb && !_webNotifRequested) {
+      _webNotifRequested = true;
+      unawaited(requestWebNotificationPermission());
+    }
     setState(() => _sending = true);
     try {
       final message = await Message.create(
