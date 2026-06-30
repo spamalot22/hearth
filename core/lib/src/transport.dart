@@ -116,15 +116,9 @@ class RelayTransport implements Transport {
   /// One poll round: fetches messages newer than the cursor, returns only those
   /// that verify, and advances the cursor.
   Future<List<Message>> poll() async {
-    final token = tokenProvider?.call();
-    // Skip poll if no token available yet (announce hasn't completed).
-    if (token == null && tokenProvider != null) return [];
     final params = <String, String>{'channel': channel, 'since': '$_since'};
-    final headers = <String, String>{};
-    if (token != null) headers['Authorization'] = 'Bearer $token';
     final res = await _client.get(
       _url.replace(path: '/poll', queryParameters: params),
-      headers: headers,
     );
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');

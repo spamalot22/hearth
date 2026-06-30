@@ -182,11 +182,9 @@ export function createRelay(
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
     if (!channel) return c.json({ error: 'channel required' }, 400);
-    const token = bearerToken(c) ?? c.req.query('token');
-    if (!token) return c.json({ error: 'token required' }, 403);
-    if (!signalHub.verifyToken(token, Date.now())) {
-      return c.json({ error: 'invalid or expired token' }, 403);
-    }
+    // No token required: the channel ID itself is a 256-bit unguessable
+    // capability — knowing it proves membership. Token-gating was
+    // defence-in-depth but prevents background poll after token expiry.
     const sinceRaw = Number(c.req.query('since') ?? '0');
     const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
     const fresh = store.since(channel, since);

@@ -168,31 +168,11 @@ void main() {
       },
     );
 
-    test('poll passes token in Authorization header when tokenProvider returns a value',
-        () async {
-      String? capturedAuth;
-      final client = MockClient((req) async {
-        capturedAuth = req.headers['Authorization'];
-        return http.Response(
-          jsonEncode({'messages': <Object?>[], 'seq': 0}),
-          200,
-        );
-      });
-      final transport = RelayTransport(
-        baseUrl: Uri.parse('http://relay.test'),
-        channel: 'general',
-        client: client,
-        tokenProvider: () => 'test-token-123',
-      );
-
-      await transport.poll();
-      expect(capturedAuth, 'Bearer test-token-123');
-    });
-
-    test('poll skips when tokenProvider is set but returns null', () async {
+    test('poll does not require a token (channel ID is the auth)', () async {
       var called = false;
       final client = MockClient((req) async {
         called = true;
+        expect(req.headers['Authorization'], isNull);
         return http.Response(
           jsonEncode({'messages': <Object?>[], 'seq': 0}),
           200,
@@ -205,9 +185,8 @@ void main() {
         tokenProvider: () => null,
       );
 
-      final result = await transport.poll();
-      expect(result, isEmpty);
-      expect(called, isFalse);
+      await transport.poll();
+      expect(called, isTrue);
     });
 
     test('baseUrlProvider overrides baseUrl for poll and send', () async {

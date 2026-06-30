@@ -25,7 +25,7 @@ import { hexToBytes, verifySignature } from './message';
 
 const PRESENCE_TTL_MS = 15_000;
 const SIGNAL_TTL_MS = 30_000;
-const TOKEN_TTL_MS = 30 * 60_000; // 30 minutes — long enough for background fetch cycles
+const TOKEN_TTL_MS = 60_000; // 60 seconds (signal/search/tunnel only)
 
 interface StoredSignal {
   seq: number;

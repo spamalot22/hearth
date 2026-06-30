@@ -55,17 +55,11 @@ Future<void> initBackgroundFetch() async {
 Future<void> saveBackgroundPollState({
   required String relayUrl,
   required List<String> channelIds,
-  String? token,
 }) async {
   await Hive.initFlutter();
   final box = await Hive.openBox<String>('hearth.bg_poll');
   await box.put('relayUrl', relayUrl);
   await box.put('channels', channelIds.join(','));
-  if (token != null) {
-    await box.put('token', token);
-  } else {
-    await box.delete('token');
-  }
 }
 
 /// Polls relay from Hive-stored state (works in headless isolate).
@@ -75,7 +69,6 @@ Future<void> _pollFromStorage() async {
     final box = await Hive.openBox<String>('hearth.bg_poll');
     final relayUrl = box.get('relayUrl');
     final channelsRaw = box.get('channels');
-    final token = box.get('token');
 
     if (relayUrl == null || channelsRaw == null || channelsRaw.isEmpty) return;
 
@@ -90,12 +83,9 @@ Future<void> _pollFromStorage() async {
         'channel': channelId,
         'since': '$since',
       };
-      final headers = <String, String>{};
-      if (token != null) headers['Authorization'] = 'Bearer $token';
 
       final res = await http.get(
         relay.replace(path: '/poll', queryParameters: params),
-        headers: headers,
       );
       if (res.statusCode != 200) continue;
 

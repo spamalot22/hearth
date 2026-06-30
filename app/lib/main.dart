@@ -444,11 +444,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final channels = _channels;
     if (channels == null) return;
     final channelIds = channels.sessions.map((s) => s.channelId).toList();
-    final token = channels.sessions.firstOrNull?.mesh?.authToken;
     await saveBackgroundPollState(
       relayUrl: _relayUrl.toString(),
       channelIds: channelIds,
-      token: token,
     );
   }
 
