@@ -36,6 +36,7 @@ import 'key_store.dart';
 import 'media_library.dart';
 import 'mesh_control.dart';
 import 'network_status.dart';
+import 'notify.dart';
 import 'profile.dart';
 import 'screen_picker.dart';
 import 'screen_share.dart';
@@ -143,7 +144,10 @@ final FlutterLocalNotificationsPlugin _notifications =
     FlutterLocalNotificationsPlugin();
 
 Future<void> _initNotifications() async {
-  if (kIsWeb) return;
+  if (kIsWeb) {
+    unawaited(requestWebNotificationPermission());
+    return;
+  }
   await _notifications.initialize(
     settings: const InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
@@ -159,9 +163,13 @@ Future<void> _initNotifications() async {
 
 /// Shows a local notification (desktop/Android, not web).
 Future<void> showLocalNotification(String title, String body) async {
-  if (kIsWeb) return;
+  if (kIsWeb) {
+    showWebNotification(title, body);
+    return;
+  }
+  _notificationId++;
   await _notifications.show(
-    id: 0,
+    id: _notificationId,
     title: title,
     body: body,
     notificationDetails: const NotificationDetails(
@@ -174,6 +182,8 @@ Future<void> showLocalNotification(String title, String body) async {
     ),
   );
 }
+
+int _notificationId = 0;
 
 class _HearthWindowListener extends WindowListener {
   _HearthWindowListener(this._stateFile);

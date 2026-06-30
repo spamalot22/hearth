@@ -70,6 +70,7 @@ dependencies:
   qr_flutter: ^4.1.0
   mobile_scanner: ^7.2.0
   permission_handler: ^12.0.3
+  web: ^1.1.1
 
 dev_dependencies:
   flutter_test:
