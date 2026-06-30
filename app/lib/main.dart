@@ -23,6 +23,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'background_poll.dart';
 import 'blob_store_hive.dart';
 import 'candidate_cache.dart';
 import 'channel.dart';
@@ -438,6 +439,19 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _errorTimer;
   bool _sending = false;
 
+  /// Persists relay state for the background fetch isolate.
+  Future<void> _saveBackgroundState() async {
+    final channels = _channels;
+    if (channels == null) return;
+    final channelIds = channels.sessions.map((s) => s.channelId).toList();
+    final token = channels.sessions.firstOrNull?.mesh?.authToken;
+    await saveBackgroundPollState(
+      relayUrl: _relayUrl.toString(),
+      channelIds: channelIds,
+      token: token,
+    );
+  }
+
   void _setError(String msg) {
     _errorTimer?.cancel();
     setState(() => _error = msg);
@@ -595,6 +609,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // Decrypt the active channel's loaded history: the onUpdate calls during the
     // open loop above ran before _channels was set, so they were no-ops.
     unawaited(_refresh());
+    // Background fetch: poll relay for notifications when app is backgrounded.
+    unawaited(initBackgroundFetch());
+    unawaited(_saveBackgroundState());
   }
 
   void _onUpdate() {
@@ -2465,6 +2482,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await _registry?.save(channel);
     if (mounted) setState(() => _groups[channel.id] = channel);
     await _channels?.openGroup(channel.id, channel.key);
+    unawaited(_saveBackgroundState());
   }
 
   /// Joins a channel from a pasted invite code.
@@ -2670,6 +2688,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await _registry?.remove(channelId);
     _groups.remove(channelId);
     await _channels?.leave(channelId);
+    unawaited(_saveBackgroundState());
     if (mounted) setState(() {});
   }
 
