@@ -438,6 +438,16 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Copies [text] to the clipboard and auto-clears it after 30 seconds.
+  void _copyAndClear(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    Future.delayed(const Duration(seconds: 30), () {
+      Clipboard.getData('text/plain').then((data) {
+        if (data?.text == text) Clipboard.setData(const ClipboardData(text: ''));
+      });
+    });
+  }
+
   UpdateInfo? _updateInfo;
   bool _relayBlocked = false; // released build can't reach the relay to verify
   bool _checkingBlock = false;
@@ -1076,7 +1086,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           FilledButton.icon(
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: codeB64));
+              _copyAndClear(codeB64);
               Navigator.pop(context);
             },
             icon: const Icon(Icons.copy),
@@ -2561,7 +2571,7 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           FilledButton.icon(
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: invite));
+              _copyAndClear(invite);
               Navigator.pop(context);
             },
             icon: const Icon(Icons.copy),
@@ -3525,7 +3535,7 @@ class _ChatScreenState extends State<ChatScreen> {
               inviterName: _myName,
               relayUrl: _relayUrl.toString(),
             );
-            Clipboard.setData(ClipboardData(text: invite));
+            _copyAndClear(invite);
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text('Invite copied — send it to them!'),
