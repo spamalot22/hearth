@@ -19,6 +19,8 @@ class HiveBlobStore implements BlobStore {
   final Box<int> _times; // hash -> last access epoch ms
 
   static const int pruneDays = 30;
+  /// Maximum blob size (10 MB). Rejects uploads and incoming blobs above this.
+  static const int maxBytes = 10 * 1024 * 1024;
 
   static Future<HiveBlobStore> open() async {
     await Hive.initFlutter();
@@ -29,6 +31,9 @@ class HiveBlobStore implements BlobStore {
 
   @override
   Future<String> put(Uint8List bytes) async {
+    if (bytes.length > maxBytes) {
+      throw ArgumentError('Blob too large (${bytes.length} > $maxBytes bytes)');
+    }
     final id = await blobHash(bytes);
     await _box.put(id, bytes);
     await _times.put(id, DateTime.now().millisecondsSinceEpoch);

@@ -2044,6 +2044,15 @@ class _ChatScreenState extends State<ChatScreen> {
                       );
                       final bytes = result?.files.single.bytes;
                       if (bytes == null) return;
+                      if (bytes.length > HiveBlobStore.maxBytes) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text('Image too large (max 10 MB)')),
+                          );
+                        }
+                        return;
+                      }
                       final hash = await store.put(bytes);
                       await library?.add(hash, MediaKind.sticker);
                       if (context.mounted) Navigator.pop(context, hash);
@@ -2121,6 +2130,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final danger = _fileDanger(file.name, bytes);
     if (danger != null) {
       if (mounted) _setError(danger);
+      return;
+    }
+    if (bytes.length > HiveBlobStore.maxBytes) {
+      if (mounted) _setError('File too large (max 10 MB)');
       return;
     }
     final hash = await store.put(bytes);
@@ -2230,6 +2243,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final file = result?.files.single;
     final bytes = file?.bytes;
     if (file == null || bytes == null) return;
+    if (bytes.length > HiveBlobStore.maxBytes) {
+      if (mounted) _setError('Sound too large (max 10 MB)');
+      return;
+    }
     final name = await _promptText(
       title: 'Name this sound',
       hint: 'e.g. airhorn',
