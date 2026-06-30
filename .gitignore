@@ -16,7 +16,9 @@ build/
 node_modules/
 dist/
 *.log
-backend/data/
+# Ignore runtime-written manifest, but track the placeholder seed.
+backend/data/*
+!backend/data/version.json
 
 # Env / secrets — never commit these
 .env
