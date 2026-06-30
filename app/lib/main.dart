@@ -2009,19 +2009,101 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  /// Picks an image and sends it as a sticker — stored as a content-addressed
-  /// blob, fetched on demand by peers (never gossiped to everyone).
+  /// Opens the sticker picker — a grid of your saved stickers (from your media
+  /// library) with an upload button to add new ones.
   Future<void> _sendSticker() async {
     final store = _blobStore;
+    final library = _library;
     if (store == null) return;
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: true,
+
+    final stickers = library?.byKind(MediaKind.sticker) ?? [];
+
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text('Stickers',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () async {
+                      final result = await FilePicker.platform.pickFiles(
+                        type: FileType.image,
+                        withData: true,
+                      );
+                      final bytes = result?.files.single.bytes;
+                      if (bytes == null) return;
+                      final hash = await store.put(bytes);
+                      await library?.add(hash, MediaKind.sticker);
+                      if (context.mounted) Navigator.pop(context, hash);
+                    },
+                    icon: const Icon(Icons.add_photo_alternate_outlined,
+                        size: 18),
+                    label: const Text('Upload'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (stickers.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  child: Text('No stickers yet — upload one or receive '
+                      'some in chat!',
+                      style: TextStyle(color: Colors.grey)),
+                )
+              else
+                SizedBox(
+                  height: 200,
+                  child: GridView.builder(
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 4,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                    ),
+                    itemCount: stickers.length,
+                    itemBuilder: (context, i) {
+                      final item = stickers[i];
+                      return FutureBuilder<Uint8List?>(
+                        future: store.get(item.hash),
+                        builder: (context, snap) {
+                          final bytes = snap.data;
+                          if (bytes == null) {
+                            return const Center(
+                                child: SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2)));
+                          }
+                          return GestureDetector(
+                            onTap: () => Navigator.pop(context, item.hash),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(8),
+                              child: Image.memory(bytes, fit: BoxFit.cover),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
     );
-    final bytes = result?.files.single.bytes;
-    if (bytes == null) return;
-    final hash = await store.put(bytes);
-    await _publish(StickerContent(hash));
+
+    if (picked != null) {
+      await _publish(StickerContent(picked));
+    }
   }
 
   /// Picks any file and sends it as an attachment (image inline, else a chip).

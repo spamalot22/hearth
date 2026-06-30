@@ -373,9 +373,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       - [x] **Emoji** — quick picker added (Unicode text already worked).
       - [x] **GIFs (URL)** — paste-a-URL renders inline; **Giphy/Tenor search** still
             needs a provider **API key** (credentials — ask the user for it).
-      - [ ] **Stickers** — custom sticker packs as content-addressed media blobs.
-      - [ ] **Soundboards** — per-channel uploadable audio clips, tap to play
-            (`audioplayers`), shared channel-wide.
+      - [ ] **Stickers** — sticker picker panel (browse your library of received/
+            sent stickers for quick reuse, like the emoji picker but for images).
+      - [x] **Soundboards** — per-channel uploadable audio clips, tap to play
+            (`audioplayers`), shared channel-wide. Voice panel has a soundboard
+            button; plays for all voice participants via control frame.
       - [x] **Media-blob subsystem — foundation** — content-addressed `BlobStore`
             + want/give-blob transfer over the data channel, fetched on demand and
             content-address-verified. *Unit-tested.* Remaining (needs live verify +
