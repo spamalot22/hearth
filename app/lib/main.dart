@@ -627,16 +627,52 @@ class _ChatScreenState extends State<ChatScreen> {
         _blocked.contains(hex.encode(session.peerPubkey!))) {
       return;
     }
-    final name = session != null ? _channelTitle(session) : 'a channel';
+    final channelName = session != null ? _channelTitle(session) : 'a channel';
+    final isDm = session?.isDm ?? false;
+
+    // Get sender name + message preview from the latest message.
+    String sender = '';
+    String preview = 'New message';
+    if (session != null) {
+      final ordered = session.repository.ordered();
+      if (ordered.isNotEmpty) {
+        final msg = ordered.last;
+        sender = _displayName(msg.author);
+        final content = session.contentOf(msg);
+        if (content is TextContent) {
+          preview = content.text.length > 80
+              ? '${content.text.substring(0, 80)}…'
+              : content.text;
+        } else if (content is GifContent) {
+          preview = 'sent a GIF';
+        } else if (content is StickerContent) {
+          preview = 'sent a sticker';
+        } else if (content is SoundContent) {
+          preview = '🔊 ${content.name}';
+        } else if (content is FileContent) {
+          preview = '📎 ${content.name}';
+        }
+      }
+    }
+
+    final title = isDm ? sender : '#$channelName';
+    final body = isDm ? preview : '$sender: $preview';
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('New message in #$name'),
-        duration: const Duration(seconds: 2),
+        content: Text(isDm ? '$sender: $preview' : '$title — $sender: $preview'),
+        duration: const Duration(seconds: 3),
         behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Open',
+          onPressed: () {
+            _channels?.activate(channelId);
+            if (session != null) _markRead(session);
+          },
+        ),
       ),
     );
-    // Also fire a local OS notification (visible when app is in tray/background).
-    unawaited(showLocalNotification('Hearth', 'New message in #$name'));
+    unawaited(showLocalNotification(title, body));
   }
 
   // --- inference (P2P AI bot) ---
