@@ -102,6 +102,19 @@ class ProfileContent extends Content {
   Map<String, Object?> toJson() => {'t': 'profile', 'name': name};
 }
 
+/// An emoji reaction to another message. Stored in the DAG (persistent).
+/// A second reaction with the same emoji from the same author = toggle off.
+class ReactionContent extends Content {
+  const ReactionContent(this.targetId, this.emoji);
+
+  final String targetId; // hex ID of the message being reacted to
+  final String emoji;
+
+  @override
+  Map<String, Object?> toJson() =>
+      {'t': 'react', 'target': targetId, 'emoji': emoji};
+}
+
 /// Parses a payload into [Content], falling back to plain text for unknown or
 /// legacy (pre-envelope) payloads.
 Content parseContent(List<int> payload) {
@@ -125,6 +138,11 @@ Content parseContent(List<int> payload) {
           );
         case 'profile':
           return ProfileContent(decoded['name'] as String? ?? '');
+        case 'react':
+          return ReactionContent(
+            decoded['target'] as String? ?? '',
+            decoded['emoji'] as String? ?? '👍',
+          );
         case 'file':
           return FileContent(
             decoded['blob'] as String? ?? '',

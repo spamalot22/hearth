@@ -879,6 +879,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           break;
         case FileContent():
           break; // one-off attachment, not a re-usable library item
+        case ReactionContent():
+          break;
       }
     }
   }
@@ -4674,6 +4676,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             : _fileChip(name),
       // Profile claims aren't shown in the timeline (filtered in _messageList).
       ProfileContent() => const SizedBox.shrink(),
+      // Reactions are rendered as chips on their target, not inline.
+      ReactionContent() => const SizedBox.shrink(),
     };
   }
 
@@ -4927,6 +4931,69 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Long-press menu on a message: Reply or React.
+  void _messageActions(ChannelSession session, Message message) {
+    final quickEmojis = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final emoji in quickEmojis)
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        unawaited(
+                            _publish(ReactionContent(message.idHex, emoji)));
+                      },
+                      child: Text(emoji, style: const TextStyle(fontSize: 28)),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.reply),
+              title: const Text('Reply'),
+              onTap: () {
+                Navigator.pop(ctx);
+                setState(() => _replyTo = message);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Computes reactions for a message: {emoji: [authorHex, ...]}.
+  /// A second react with the same emoji from the same author = toggle off.
+  Map<String, List<String>> _reactionsFor(
+      ChannelSession session, String messageId) {
+    final reactions = <String, Set<String>>{};
+    for (final msg in session.repository.ordered()) {
+      final content = session.contentOf(msg);
+      if (content is ReactionContent && content.targetId == messageId) {
+        final authorHex = hex.encode(msg.author);
+        final set = reactions[content.emoji] ??= {};
+        if (set.contains(authorHex)) {
+          set.remove(authorHex); // toggle off
+        } else {
+          set.add(authorHex);
+        }
+      }
+    }
+    // Remove empty entries.
+    reactions.removeWhere((_, v) => v.isEmpty);
+    return reactions.map((k, v) => MapEntry(k, v.toList()));
+  }
+
   Widget _bubble(
     BuildContext context,
     ChannelSession session,
@@ -4968,6 +5035,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     // Blocked users in DMs: skip entirely (invisible).
     if (!mine && session.isDm && _blocked.contains(authorHex)) {
+      return const SizedBox.shrink();
+    }
+    // Reactions are rendered as chips on their target, not as bubbles.
+    if (session.contentOf(message) is ReactionContent) {
       return const SizedBox.shrink();
     }
 
@@ -5088,12 +5159,55 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             children: [quoteWidget, bubble],
           )
         : bubble;
+    // Reaction chips below the bubble.
+    final reactions = _reactionsFor(session, message.idHex);
+    final bubbleFinal = reactions.isEmpty
+        ? bubbleWithQuote
+        : Column(
+            crossAxisAlignment:
+                mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              bubbleWithQuote,
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Wrap(
+                  spacing: 4,
+                  children: [
+                    for (final entry in reactions.entries)
+                      GestureDetector(
+                        onTap: () => unawaited(_publish(
+                            ReactionContent(message.idHex, entry.key))),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: entry.value.contains(
+                                    widget.identity.publicKeyHex)
+                                ? Theme.of(context)
+                                    .colorScheme
+                                    .primaryContainer
+                                : Theme.of(context)
+                                    .colorScheme
+                                    .surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            '${entry.key} ${entry.value.length}',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          );
     return GestureDetector(
-      onLongPress: () => setState(() => _replyTo = message),
+      onLongPress: () => _messageActions(session, message),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         child: mine
-            ? Align(alignment: Alignment.centerRight, child: bubbleWithQuote)
+            ? Align(alignment: Alignment.centerRight, child: bubbleFinal)
             : Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -5102,7 +5216,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     child: _avatar(message.author),
                   ),
                   const SizedBox(width: 8),
-                  Flexible(child: bubbleWithQuote),
+                  Flexible(child: bubbleFinal),
                 ],
               ),
       ),
