@@ -637,6 +637,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final ordered = session.repository.ordered();
       if (ordered.isNotEmpty) {
         final msg = ordered.last;
+        final authorHex = hex.encode(msg.author);
+        // Suppress notifications for blocked users in group channels.
+        if (_blocked.contains(authorHex)) return;
         sender = _displayName(msg.author);
         final content = session.contentOf(msg);
         if (content is TextContent) {
@@ -655,12 +658,14 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    final title = isDm ? sender : '#$channelName';
-    final body = isDm ? preview : '$sender: $preview';
+    final title = isDm ? (sender.isNotEmpty ? sender : channelName) : '#$channelName';
+    final body = sender.isNotEmpty
+        ? (isDm ? preview : '$sender: $preview')
+        : 'New message';
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(isDm ? '$sender: $preview' : '$title — $sender: $preview'),
+        content: Text(isDm ? body : '$title — $body'),
         duration: const Duration(seconds: 3),
         behavior: SnackBarBehavior.floating,
         action: SnackBarAction(
