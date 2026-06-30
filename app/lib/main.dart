@@ -3232,10 +3232,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 Text('VOICE', style: theme.textTheme.labelSmall),
                 const SizedBox(height: 8),
                 if (!inCall) ...[
-                  FilledButton.icon(
-                    onPressed: () => unawaited(_joinVoice(session.channelId)),
-                    icon: const Icon(Icons.call),
-                    label: const Text('Join voice'),
+                  _PressableScale(
+                    child: FilledButton.icon(
+                      onPressed: () => unawaited(_joinVoice(session.channelId)),
+                      icon: const Icon(Icons.call),
+                      label: const Text('Join voice'),
+                    ),
                   ),
                   if (_voicePresence[session.channelId]?.isNotEmpty ?? false)
                     Padding(
@@ -3332,11 +3334,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               : 'Share screen',
                         ),
                       const Spacer(),
-                      IconButton(
-                        onPressed: () => unawaited(_leaveVoice()),
-                        icon: const Icon(Icons.call_end),
-                        color: theme.colorScheme.error,
-                        tooltip: 'Leave voice',
+                      _PressableScale(
+                        child: IconButton(
+                          onPressed: () => unawaited(_leaveVoice()),
+                          icon: const Icon(Icons.call_end),
+                          color: theme.colorScheme.error,
+                          tooltip: 'Leave voice',
+                        ),
                       ),
                     ],
                   ),
@@ -3889,12 +3893,56 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 if (panelInline)
                   Row(
                     children: [
-                      Expanded(child: _chatColumn(session)),
+                      Expanded(
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 200),
+                          switchInCurve: Curves.easeOut,
+                          switchOutCurve: Curves.easeIn,
+                          transitionBuilder: (child, animation) {
+                            final slide = Tween<Offset>(
+                              begin: const Offset(0.05, 0),
+                              end: Offset.zero,
+                            ).animate(animation);
+                            return FadeTransition(
+                              opacity: animation,
+                              child: SlideTransition(
+                                  position: slide, child: child),
+                            );
+                          },
+                          layoutBuilder: (currentChild, previousChildren) =>
+                              currentChild ?? const SizedBox.shrink(),
+                          child: KeyedSubtree(
+                            key: ValueKey(session.channelId),
+                            child: _chatColumn(session),
+                          ),
+                        ),
+                      ),
                       SizedBox(width: 300, child: _channelPanel(session)),
                     ],
                   )
                 else
-                  _chatColumn(session),
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 200),
+                    switchInCurve: Curves.easeOut,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, animation) {
+                      final slide = Tween<Offset>(
+                        begin: const Offset(0.05, 0),
+                        end: Offset.zero,
+                      ).animate(animation);
+                      return FadeTransition(
+                        opacity: animation,
+                        child:
+                            SlideTransition(position: slide, child: child),
+                      );
+                    },
+                    layoutBuilder: (currentChild, previousChildren) =>
+                        currentChild ?? const SizedBox.shrink(),
+                    child: KeyedSubtree(
+                      key: ValueKey(session.channelId),
+                      child: _chatColumn(session),
+                    ),
+                  ),
                 // Hidden 1x1 sinks so the browser plays each remote's audio.
                 for (final renderer
                     in _voice?.remoteRenderers ?? const <RTCVideoRenderer>[])
@@ -5481,18 +5529,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ),
         )
         .toList();
-    final text = names.length == 1
-        ? '${names[0]} is typing…'
-        : '${names.join(", ")} are typing…';
+    final label = names.length == 1 ? names[0] : names.join(', ');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontSize: 12,
-          fontStyle: FontStyle.italic,
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(width: 4),
+          const _BouncingDots(),
+        ],
       ),
     );
   }
@@ -5634,12 +5687,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ),
           ),
           const SizedBox(width: 8),
-          IconButton.filled(
-            style: IconButton.styleFrom(
-              backgroundColor: _channelAccent(session),
+          _PressableScale(
+            child: IconButton.filled(
+              style: IconButton.styleFrom(
+                backgroundColor: _channelAccent(session),
+              ),
+              onPressed: _sending ? null : () => unawaited(_send()),
+              icon: const Icon(Icons.send),
             ),
-            onPressed: _sending ? null : () => unawaited(_send()),
-            icon: const Icon(Icons.send),
           ),
         ],
       ),
@@ -6068,6 +6123,109 @@ class _QrScanPageState extends State<_QrScanPage> {
           }
         },
       ),
+    );
+  }
+}
+
+/// Three animated dots that bounce sequentially (typing indicator).
+class _BouncingDots extends StatefulWidget {
+  const _BouncingDots();
+
+  @override
+  State<_BouncingDots> createState() => _BouncingDotsState();
+}
+
+class _BouncingDotsState extends State<_BouncingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(3, (i) {
+          // Each dot is offset by 0.2 in the animation cycle.
+          final t = (_controller.value + i * 0.2) % 1.0;
+          // Bounce: sin curve peaks at 0.5, producing a smooth up-down.
+          final offset = -3.0 * (t < 0.5 ? t * 2 : (1 - t) * 2);
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 1),
+            child: Transform.translate(
+              offset: Offset(0, offset),
+              child: Container(
+                width: 5,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: color.withAlpha(180),
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+}
+
+/// Wraps a child with a subtle scale-down animation on press (0.95x).
+class _PressableScale extends StatefulWidget {
+  const _PressableScale({required this.child});
+  final Widget child;
+
+  @override
+  State<_PressableScale> createState() => _PressableScaleState();
+}
+
+class _PressableScaleState extends State<_PressableScale>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 100),
+    );
+    _scale = Tween(begin: 1.0, end: 0.93).animate(
+      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTapDown: (_) => _controller.forward(),
+      onTapUp: (_) => _controller.reverse(),
+      onTapCancel: () => _controller.reverse(),
+      child: ScaleTransition(scale: _scale, child: widget.child),
     );
   }
 }
