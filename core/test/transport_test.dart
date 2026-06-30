@@ -182,7 +182,6 @@ void main() {
         baseUrl: Uri.parse('http://relay.test'),
         channel: 'general',
         client: client,
-        tokenProvider: () => null,
       );
 
       await transport.poll();

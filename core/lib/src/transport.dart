@@ -41,7 +41,6 @@ class RelayTransport implements Transport {
   RelayTransport({
     required this.baseUrl,
     required this.channel,
-    this.tokenProvider,
     this.baseUrlProvider,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
@@ -51,9 +50,6 @@ class RelayTransport implements Transport {
   final String channel;
   final Duration pollInterval;
   final http.Client _client;
-
-  /// Returns the current auth token (from announce). Poll is skipped if null.
-  final String? Function()? tokenProvider;
 
   /// Returns the active relay URL (follows failover). Falls back to [baseUrl].
   final Uri Function()? baseUrlProvider;
