@@ -4190,18 +4190,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             itemCount: messages.length,
             itemBuilder: (context, i) {
               final msg = messages[i];
+              // Stagger: newer messages (higher index) appear first,
+              // older ones cascade in with 50ms delay each (max 300ms).
+              final stagger = ((messages.length - 1 - i) * 50)
+                  .clamp(0, 300)
+                  .toDouble();
               return TweenAnimationBuilder<double>(
                 key: ValueKey(msg.idHex),
                 tween: Tween(begin: 0, end: 1),
-                duration: const Duration(milliseconds: 250),
+                duration: Duration(
+                    milliseconds: 250 + stagger.toInt()),
                 curve: Curves.easeOutCubic,
-                builder: (context, value, child) => Opacity(
-                  opacity: value,
-                  child: Transform.translate(
-                    offset: Offset(0, 12 * (1 - value)),
-                    child: child,
-                  ),
-                ),
+                builder: (context, value, child) {
+                  // Delay the visual start by the stagger amount.
+                  final progress = ((value * (250 + stagger) - stagger) / 250)
+                      .clamp(0.0, 1.0);
+                  return Opacity(
+                    opacity: progress,
+                    child: Transform.translate(
+                      offset: Offset(0, 12 * (1 - progress)),
+                      child: child,
+                    ),
+                  );
+                },
                 child: _bubble(context, session, msg),
               );
             },
