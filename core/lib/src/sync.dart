@@ -170,7 +170,7 @@ class SyncSession {
         final store = blobStore;
         if (store == null) return;
         // Reject oversized blobs (10 MB cap).
-        if (bytes.length > 10 * 1024 * 1024) return;
+        if (bytes.length > maxBlobBytes) return;
         await store.put(bytes);
         onBlob?.call(hash);
     }

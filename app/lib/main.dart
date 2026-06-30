@@ -2002,6 +2002,10 @@ class _ChatScreenState extends State<ChatScreen> {
         if (mounted) _setError('could not fetch that GIF');
         return;
       }
+      if (res.bodyBytes.length > HiveBlobStore.maxBytes) {
+        if (mounted) _setError('GIF too large (max 10 MB)');
+        return;
+      }
       final hash = await store.put(res.bodyBytes);
       await _publish(GifContent(hash));
     } catch (_) {
@@ -2278,6 +2282,10 @@ class _ChatScreenState extends State<ChatScreen> {
       final emoji =
           await pickEmoji(context, title: 'Pick an icon for this sound') ??
           '🔊';
+      if (res.bodyBytes.length > HiveBlobStore.maxBytes) {
+        if (mounted) _setError('Sound too large (max 10 MB)');
+        return;
+      }
       final hash = await store.put(res.bodyBytes);
       await _publish(SoundContent(hash, picked.name, emoji));
     } catch (_) {

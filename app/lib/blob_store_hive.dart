@@ -20,7 +20,7 @@ class HiveBlobStore implements BlobStore {
 
   static const int pruneDays = 30;
   /// Maximum blob size (10 MB). Rejects uploads and incoming blobs above this.
-  static const int maxBytes = 10 * 1024 * 1024;
+  static const int maxBytes = maxBlobBytes;
 
   static Future<HiveBlobStore> open() async {
     await Hive.initFlutter();

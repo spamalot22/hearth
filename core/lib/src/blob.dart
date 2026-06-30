@@ -14,6 +14,9 @@ Future<String> blobHash(List<int> bytes) async {
   return hex.encode([0x12, 0x20, ...digest]);
 }
 
+/// Maximum allowed blob size (10 MB). Enforced on upload and receive.
+const int maxBlobBytes = 10 * 1024 * 1024;
+
 /// A content-addressed store of opaque media blobs — stickers, sound clips,
 /// images. Messages reference a blob by its [blobHash]; the bytes are fetched on
 /// demand (so large media never gossips to everyone). Implementations: the
