@@ -286,8 +286,10 @@ Prove the data model._
 - [x] `app`: identity screen — generate/persist on first launch, show fingerprint + pubkey.
 - [x] `backend`: Hono relay (`POST /messages` verifies sig+id, `GET /poll`) on
       Node + in-memory store; **TS↔Dart interop proven** vs the fixture (dag-cbor + Ed25519).
-- [ ] `backend`: swap in-memory store → Firestore; wrap as a Cloud Function on the Emulator.
-- [ ] `app`: send/receive UI over the relay (needs the backend).
+- [x] ~~`backend`: swap in-memory store → Firestore~~ — **superseded**: stayed with
+      in-memory Hono relay (self-hosted Docker, no Firebase).
+- [x] ~~`app`: send/receive UI over the relay~~ — **superseded**: UI built directly
+      against the P2P mesh + relay courier.
 
 ### Phase 2 — Peer-to-peer transport
 _Goal: backend becomes signalling-only; messages flow peer↔peer._
@@ -321,21 +323,22 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       Cloudflare Tunnel kept as an alt profile. See `backend/DEPLOY.md`.
 - [x] **Stop polling once connected** — adaptive signalling: fast poll (700ms/5s)
       only while a handshake's in flight or peerless, idle (15s/30s) once settled.
-- [ ] **Server-minimal connectivity (rest)** — cached-candidate direct reconnect +
+- [x] **Server-minimal connectivity (rest)** — cached-candidate direct reconnect +
       mutual-contact hole-punch (peer-exchange) + P2P presence/gossip, so the server
       is touched *only* on cold start.
 - [x] **Invite carries the inviter's pubkey**; accepting mandatorily adds the
       inviter (keeps the invite-tree contact graph connected → no islands). Still to
       wire: the mesh actually *using* the inviter as the first cold-start target.
-- [ ] **Relay-fallback for symmetric-NAT pairs** — the tunnelled relay forwards their
+- [x] **Relay-fallback for symmetric-NAT pairs** — the tunnelled relay forwards their
       already-encrypted traffic app-level (no coturn, no UDP, no port-forward). Pure
       Dart; only needed once real users hit a symmetric↔symmetric pair.
 
 ### Phase 3 — Groups, voice, and the hard stuff
-- [ ] Group = replicated log + membership-as-messages (capability model).
-- [ ] Permission-conflict resolution rule (owner-key-wins, decide in §5).
-- [ ] Voice/video over WebRTC media (signaled over the existing layer).
-- [ ] **Group encryption** — encrypt each message to the channel's member set
+- [x] Group = replicated log + membership-as-messages (capability model).
+- [x] ~~Permission-conflict resolution rule (owner-key-wins)~~ — **rejected**
+      (2026-06-29): no channel ownership model. Block & mute are purely local.
+- [x] Voice/video over WebRTC media (signaled over the existing layer).
+- [x] **Group encryption** — encrypt each message to the channel's member set
       (sealed-box per member); requires the membership above. **MLS** (Rust
       `openmls`) is the upgrade for forward secrecy + efficient key rotation. (DMs
       are already sealed-box-encrypted from Phase 2.)
@@ -344,13 +347,12 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       also the *only* identity **backup/recovery** mechanism; **(b) per-device
       subkeys** certified by a root key — adds per-device revocation. Until this
       ships there is **no identity backup**: clearing storage loses the key.
-- [ ] **Address cache + peer-exchange** — clients cache contacts'/members'
+- [x] **Address cache + peer-exchange** — clients cache contacts'/members'
       last-known WebRTC candidates and gossip current ones over the mesh, so
       reconnects mostly skip the server (server = cold-start fallback only).
-- [ ] **Pluggable bootstrap relay** — the cold-start relay URL rides in the invite
-      and is swappable; a community self-hosts its own. (Multi-bootstrap failover +
-      a learned-relay list are a later nicety, not core now the contact graph
-      carries connectivity. See "Rendezvous & connectivity".)
+- [x] **Pluggable bootstrap relay** — the cold-start relay URL rides in the invite
+      and is swappable; a community self-hosts its own. Multi-relay failover
+      implemented (2026-06-28).
 - [x] ~~DHT (libp2p)~~ — **decided against** (2026-06-25): doesn't reach zero-servers
       and costs a full Rust integration; the self-hosted tunnelled relay is the
       accepted bootstrap node.
@@ -379,7 +381,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
             content-address-verified. *Unit-tested.* Remaining (needs live verify +
             deps): app-side Hive blob store, upload (`file_picker`), inline render,
             soundboard playback (`audioplayers`).
-- [ ] **Block & mute (no channel ownership)** — purely local controls:
+- [x] **Block & mute (no channel ownership)** — purely local controls:
       - **Voice mute** (ephemeral, per-channel): mute another member's audio
         in a voice session (local only, resets on leave). Separate from the
         per-user volume slider — shows a mute icon on their speaking indicator.
