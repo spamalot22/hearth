@@ -373,7 +373,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       - [x] **Emoji** — quick picker added (Unicode text already worked).
       - [x] **GIFs (URL)** — paste-a-URL renders inline; **Giphy/Tenor search** still
             needs a provider **API key** (credentials — ask the user for it).
-      - [ ] **Stickers** — sticker picker panel (browse your library of received/
+      - [x] **Stickers** — sticker picker panel (browse your library of received/
             sent stickers for quick reuse, like the emoji picker but for images).
       - [x] **Soundboards** — per-channel uploadable audio clips, tap to play
             (`audioplayers`), shared channel-wide. Voice panel has a soundboard
