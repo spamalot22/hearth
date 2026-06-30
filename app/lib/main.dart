@@ -5156,13 +5156,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  String _contentPreview(ChannelSession session, Message msg) {
+  String _contentPreview(ChannelSession session, Message msg,
+      {int maxLength = 60}) {
     final content = session.contentOf(msg);
-    if (content is TextContent) return content.text;
+    if (content is TextContent) {
+      return content.text.length > maxLength
+          ? '${content.text.substring(0, maxLength)}…'
+          : content.text;
+    }
     if (content is GifContent) return 'GIF';
     if (content is StickerContent) return 'Sticker';
     if (content is SoundContent) return '🔊 ${content.name}';
     if (content is FileContent) return '📎 ${content.name}';
+    if (content is ReactionContent) return '${content.emoji} reacted';
     return 'Message';
   }
 
@@ -5306,16 +5312,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final original = session.repository.ordered().cast<Message?>().firstWhere(
           (m) => m!.idHex == content.replyTo, orElse: () => null);
       if (original != null) {
-        final origContent = session.contentOf(original);
-        final origText = origContent is TextContent
-            ? origContent.text
-            : origContent is GifContent
-                ? 'GIF'
-                : origContent is StickerContent
-                    ? 'Sticker'
-                    : origContent is SoundContent
-                        ? '🔊 ${origContent.name}'
-                        : 'Message';
+        final origText = _contentPreview(session, original);
         final origName = _displayName(original.author);
         quoteWidget = Container(
           margin: const EdgeInsets.only(bottom: 4),
@@ -5341,9 +5338,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     color: _userColor(original.author),
                   )),
               Text(
-                origText.length > 60
-                    ? '${origText.substring(0, 60)}…'
-                    : origText,
+                origText,
                 style: const TextStyle(fontSize: 11),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -5458,17 +5453,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   String _replyPreview(ChannelSession session) {
     final msg = _replyTo;
     if (msg == null) return '';
-    final content = session.contentOf(msg);
-    if (content is TextContent) {
-      return content.text.length > 60
-          ? '${content.text.substring(0, 60)}…'
-          : content.text;
-    }
-    if (content is GifContent) return 'GIF';
-    if (content is StickerContent) return 'Sticker';
-    if (content is SoundContent) return '🔊 ${content.name}';
-    if (content is FileContent) return '📎 ${content.name}';
-    return 'Message';
+    return _contentPreview(session, msg);
   }
 
   Widget _composer(BuildContext context, ChannelSession session) {
