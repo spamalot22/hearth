@@ -177,8 +177,7 @@ export function createRelay(
   });
 
   // Short-poll: messages in a channel with seq greater than `since`.
-  // Requires a valid announce token to prevent strangers from observing channel
-  // activity (metadata leak).
+  // The channel ID (256-bit random capability) is the auth — no token needed.
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
     if (!channel) return c.json({ error: 'channel required' }, 400);
