@@ -701,6 +701,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           onPressed: () {
             _channels?.activate(channelId);
             if (session != null) _markRead(session);
+            _replyTo = null;
           },
         ),
       ),
@@ -4455,6 +4456,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       onTap: () {
                         channels?.activate(s.channelId);
                         _markRead(s);
+                        _replyTo = null;
                         Navigator.pop(context);
                       },
                     ),
@@ -4492,6 +4494,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       onTap: () {
                         channels?.activate(s.channelId);
                         _markRead(s);
+                        _replyTo = null;
                         Navigator.pop(context);
                       },
                     ),
