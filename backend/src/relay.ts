@@ -66,6 +66,13 @@ export class RelayStore {
  * spammed with garbage) but never decrypts or owns history — the clients are the
  * source of truth.
  */
+/** Extracts a Bearer token from the Authorization header, or null. */
+function bearerToken(c: { req: { header(name: string): string | undefined } }): string | null {
+  const h = c.req.header('authorization');
+  if (!h?.startsWith('Bearer ')) return null;
+  return h.slice(7);
+}
+
 export function createRelay(
   store: RelayStore = new RelayStore(),
   signalHub: SignalHub = new SignalHub(),
@@ -117,7 +124,7 @@ export function createRelay(
   // a random scraper).
   const searchLimiter = new RateLimiter(SEARCH_RATE_LIMIT, SEARCH_RATE_WINDOW_MS);
   const limitSearch: MiddlewareHandler = async (c, next) => {
-    const token = c.req.query('token');
+    const token = bearerToken(c) ?? c.req.query('token');
     if (!token || !signalHub.verifyToken(token, Date.now())) {
       return c.json({ error: 'token required' }, 403);
     }
@@ -175,7 +182,7 @@ export function createRelay(
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
     if (!channel) return c.json({ error: 'channel required' }, 400);
-    const token = c.req.query('token');
+    const token = bearerToken(c) ?? c.req.query('token');
     if (!token) return c.json({ error: 'token required' }, 403);
     if (!signalHub.verifyToken(token, Date.now())) {
       return c.json({ error: 'invalid or expired token' }, 403);

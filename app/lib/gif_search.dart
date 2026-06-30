@@ -67,9 +67,11 @@ Future<_GifResult> _search(Uri relayUrl, String query, String? token) async {
   final http.Response res;
   try {
     final params = <String, String>{'q': query};
-    if (token != null) params['token'] = token;
+    final headers = <String, String>{};
+    if (token != null) headers['Authorization'] = 'Bearer $token';
     res = await http.get(
       relayUrl.replace(path: '/gif/search', queryParameters: params),
+      headers: headers,
     );
   } catch (_) {
     return const _GifResult.unavailable(

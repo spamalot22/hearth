@@ -50,13 +50,15 @@ class RelayTunnel implements FrameChannel {
     try {
       await _client.post(
         baseUrl.replace(path: '/tunnel'),
-        headers: const {'content-type': 'application/json'},
         body: jsonEncode({
           'from': selfPubkeyHex,
           'to': peerPubkeyHex,
           'data': data,
-          if (authToken != null) 'token': authToken,
         }),
+        headers: {
+          'Content-Type': 'application/json',
+          if (authToken != null) 'Authorization': 'Bearer $authToken',
+        },
       );
     } catch (_) {}
   }
@@ -69,9 +71,11 @@ class RelayTunnel implements FrameChannel {
         'from': peerPubkeyHex,
         'to': selfPubkeyHex,
       };
-      if (authToken != null) params['token'] = authToken!;
+      final headers = <String, String>{};
+      if (authToken != null) headers['Authorization'] = 'Bearer $authToken';
       final res = await _client.get(
         baseUrl.replace(path: '/tunnel', queryParameters: params),
+        headers: headers,
       );
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;

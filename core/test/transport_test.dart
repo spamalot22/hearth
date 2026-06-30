@@ -168,11 +168,11 @@ void main() {
       },
     );
 
-    test('poll passes token query parameter when tokenProvider returns a value',
+    test('poll passes token in Authorization header when tokenProvider returns a value',
         () async {
-      String? capturedToken;
+      String? capturedAuth;
       final client = MockClient((req) async {
-        capturedToken = req.url.queryParameters['token'];
+        capturedAuth = req.headers['Authorization'];
         return http.Response(
           jsonEncode({'messages': <Object?>[], 'seq': 0}),
           200,
@@ -186,7 +186,7 @@ void main() {
       );
 
       await transport.poll();
-      expect(capturedToken, 'test-token-123');
+      expect(capturedAuth, 'Bearer test-token-123');
     });
 
     test('poll skips when tokenProvider is set but returns null', () async {

@@ -3,6 +3,13 @@ import type { Hono } from 'hono';
 
 import { RateLimiter, TUNNEL_RATE_LIMIT, TUNNEL_RATE_WINDOW_MS } from './limits';
 
+/** Extracts a Bearer token from the Authorization header, or null. */
+function bearerToken(c: { req: { header(name: string): string | undefined } }): string | null {
+  const h = c.req.header('authorization');
+  if (!h?.startsWith('Bearer ')) return null;
+  return h.slice(7);
+}
+
 /**
  * Relay tunnel for symmetric-NAT pairs: when ICE fails completely, two peers
  * can tunnel their already-encrypted gossip frames through the relay. The relay
@@ -62,8 +69,9 @@ export function addTunnelRoutes(
     if (!body.from || !body.to || !body.data) {
       return c.json({ error: 'from, to, data required' }, 400);
     }
-    if (!body.token) return c.json({ error: 'token required' }, 403);
-    const owner = verifyToken(body.token, Date.now());
+    const token = bearerToken(c) ?? body.token;
+    if (!token) return c.json({ error: 'token required' }, 403);
+    const owner = verifyToken(token, Date.now());
     if (owner !== body.from) {
       return c.json({ error: 'invalid or expired token' }, 403);
     }
@@ -80,7 +88,7 @@ export function addTunnelRoutes(
   app.get('/tunnel', (c) => {
     const from = c.req.query('from'); // who sent the frames
     const to = c.req.query('to'); // me (the poller)
-    const token = c.req.query('token');
+    const token = bearerToken(c) ?? c.req.query('token');
     if (!from || !to) {
       return c.json({ error: 'from and to required' }, 400);
     }

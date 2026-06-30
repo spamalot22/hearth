@@ -120,9 +120,11 @@ class RelayTransport implements Transport {
     // Skip poll if no token available yet (announce hasn't completed).
     if (token == null && tokenProvider != null) return [];
     final params = <String, String>{'channel': channel, 'since': '$_since'};
-    if (token != null) params['token'] = token;
+    final headers = <String, String>{};
+    if (token != null) headers['Authorization'] = 'Bearer $token';
     final res = await _client.get(
       _url.replace(path: '/poll', queryParameters: params),
+      headers: headers,
     );
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
