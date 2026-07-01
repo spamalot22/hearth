@@ -252,6 +252,35 @@ class _HearthTrayListener extends TrayListener {
   }
 }
 
+/// Builds an sRGB [Color] from OKLCH (perceptual lightness `l` 0–1, chroma `c`,
+/// hue `hDeg` in degrees). OKLCH is perceptually uniform, so equal hue steps look
+/// equally spaced and a fixed `l` reads at a consistent brightness across every
+/// hue — unlike HSL, where greens look far brighter than blues. This keeps the
+/// per-user / per-channel colours harmonious and legible on the charcoal theme.
+Color oklch(double l, double c, double hDeg) {
+  final h = hDeg * pi / 180.0;
+  final a = c * cos(h);
+  final b = c * sin(h);
+  // OKLab → LMS (cube roots), then LMS → linear sRGB.
+  final l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+  final m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+  final s_ = l - 0.0894841775 * a - 1.2914855480 * b;
+  final lc = l_ * l_ * l_;
+  final mc = m_ * m_ * m_;
+  final sc = s_ * s_ * s_;
+  final r = 4.0767416621 * lc - 3.3077115913 * mc + 0.2309699292 * sc;
+  final g = -1.2684380046 * lc + 2.6097574011 * mc - 0.3413193965 * sc;
+  final bl = -0.0041960863 * lc - 0.7034186147 * mc + 1.7076147010 * sc;
+  int chan(double x) {
+    final v = x <= 0.0031308
+        ? 12.92 * x
+        : 1.055 * pow(x, 1 / 2.4).toDouble() - 0.055;
+    return (v.clamp(0.0, 1.0) * 255).round();
+  }
+
+  return Color.fromARGB(255, chan(r), chan(g), chan(bl));
+}
+
 /// Test-only seam: lets a widget test simulate a peer's frames arriving (a mesh
 /// control, or a received message) without a real WebRTC peer, so two-peer
 /// receive-and-render behaviour (read-receipt ticks, block redaction) can be
@@ -4472,9 +4501,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   _drawerHeader('Channels'),
                   for (final s in groups)
                     ListTile(
-                      leading: const Icon(Icons.tag),
+                      leading: Icon(Icons.tag, color: _channelAccent(s)),
                       title: Text(_channelTitle(s)),
                       selected: s.channelId == channels?.activeId,
+                      selectedColor: _channelAccent(s),
+                      selectedTileColor: _channelAccent(s).withAlpha(28),
                       trailing: _unreadBadge(s),
                       onTap: () {
                         channels?.activate(s.channelId);
@@ -4510,9 +4541,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ),
                   for (final s in dms)
                     ListTile(
-                      leading: const Icon(Icons.alternate_email),
+                      leading: Icon(
+                        Icons.alternate_email,
+                        color: _channelAccent(s),
+                      ),
                       title: Text(_channelTitle(s)),
                       selected: s.channelId == channels?.activeId,
+                      selectedColor: _channelAccent(s),
+                      selectedTileColor: _channelAccent(s).withAlpha(28),
                       trailing: _unreadBadge(s),
                       onTap: () {
                         channels?.activate(s.channelId);
@@ -4663,13 +4699,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primary,
+        color: _channelAccent(session),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
         count > 99 ? '99+' : '$count',
-        style: TextStyle(
-          color: Theme.of(context).colorScheme.onPrimary,
+        style: const TextStyle(
+          color: Colors.black87,
           fontSize: 11,
           fontWeight: FontWeight.bold,
         ),
@@ -4871,36 +4907,51 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   /// A deterministic warm colour per person, derived from their pubkey.
-  Color _userColor(Uint8List author) {
-    final hue = (author.isNotEmpty ? author[0] : 0) * 360.0 / 256.0;
-    return HSLColor.fromAHSL(1, hue, 0.5, 0.62).toColor();
-  }
+  /// This user's hue (0–360), from the first pubkey byte.
+  double _userHue(Uint8List author) =>
+      (author.isNotEmpty ? author[0] : 0) * 360.0 / 256.0;
+
+  Color _userColor(Uint8List author) => oklch(0.72, 0.13, _userHue(author));
 
   /// A unique accent colour for a channel, derived from its ID.
   /// DMs use the peer's colour; groups derive from channel ID bytes.
   Color _channelAccent(ChannelSession? session) {
-    if (session == null) return Colors.deepPurple;
+    if (session == null) return oklch(0.62, 0.13, 285); // default violet
     if (session.isDm && session.peerPubkey != null) {
       return _userColor(Uint8List.fromList(session.peerPubkey!));
     }
     final bytes = session.channelId.codeUnits;
     final hue = (bytes.isNotEmpty ? bytes[0] + bytes[1] : 0) * 360.0 / 512.0;
-    return HSLColor.fromAHSL(1, hue, 0.45, 0.55).toColor();
+    return oklch(0.66, 0.12, hue);
   }
 
-  /// A small colour-coded avatar (initial of the display name).
+  /// A small colour-coded avatar (initial of the display name) with a subtle
+  /// two-stop gradient derived from two pubkey bytes — deterministic, so each
+  /// identity keeps a recognisable look, but richer than a flat fill.
   Widget _avatar(Uint8List author, {double radius = 16}) {
     final label = _displayName(author).replaceFirst('hearth#', '');
     final initial = label.isEmpty ? '?' : label[0].toUpperCase();
-    return CircleAvatar(
-      radius: radius,
-      backgroundColor: _userColor(author),
+    final hue = _userHue(author);
+    // Second stop shifts hue by a byte-derived amount for variety.
+    final hue2 = hue + (author.length > 1 ? author[1] : 40) * 80.0 / 256.0 + 20;
+    return Container(
+      width: radius * 2,
+      height: radius * 2,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [oklch(0.75, 0.14, hue), oklch(0.6, 0.14, hue2)],
+        ),
+      ),
+      alignment: Alignment.center,
       child: Text(
         initial,
         style: TextStyle(
           fontSize: radius * 0.85,
           fontWeight: FontWeight.w600,
-          color: Colors.black87,
+          color: Colors.black.withAlpha(160),
         ),
       ),
     );
@@ -5657,6 +5708,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               borderRadius: BorderRadius.circular(24),
                               borderSide: BorderSide.none,
                             ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide(
+                                color: _channelAccent(session),
+                                width: 1.5,
+                              ),
+                            ),
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 16,
                               vertical: 10,
@@ -5680,6 +5738,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(24),
                             borderSide: BorderSide.none,
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide(
+                              color: _channelAccent(session),
+                              width: 1.5,
+                            ),
                           ),
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 16,
