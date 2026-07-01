@@ -298,7 +298,45 @@ class HearthTestApi {
   late Future<void> Function() refresh;
 }
 
-class HearthApp extends StatelessWidget {
+/// The Hearth theme for a given [brightness] — the ember seed with warm surfaces
+/// (charcoal in dark, parchment in light) so both modes feel fireside.
+ThemeData hearthTheme(Brightness brightness) {
+  final dark = brightness == Brightness.dark;
+  final scheme =
+      ColorScheme.fromSeed(
+        seedColor: const Color(0xFFF2792B), // ember
+        brightness: brightness,
+      ).copyWith(
+        surface: dark ? const Color(0xFF1C1714) : const Color(0xFFFBF6F0),
+        surfaceContainerLowest: dark ? const Color(0xFF120E0B) : Colors.white,
+        surfaceContainerLow: dark
+            ? const Color(0xFF1C1714)
+            : const Color(0xFFF6EFE7),
+        surfaceContainer: dark
+            ? const Color(0xFF221B16)
+            : const Color(0xFFF1E8DD),
+        surfaceContainerHigh: dark
+            ? const Color(0xFF2A221B)
+            : const Color(0xFFEBE0D3),
+        surfaceContainerHighest: dark
+            ? const Color(0xFF342A21)
+            : const Color(0xFFE3D6C6),
+      );
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: dark
+        ? const Color(0xFF16110D)
+        : const Color(0xFFFDF9F3),
+    appBarTheme: const AppBarTheme(
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 2,
+    ),
+  );
+}
+
+class HearthApp extends StatefulWidget {
   const HearthApp({
     required this.keyStore,
     this.relayUrl,
@@ -317,38 +355,53 @@ class HearthApp extends StatelessWidget {
   final HearthTestApi? testApi;
 
   @override
+  State<HearthApp> createState() => _HearthAppState();
+}
+
+class _HearthAppState extends State<HearthApp> {
+  // Dark by default (the fireside identity); user can switch to light/system.
+  final ValueNotifier<ThemeMode> _themeMode = ValueNotifier(ThemeMode.dark);
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoPoll) unawaited(_loadThemeMode());
+  }
+
+  Future<void> _loadThemeMode() async {
+    try {
+      final settings = await SettingsStore.open();
+      _themeMode.value = switch (settings.themeMode) {
+        'light' => ThemeMode.light,
+        'system' => ThemeMode.system,
+        _ => ThemeMode.dark,
+      };
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _themeMode.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final scheme =
-        ColorScheme.fromSeed(
-          seedColor: const Color(0xFFF2792B), // ember
-          brightness: Brightness.dark,
-        ).copyWith(
-          // Warm charcoal surfaces for a fireside feel (M3 surfaces run cool).
-          surface: const Color(0xFF1C1714),
-          surfaceContainerLowest: const Color(0xFF120E0B),
-          surfaceContainerLow: const Color(0xFF1C1714),
-          surfaceContainer: const Color(0xFF221B16),
-          surfaceContainerHigh: const Color(0xFF2A221B),
-          surfaceContainerHighest: const Color(0xFF342A21),
-        );
-    return MaterialApp(
-      title: 'Hearth',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: scheme,
-        scaffoldBackgroundColor: const Color(0xFF16110D),
-        appBarTheme: const AppBarTheme(
-          surfaceTintColor: Colors.transparent,
-          elevation: 0,
-          scrolledUnderElevation: 2,
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: _themeMode,
+      builder: (context, mode, _) => MaterialApp(
+        title: 'Hearth',
+        debugShowCheckedModeBanner: false,
+        theme: hearthTheme(Brightness.light),
+        darkTheme: hearthTheme(Brightness.dark),
+        themeMode: mode,
+        home: _Bootstrap(
+          keyStore: widget.keyStore,
+          relayUrl: widget.relayUrl ?? kRelayUrl,
+          autoPoll: widget.autoPoll,
+          testApi: widget.testApi,
+          themeMode: _themeMode,
         ),
-      ),
-      home: _Bootstrap(
-        keyStore: keyStore,
-        relayUrl: relayUrl ?? kRelayUrl,
-        autoPoll: autoPoll,
-        testApi: testApi,
       ),
     );
   }
@@ -361,12 +414,14 @@ class _Bootstrap extends StatefulWidget {
     required this.relayUrl,
     required this.autoPoll,
     this.testApi,
+    this.themeMode,
   });
 
   final KeyStore keyStore;
   final Uri relayUrl;
   final bool autoPoll;
   final HearthTestApi? testApi;
+  final ValueNotifier<ThemeMode>? themeMode;
 
   @override
   State<_Bootstrap> createState() => _BootstrapState();
@@ -400,6 +455,7 @@ class _BootstrapState extends State<_Bootstrap> {
           keyStore: widget.keyStore,
           autoPoll: widget.autoPoll,
           testApi: widget.testApi,
+          themeMode: widget.themeMode,
         );
       },
     );
@@ -413,6 +469,7 @@ class ChatScreen extends StatefulWidget {
     required this.keyStore,
     this.autoPoll = true,
     this.testApi,
+    this.themeMode,
     super.key,
   });
 
@@ -421,6 +478,7 @@ class ChatScreen extends StatefulWidget {
   final KeyStore keyStore;
   final bool autoPoll;
   final HearthTestApi? testApi;
+  final ValueNotifier<ThemeMode>? themeMode;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -1727,6 +1785,38 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           },
                         ),
                       ),
+                  const Divider(height: 24),
+                  Text(
+                    'Appearance',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<ThemeMode>(
+                    segments: const [
+                      ButtonSegment(
+                        value: ThemeMode.dark,
+                        icon: Icon(Icons.dark_mode_outlined),
+                        label: Text('Dark'),
+                      ),
+                      ButtonSegment(
+                        value: ThemeMode.light,
+                        icon: Icon(Icons.light_mode_outlined),
+                        label: Text('Light'),
+                      ),
+                      ButtonSegment(
+                        value: ThemeMode.system,
+                        icon: Icon(Icons.brightness_auto_outlined),
+                        label: Text('Auto'),
+                      ),
+                    ],
+                    selected: {widget.themeMode?.value ?? ThemeMode.dark},
+                    onSelectionChanged: (sel) {
+                      final mode = sel.first;
+                      widget.themeMode?.value = mode;
+                      unawaited(_settings?.setThemeMode(mode.name));
+                      setTabState(() {});
+                    },
+                  ),
                   const Divider(height: 24),
                   Text(
                     'Processing',
@@ -3883,18 +3973,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return Scaffold(
       key: _scaffoldKey,
       appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [
-                _channelAccent(session).withAlpha(30),
-                Colors.transparent,
-              ],
-            ),
-          ),
-        ),
+        flexibleSpace: _EmberGlow(accent: _channelAccent(session)),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -4696,16 +4775,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final ids = session.repository.ordered().map((m) => m.idHex).toList();
     final count = unread.unreadCount(session.channelId, ids);
     if (count <= 0) return null;
+    final accent = _channelAccent(session);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        color: _channelAccent(session),
+        color: accent,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
         count > 99 ? '99+' : '$count',
-        style: const TextStyle(
-          color: Colors.black87,
+        style: TextStyle(
+          color: ThemeData.estimateBrightnessForColor(accent) == Brightness.dark
+              ? Colors.white
+              : Colors.black87,
           fontSize: 11,
           fontWeight: FontWeight.bold,
         ),
@@ -4911,18 +4993,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   double _userHue(Uint8List author) =>
       (author.isNotEmpty ? author[0] : 0) * 360.0 / 256.0;
 
-  Color _userColor(Uint8List author) => oklch(0.72, 0.13, _userHue(author));
+  Color _userColor(Uint8List author) {
+    // Lighter on the dark theme, darker on light — so it reads on either surface.
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return oklch(dark ? 0.72 : 0.5, dark ? 0.13 : 0.15, _userHue(author));
+  }
 
   /// A unique accent colour for a channel, derived from its ID.
   /// DMs use the peer's colour; groups derive from channel ID bytes.
   Color _channelAccent(ChannelSession? session) {
-    if (session == null) return oklch(0.62, 0.13, 285); // default violet
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final l = dark ? 0.66 : 0.5;
+    final c = dark ? 0.12 : 0.14;
+    if (session == null) return oklch(l, c, 285); // default violet
     if (session.isDm && session.peerPubkey != null) {
       return _userColor(Uint8List.fromList(session.peerPubkey!));
     }
     final bytes = session.channelId.codeUnits;
     final hue = (bytes.isNotEmpty ? bytes[0] + bytes[1] : 0) * 360.0 / 512.0;
-    return oklch(0.66, 0.12, hue);
+    return oklch(l, c, hue);
   }
 
   /// A small colour-coded avatar (initial of the display name) with a subtle
@@ -6152,6 +6241,67 @@ class _AddMembersDialogState extends State<_AddMembersDialog> {
       ),
     ],
   );
+}
+
+/// A slow, breathing ember glow for the app-bar background — a gradient in the
+/// channel [accent] that drifts direction and intensity over ~8s. Subtle, warm,
+/// and reinforces the hearth identity without distracting from the content.
+class _EmberGlow extends StatefulWidget {
+  const _EmberGlow({required this.accent});
+
+  final Color accent;
+
+  @override
+  State<_EmberGlow> createState() => _EmberGlowState();
+}
+
+/// Whether continuous ambient animations should run. Off under `flutter test`
+/// (the test binding is not a [WidgetsFlutterBinding]), where a repeating ticker
+/// would make `pumpAndSettle` time out and the motion adds nothing headless.
+bool get _ambientAnimations => WidgetsBinding.instance is WidgetsFlutterBinding;
+
+class _EmberGlowState extends State<_EmberGlow>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 8),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (_ambientAnimations) _c.repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (context, _) {
+        final t = Curves.easeInOut.transform(_c.value);
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment(-1 + t * 0.5, -1),
+              end: Alignment(1, 1 - t * 0.4),
+              colors: [
+                widget.accent.withAlpha((20 + 20 * t).round()),
+                widget.accent.withAlpha((6 * (1 - t)).round()),
+                Colors.transparent,
+              ],
+              stops: const [0.0, 0.5, 1.0],
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 /// Wraps a child in an animated flame effect around the perimeter.

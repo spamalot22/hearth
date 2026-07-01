@@ -35,7 +35,11 @@ class SettingsStore {
   List<String> get fallbackRelays {
     final v = _box.get(_fallbackRelaysKey);
     if (v == null || v.trim().isEmpty) return [];
-    return v.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    return v
+        .split(',')
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
   }
 
   Future<void> setFallbackRelays(List<String> urls) => urls.isEmpty
@@ -47,6 +51,13 @@ class SettingsStore {
 
   Future<void> setNoiseSuppression(bool enabled) =>
       _box.put(_noiseKey, enabled.toString());
+
+  static const _themeKey = 'themeMode';
+
+  /// The UI theme: 'dark' (default), 'light', or 'system'.
+  String get themeMode => _box.get(_themeKey) ?? 'dark';
+
+  Future<void> setThemeMode(String mode) => _box.put(_themeKey, mode);
 
   static const _computeKey = 'contributeCompute';
 
@@ -102,8 +113,8 @@ class SettingsStore {
 
   Future<void> setReadReceiptsDisabled(String channelId, bool disabled) =>
       disabled
-          ? _box.put(_channelKey(channelId, 'noReadReceipts'), 'true')
-          : _box.delete(_channelKey(channelId, 'noReadReceipts'));
+      ? _box.put(_channelKey(channelId, 'noReadReceipts'), 'true')
+      : _box.delete(_channelKey(channelId, 'noReadReceipts'));
 
   /// All channel IDs with read receipts disabled.
   Set<String> get allReadReceiptsDisabled {
@@ -125,8 +136,8 @@ class SettingsStore {
 
   Future<void> setChannelPref(String channelId, String key, String? value) =>
       value == null
-          ? _box.delete(_channelKey(channelId, key))
-          : _box.put(_channelKey(channelId, key), value);
+      ? _box.delete(_channelKey(channelId, key))
+      : _box.put(_channelKey(channelId, key), value);
 
   /// All channel IDs where [key] is set to 'true'.
   Set<String> channelIdsWithPref(String key) {
