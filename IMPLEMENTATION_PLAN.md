@@ -4,7 +4,7 @@
 > Local-first, peer-to-peer by default, with an **optional** coordination
 > backend that improves reliability but is never required to function.
 
-_Status: living document. Last updated: 2026-06-21._
+_Status: living document. Last updated: 2026-07-01._
 
 ---
 
@@ -135,9 +135,11 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
   directly (WebRTC) once they can reach each other. This is the default.
 - **The backend is optional rendezvous infrastructure**, not a host of truth. It
   only helps peers *find* each other and relays encrypted, TTL'd data.
-- **Default deploy = your Firebase project (free tier, $0).** Self-hosters deploy
-  the *same* backend to their own Firebase project, or run the Hono app as a
-  plain container off-Firebase — no separate server codebase.
+- **Default deploy = a self-hosted, tunnelled Hono container ($0 on hardware you
+  already run).** Self-hosters run the *same* in-memory relay image (GHCR) as a
+  Docker Compose stack behind a Cloudflare/Tailscale tunnel — no Firebase, no DB,
+  no separate server codebase. (Firebase was the original plan; superseded by the
+  2026-06-25 self-hosted-relay pivot logged below.)
 - **The rendezvous endpoint is pluggable in the client** (point at any backend
   URL). That is what keeps it decentralised: your self-hosted relay is just the
   default bootstrap node — replaceable, not authoritative.
@@ -358,14 +360,17 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       accepted bootstrap node.
 
 ### Phase 4 — Polish / ecosystem
-- [ ] Notifications, per platform:
-      - **Android → FCM** (free, no Apple account). A Cloud Function sends via
-        `firebase-admin` (same project); device tokens in Firestore (TTL/refresh).
+- [x] Notifications, per platform (shipped **without FCM** — see 2026-06-30 log):
+      - **Android → `background_fetch` polling** (not FCM). A headless isolate
+        polls the relay `/poll` on a JobScheduler interval (≥15 min) and raises a
+        local notification; no Google push, no Firestore token registry.
       - **Windows → no push service.** App runs resident (tray, launch-on-start)
-        and holds its connection, so messages arrive live; surface them with
-        local OS notifications (`flutter_local_notifications`).
-      - **iOS / web → later** (iOS reintroduces Apple $99/yr + APNs key; FCM can
-        cover both when we get there).
+        and holds its connection, so messages arrive live; surfaced with local OS
+        notifications (`flutter_local_notifications`).
+      - **Web → Notification API** (permission requested on first user gesture).
+      - **iOS → later** (reintroduces Apple $99/yr + APNs key).
+      - Rich in-app notifications: sender name, content preview, tap-to-open;
+        suppressed for muted channels and blocked users.
       - Self-hoster option later: **UnifiedPush** for de-Googled Android.
 - [ ] **Rich content** — typed message payloads via a **content envelope**
       (`{t: text|gif|sticker|sound, …}` inside the payload; composes under
@@ -383,6 +388,19 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
             content-address-verified. *Unit-tested.* Remaining (needs live verify +
             deps): app-side Hive blob store, upload (`file_picker`), inline render,
             soundboard playback (`audioplayers`).
+- [x] **Messaging UX** (all shipped): **replies** (quote-and-respond),
+      **emoji reactions** (chips on the target message), **pinned messages**
+      (local, per-channel), **in-channel search**, per-channel **mute** toggle,
+      and **read receipts** (WhatsApp-style ticks via `ReadWatermarkControl`
+      gossiped over the mesh, disable-able per DM). Plus animation polish
+      (per-channel accent colour, typing dots, cascade-in, scroll-to-bottom FAB).
+- [x] **Screen share + watch party (Windows)** — Discord-style **screen share**
+      (per-sharer star-topology WebRTC mesh, pick window/screen, configurable
+      resolution) and a channel-wide **synchronised YouTube watch party**
+      (host-controlled `flutter_inappwebview` player, each member can mute/close
+      locally). Both gated behind being in voice. Windows-first.
+- [x] **QR invites** — invite screen renders a QR of the invite code;
+      mobile can **scan-to-join** (`mobile_scanner`).
 - [x] **Block & mute (no channel ownership)** — purely local controls:
       - **Voice mute** (ephemeral, per-channel): mute another member's audio
         in a voice session (local only, resets on leave). Separate from the
@@ -741,3 +759,54 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   is entirely client-side state. The blocked person's client continues normally;
   they have no signal they've been blocked. Storage: `blockedUsers` key in Hive
   settings (comma-separated pubkey hexes).
+- **2026-06-27** — **Screen share + YouTube watch party (Windows-first).** Both
+  gated behind being in voice. **Screen share:** a per-sharer WebRTC mesh on
+  `screen:<channel>:<sharer>` where the sharer is the sole offerer
+  (`forceInitiator`), giving a star topology + one-way media with no
+  renegotiation; `desktopCapturer` picks a window/screen with a configurable
+  resolution. **Watch party:** a host-controlled `flutter_inappwebview` IFrame
+  player synced over the voice mesh (`YoutubeControl`), followers can't fight
+  playback (`controls:0`) but can mute/close locally. Video-id + position are
+  validated before touching the WebView (JS-injection guard); nav is
+  suffix-allowlisted to YouTube hosts.
+- **2026-06-28** — **QR invites.** Invite screen renders the invite code as a QR
+  (`qr_flutter`); mobile scans it to join (`mobile_scanner`).
+- **2026-06-28** — **Relay hardened for public exposure.** The relay is now
+  assumed internet-reachable, so: bounded memory everywhere (LRU caps on
+  channels / presence / mailboxes / rate-limiter maps; `MAX_CHANNEL_MESSAGES`),
+  a **per-IP** global rate limit (catches keypair-rotating attackers), removal of
+  the **unauthenticated `GET /peers`** and the unsigned-announce fallback (a
+  signed announce is now mandatory), `timingSafeEqual` on the `RELEASE_SECRET`
+  check, HTTP-relay rejection client-side, and a `MAX_BODY_BYTES` cap. Auth token
+  moved from a query param to the `Authorization: Bearer` header. Distroless relay
+  image (esbuild bundle, Node 24). Relay self-heals its version manifest from the
+  latest GitHub release on startup.
+- **2026-06-29** — **Read receipts.** `ReadWatermarkControl` broadcasts each
+  peer's latest-read message id over the gossip mesh; the UI renders WhatsApp-style
+  ticks. Re-broadcast on new-peer connect (so a fresh joiner learns state) and
+  backfilled when a referenced id syncs late. Disable-able per DM; state is
+  per-channel and local.
+- **2026-06-30** — **Messaging UX batch.** Replies (quote-and-respond),
+  emoji reactions (chips on the target), pinned messages (local, per-channel),
+  in-channel search, per-channel mute, plus animation polish (per-channel accent
+  colour, typing dots, cascade-in on batch arrival, slide-in scroll-to-bottom
+  FAB). Also a **10 MB blob cap** enforced on both upload (`put`) and receive
+  (sync), so oversized media can't be pushed into the store.
+- **2026-06-30** — **Notifications shipped without FCM.** Rejected the
+  FCM/Firestore-token path (keeps the app Google-free and needs no server-side
+  token registry). Instead: **web** uses the Notification API (permission on first
+  gesture); **Android** uses `background_fetch` — a headless isolate polls the
+  relay `/poll` on a JobScheduler interval (≥15 min) from Hive-persisted state and
+  raises a local notification; **Windows** stays resident and notifies live. In-app
+  notifications carry sender name + content preview + tap-to-open, and are
+  suppressed for muted channels and blocked users. Trade-off accepted: Android
+  background latency is bounded by the 15-min JobScheduler floor, not instant push.
+- **2026-07-01** — **Code-review follow-ups.** (1) Background-notification
+  accuracy: the poller now excludes muted channels, seeds its cursor from the
+  foreground courier's relay seq (forward-only), establishes the baseline silently
+  on first poll (no "entire backlog" flood), and skips our own relay-echoed
+  messages. (2) Relay tunnel: cap distinct `(from|to)` pairs with LRU eviction so
+  undrained buffers to never-polling recipients can't grow the map unbounded.
+  (3) WebRTC failover is no longer sticky — the client re-probes the primary relay
+  ~once a minute and returns to it after it recovers. (4) Read-watermark timestamp
+  lookup is cache-guarded (no O(n) history scan per repeat watermark).
