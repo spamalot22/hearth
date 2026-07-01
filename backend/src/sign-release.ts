@@ -19,6 +19,8 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 
+import { manifestSigningBytes } from './manifest';
+
 // noble/ed25519 v2 requires you to set the sha512 sync function.
 ed.etc.sha512Sync = (...m) => createHash('sha512').update(ed.etc.concatBytes(...m)).digest();
 
@@ -39,9 +41,10 @@ if (cmd === 'keygen') {
     process.exit(1);
   }
   const manifest = JSON.parse(readFileSync(file, 'utf-8'));
-  // The signed payload is the canonical JSON of version + seq + assets (no sig).
-  const { sig: _, ...payload } = manifest;
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  // The signed payload is version + seq + assets (no sig), in the canonical
+  // fixed-field form shared with the Dart client (see manifest.ts).
+  const { sig: _sig, ...payload } = manifest;
+  const bytes = manifestSigningBytes(payload);
   const signature = ed.sign(bytes, privHex);
   console.log(JSON.stringify({ ...payload, sig: Buffer.from(signature).toString('hex') }, null, 2));
 } else if (cmd === 'manifest') {
@@ -67,10 +70,11 @@ if (cmd === 'keygen') {
     const sha256 = createHash('sha256').update(readFileSync(file)).digest('hex');
     assets[name] = { file: basename(file), sha256 };
   }
-  // Canonical payload (compact, insertion-ordered) — must byte-match the client's
-  // jsonEncode of the same fields, so the signature verifies cross-language.
+  // Canonical fixed-field signing bytes — must byte-match the Dart client's
+  // manifestSigningBytes of the same fields, so the signature verifies
+  // cross-language (see manifest.ts).
   const payload = { version, seq: Number(seqStr), assets };
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  const bytes = manifestSigningBytes(payload);
   const sig = Buffer.from(ed.sign(bytes, privHex)).toString('hex');
   console.log(JSON.stringify({ ...payload, sig }, null, 2));
 } else {

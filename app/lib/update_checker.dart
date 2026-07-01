@@ -79,10 +79,10 @@ Future<UpdateState> checkForUpdate(Uri relayUrl, {http.Client? client}) async {
       return const UpToDate();
     }
 
-    // Verify signature: sig covers the JSON of everything except `sig` itself.
-    final payload = Map<String, dynamic>.from(body)..remove('sig');
+    // Verify the signature over the canonical fixed-field form (see the signer
+    // in backend/src/manifest.ts) — robust to JSON key order / whitespace.
     final valid = await Identity.verifySignature(
-      utf8.encode(jsonEncode(payload)),
+      manifestSigningBytes(version, seq, assets),
       signature: _hexDecode(sig),
       publicKey: _hexDecode(releasePublicKeyHex),
     );
@@ -129,6 +129,26 @@ Future<int> _getLastSeq() => getLastUpdateSeq();
 Future<void> _setLastSeq(int seq) async {
   final box = await Hive.openBox<int>(_boxName);
   await box.put(_seqKey, seq);
+}
+
+/// Canonical bytes signed for a release manifest — mirrors `manifestSigningBytes`
+/// in `backend/src/manifest.ts`. A fixed-field, newline-joined form (not JSON) so
+/// the TS signer and this client agree byte-for-byte regardless of JSON key order
+/// or whitespace. Asset keys are sorted.
+List<int> manifestSigningBytes(
+  String version,
+  int seq,
+  Map<String, dynamic> assets,
+) {
+  final lines = <String>['hearth/manifest/v1', version, '$seq'];
+  for (final name in assets.keys.toList()..sort()) {
+    final a = assets[name] as Map;
+    lines
+      ..add(name)
+      ..add(a['file'] as String)
+      ..add(a['sha256'] as String);
+  }
+  return utf8.encode(lines.join('\n'));
 }
 
 List<int> _hexDecode(String h) {

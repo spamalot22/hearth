@@ -8,6 +8,22 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
+  group('manifestSigningBytes', () {
+    // Must stay byte-identical to backend/src/manifest.test.ts's `expected`
+    // literal, or release signatures won't verify cross-language.
+    test('is the canonical newline form with sorted asset keys', () {
+      final bytes = manifestSigningBytes('0.5.9', 3, {
+        // windows-first to prove the output sorts to android first
+        'windows': {'file': 'w.zip', 'sha256': 'ww'},
+        'android': {'file': 'a.apk', 'sha256': 'aa'},
+      });
+      expect(
+        utf8.decode(bytes),
+        'hearth/manifest/v1\n0.5.9\n3\nandroid\na.apk\naa\nwindows\nw.zip\nww',
+      );
+    });
+  });
+
   group('checkForUpdate', () {
     final relayUrl = Uri.parse('http://localhost:8787');
 
@@ -28,9 +44,7 @@ void main() {
     });
 
     test('returns UpToDate on 404', () async {
-      final client = MockClient(
-        (_) async => http.Response('not found', 404),
-      );
+      final client = MockClient((_) async => http.Response('not found', 404));
       final result = await checkForUpdate(relayUrl, client: client);
       // Dev build short-circuits, but this tests the flow.
       expect(result, isA<UpToDate>());

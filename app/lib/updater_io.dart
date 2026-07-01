@@ -11,7 +11,6 @@ import 'package:path_provider/path_provider.dart';
 
 import 'update_checker.dart';
 
-
 /// Deletes any leftover update APKs/ZIPs from previous downloads.
 Future<void> cleanupOldUpdates() async {
   try {
@@ -123,6 +122,13 @@ Future<void> _install(String path) async {
 /// relaunches. We then quit.
 Future<void> _installWindows(String zipPath) async {
   final exeDir = File(Platform.resolvedExecutable).parent.path;
+  // The script below rmdir's exeDir, so refuse to run if it's a drive root or a
+  // suspiciously short path — a portable build launched from an odd location
+  // must not self-destruct its parent. A normal install lives in a dedicated
+  // subfolder (the running hearth.exe is inside exeDir).
+  if (RegExp(r'^[A-Za-z]:\\?$').hasMatch(exeDir) || exeDir.length < 4) {
+    throw StateError('refusing to self-update from unexpected dir: $exeDir');
+  }
   final extractDir = '${Directory.systemTemp.path}\\hearth_update';
   final batPath = '${Directory.systemTemp.path}\\hearth_update.bat';
   final script = StringBuffer()
@@ -134,7 +140,9 @@ Future<void> _installWindows(String zipPath) async {
       "'$zipPath' -DestinationPath '$extractDir' -Force\"",
     )
     // Abort if the extract failed (don't wipe a working install).
-    ..writeln('if not exist "$extractDir\\hearth.exe" (echo Extract failed & exit /b 1)')
+    ..writeln(
+      'if not exist "$extractDir\\hearth.exe" (echo Extract failed & exit /b 1)',
+    )
     // Wipe old install (handles removed DLLs), then copy new build in.
     ..writeln('rmdir /S /Q "$exeDir" 2>nul')
     ..writeln('mkdir "$exeDir"')

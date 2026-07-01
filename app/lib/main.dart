@@ -524,8 +524,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   UpdateInfo? _updateInfo;
-  bool _relayBlocked = false; // released build can't reach the relay to verify
-  bool _checkingBlock = false;
   double? _updateProgress;
   bool _installing = false;
   String? _installError;
@@ -1395,18 +1393,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _checkUpdate() async {
     final state = await checkForUpdate(_relayUrl);
     if (!mounted) return;
-    setState(() {
-      switch (state) {
-        case UpdateAvailable(:final info):
-          _updateInfo = info;
-          _relayBlocked = false;
-        case RelayUnreachable():
-          // Released build, relay down — block until it's reachable again.
-          _relayBlocked = true;
-        case UpToDate():
-          _relayBlocked = false;
-      }
-    });
+    // Only a *confirmed newer* release forces an update (it also reaches us
+    // peer-to-peer via VersionControl). An unreachable relay must NOT block the
+    // app — Hearth is local-first and keeps working P2P/offline; the relay
+    // status dot already shows connectivity.
+    if (state is UpdateAvailable) {
+      setState(() => _updateInfo = state.info);
+    }
   }
 
   /// A coloured dot + label for the relay's reachability.
@@ -3853,9 +3846,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_updateInfo != null) {
       return _forceUpdateScreen(context);
     }
-    if (_relayBlocked) {
-      return _relayBlockedScreen(context);
-    }
     final session = _channels?.active;
     // Wide screens get the channel panel inline (right column); narrow screens
     // reach it via the end drawer.
@@ -4419,86 +4409,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         });
       }
     }
-  }
-
-  /// Shown when a released build can't reach the relay to verify its version — a
-  /// deliberate kill-switch while the project is private. Retry re-checks.
-  Widget _relayBlockedScreen(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.cloud_off, size: 64, color: theme.colorScheme.primary),
-              const SizedBox(height: 16),
-              Text('Connect to a relay', style: theme.textTheme.headlineSmall),
-              const SizedBox(height: 8),
-              Text(
-                "Hearth can't reach a relay to check you're up to date. Connect to "
-                'a relay to continue and pick up any update.',
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _relayUrl.toString(),
-                textAlign: TextAlign.center,
-                style: theme.textTheme.bodySmall,
-              ),
-              const SizedBox(height: 24),
-              FilledButton.icon(
-                onPressed: _checkingBlock
-                    ? null
-                    : () => unawaited(_retryRelayBlock()),
-                icon: const Icon(Icons.refresh),
-                label: const Text('Retry'),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  final url = await _promptText(
-                    title: 'Change relay',
-                    hint: 'https://your-relay.example.com',
-                    action: 'Connect',
-                  );
-                  if (url == null || url.trim().isEmpty) return;
-                  var relayInput = url.trim();
-                  if (relayInput.startsWith('http://')) {
-                    _setError('HTTP is not supported — use HTTPS');
-                    return;
-                  }
-                  if (!relayInput.startsWith('https://')) {
-                    relayInput = 'https://$relayInput';
-                  }
-                  final parsed = Uri.tryParse(relayInput);
-                  if (parsed == null || !parsed.hasScheme) {
-                    _setError('Invalid URL');
-                    return;
-                  }
-                  setState(() => _relayUrl = parsed);
-                  await _settings?.setRelayUrl(relayInput);
-                  unawaited(_retryRelayBlock());
-                },
-                icon: const Icon(Icons.edit),
-                label: const Text('Change relay'),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _retryRelayBlock() async {
-    setState(() => _checkingBlock = true);
-    await _checkRelay();
-    await _checkUpdate();
-    if (mounted) setState(() => _checkingBlock = false);
   }
 
   Widget _emptyState(BuildContext context) {

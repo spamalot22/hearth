@@ -830,3 +830,17 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   official BIP39 English test vectors.
   This closes the "no identity backup" gap flagged on 2026-06-21. Tier-b
   (per-device subkeys + revocation) remains unbuilt.
+- **2026-07-01** — **Code-review fixes (security/robustness).** (1) **Removed the
+  relay force-block.** A released build used to show a full-screen "connect to a
+  relay" gate whenever the relay was *unreachable*, making the optional relay a
+  hard single point of failure — a direct contradiction of the local-first
+  principle. Now only a **confirmed newer release** forces an update (still
+  enforced peer-to-peer via `VersionControl`); an unreachable relay no longer
+  blocks the app, so it keeps working P2P/offline. (2) **Windows self-update
+  guard** — the updater `rmdir`s its own install dir, so it now refuses to run
+  from a drive root / suspiciously short path (a portable build in an odd
+  location must not wipe its parent). (3) **Canonical manifest signing** — the
+  update manifest is now signed over a fixed-field, newline-joined form
+  (`backend/src/manifest.ts` ↔ `update_checker.dart`), not `JSON.stringify`, so
+  verification no longer depends on JS/Dart serializers matching byte-for-byte;
+  a shared test literal in both suites guards cross-language drift.
