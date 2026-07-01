@@ -3972,27 +3972,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               Positioned(
                 bottom: 8,
                 right: 8,
-                child: AnimatedSlide(
-                  offset: _showScrollDown
-                      ? Offset.zero
-                      : const Offset(0, 2),
-                  duration: const Duration(milliseconds: 200),
-                  curve: Curves.easeOutCubic,
-                  child: AnimatedOpacity(
-                    opacity: _showScrollDown ? 1.0 : 0.0,
+                child: IgnorePointer(
+                  ignoring: !_showScrollDown,
+                  child: AnimatedSlide(
+                    offset: _showScrollDown
+                        ? Offset.zero
+                        : const Offset(0, 2),
                     duration: const Duration(milliseconds: 200),
-                    child: FloatingActionButton.small(
-                      backgroundColor: _channelAccent(session),
-                      onPressed: _showScrollDown
-                          ? () => _scroll.animateTo(
-                                _scroll.position.maxScrollExtent,
-                                duration: const Duration(milliseconds: 200),
-                                curve: Curves.easeOut,
-                              )
-                          : null,
-                      tooltip: 'Scroll to bottom',
-                      child: const Icon(Icons.keyboard_arrow_down,
-                          color: Colors.white),
+                    curve: Curves.easeOutCubic,
+                    child: AnimatedOpacity(
+                      opacity: _showScrollDown ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 200),
+                      child: FloatingActionButton.small(
+                        backgroundColor: _channelAccent(session),
+                        onPressed: _showScrollDown
+                            ? () => _scroll.animateTo(
+                                  _scroll.position.maxScrollExtent,
+                                  duration: const Duration(milliseconds: 200),
+                                  curve: Curves.easeOut,
+                                )
+                            : null,
+                        tooltip: 'Scroll to bottom',
+                        child: const Icon(Icons.keyboard_arrow_down,
+                            color: Colors.white),
+                      ),
                     ),
                   ),
                 ),
