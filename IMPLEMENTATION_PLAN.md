@@ -349,10 +349,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
         recovery phrase" screen shows a **BIP39 24-word mnemonic** (+ a QR
         encoding the same phrase) with a copy-and-auto-clear; restore accepts the
         phrase (checksum-validated, so a mistyped word is rejected rather than
-        silently restoring the wrong key) or scans the QR, and still accepts the
-        legacy base64/hex codes. This is both "same key on another device" and
-        the identity **backup/recovery** mechanism. Codec lives in `core`
-        (`mnemonic.dart`, BIP39-vector-tested).
+        silently restoring the wrong key) or scans the QR. This is both "same key
+        on another device" and the identity **backup/recovery** mechanism. Codec
+        lives in `core` (`mnemonic.dart`, BIP39-vector-tested).
       - [ ] **(b) per-device subkeys** certified by a root key — adds per-device
         revocation. Not built: "multi-device" today means copying the same root
         seed to each device.
@@ -824,9 +823,10 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   down and, crucially, **checksummed**, so a mistyped/transposed word is rejected
   instead of silently restoring a *different* identity (a raw base64/hex code
   can't catch that). The QR now encodes the phrase too; restore accepts the phrase
-  or scans the QR, and still accepts the legacy base64/hex codes for backward
-  compatibility. Codec is a self-contained `core/mnemonic.dart` (the standard
-  entropy↔mnemonic mapping, *not* BIP39 PBKDF2 key-derivation — the seed already
-  is the Ed25519 key), verified against the official BIP39 English test vectors.
+  or scans the QR. (The old base64/hex code path was dropped, not kept for
+  back-compat — no users are live yet.) Codec is a self-contained
+  `core/mnemonic.dart` (the standard entropy↔mnemonic mapping, *not* BIP39 PBKDF2
+  key-derivation — the seed already is the Ed25519 key), verified against the
+  official BIP39 English test vectors.
   This closes the "no identity backup" gap flagged on 2026-06-21. Tier-b
   (per-device subkeys + revocation) remains unbuilt.

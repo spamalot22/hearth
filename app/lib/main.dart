@@ -1269,8 +1269,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         builder: (ctx) => AlertDialog(
           title: const Text('Restore identity'),
           content: const Text(
-            'Scan a QR code from another device, or paste your recovery '
-            'phrase (or an older recovery code).',
+            'Scan a QR code from another device, or paste your 24-word '
+            'recovery phrase.',
           ),
           actions: [
             TextButton(
@@ -1304,42 +1304,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (code != null && code.isEmpty && mounted) {
         code = await _promptText(
           title: 'Restore identity',
-          hint: 'paste your recovery phrase or code',
+          hint: 'paste your 24-word recovery phrase',
           action: 'Restore',
         );
       }
     } else {
       code = await _promptText(
         title: 'Restore identity',
-        hint: 'paste your recovery phrase or code',
+        hint: 'paste your 24-word recovery phrase',
         action: 'Restore',
       );
     }
     if (code == null || code.trim().isEmpty) return;
-    Uint8List? seed;
-    final trimmed = code.trim();
-    try {
-      if (looksLikeMnemonic(trimmed)) {
-        // BIP39 recovery phrase (24 words). Null if a word/checksum is wrong.
-        seed = await mnemonicToSeed(trimmed);
-      } else if (trimmed.length == 64 &&
-          RegExp(r'^[0-9a-fA-F]+$').hasMatch(trimmed)) {
-        // Legacy hex format (64 chars = 32 bytes).
-        seed = Uint8List.fromList(hex.decode(trimmed));
-      } else {
-        // Legacy base64url format (43 chars without padding = 32 bytes).
-        final padded = trimmed.padRight(
-          trimmed.length + (4 - trimmed.length % 4) % 4,
-          '=',
-        );
-        final bytes = base64Url.decode(padded);
-        if (bytes.length == 32) seed = Uint8List.fromList(bytes);
-      }
-    } catch (_) {
-      seed = null;
-    }
+    // Decode the 24-word recovery phrase. A scanned QR encodes the same phrase,
+    // so this handles both. Null if a word is unknown or the checksum fails.
+    final seed = await mnemonicToSeed(code.trim());
     if (seed == null) {
-      if (mounted) _setError('invalid recovery phrase or code');
+      if (mounted) _setError('invalid recovery phrase');
       return;
     }
     if (!mounted) return;

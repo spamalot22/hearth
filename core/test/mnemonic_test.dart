@@ -76,11 +76,5 @@ void main() {
       final messy = '  ${phrase.toUpperCase().replaceAll(' ', '   ')}  ';
       expect(await mnemonicToSeed(messy), seed);
     });
-
-    test('looksLikeMnemonic distinguishes phrases from codes', () {
-      expect(looksLikeMnemonic('abandon ' * 11 + 'about'), isTrue);
-      expect(looksLikeMnemonic('kQm3n8...'), isFalse); // base64-ish
-      expect(looksLikeMnemonic('deadbeef00'), isFalse); // hex-ish
-    });
   });
 }

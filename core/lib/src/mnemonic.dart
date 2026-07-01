@@ -72,14 +72,6 @@ Future<Uint8List?> mnemonicToSeed(String mnemonic) async {
   return seed;
 }
 
-/// Heuristic: does [input] look like a mnemonic phrase (vs a base64/hex code)?
-/// Used to route recovery-code import. Two+ space-separated tokens, all letters.
-bool looksLikeMnemonic(String input) {
-  final tokens = input.trim().split(RegExp(r'\s+'));
-  return tokens.length >= 12 &&
-      tokens.every((t) => RegExp(r'^[a-zA-Z]+$').hasMatch(t));
-}
-
 /// word -> index, for O(1) decode lookups.
 final Map<String, int> _wordIndex = {
   for (var i = 0; i < bip39Words.length; i++) bip39Words[i]: i,
