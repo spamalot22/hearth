@@ -3200,7 +3200,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final theme = Theme.of(context);
     final voice = _voice;
     final inCall = voice != null && voice.channelId == session.channelId;
-    return Container(
+    // Material (not a plain coloured Container) so the panel's ListTiles paint
+    // their ink splashes on a Material ancestor rather than an opaque ColoredBox.
+    return Material(
       color: theme.colorScheme.surfaceContainerLow,
       child: Column(
         children: [
@@ -3859,32 +3861,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     required String hint,
     String initial = '',
     String action = 'OK',
-  }) async {
-    final controller = TextEditingController(text: initial);
-    final result = await showDialog<String>(
+  }) {
+    return showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: InputDecoration(hintText: hint),
-          onSubmitted: (value) => Navigator.pop(context, value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: Text(action),
-          ),
-        ],
+      builder: (context) => _TextPromptDialog(
+        title: title,
+        hint: hint,
+        initial: initial,
+        action: action,
       ),
     );
-    controller.dispose();
-    return result;
   }
 
   // --- view ---
@@ -6083,6 +6069,60 @@ class _ContactsPageState extends State<_ContactsPage> {
     );
     if (channelId != null) widget.onInvite(pubkeyHex, channelId);
   }
+}
+
+/// A single-field prompt dialog that owns its [TextEditingController] and
+/// disposes it on unmount — so the controller outlives the dialog's exit
+/// animation (disposing it synchronously right after `showDialog` returns
+/// trips a "used after being disposed" assertion while the field animates out).
+class _TextPromptDialog extends StatefulWidget {
+  const _TextPromptDialog({
+    required this.title,
+    required this.hint,
+    required this.initial,
+    required this.action,
+  });
+
+  final String title;
+  final String hint;
+  final String initial;
+  final String action;
+
+  @override
+  State<_TextPromptDialog> createState() => _TextPromptDialogState();
+}
+
+class _TextPromptDialogState extends State<_TextPromptDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(widget.title),
+    content: TextField(
+      controller: _controller,
+      autofocus: true,
+      decoration: InputDecoration(hintText: widget.hint),
+      onSubmitted: (value) => Navigator.pop(context, value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, _controller.text),
+        child: Text(widget.action),
+      ),
+    ],
+  );
 }
 
 /// Wraps a child in an animated flame effect around the perimeter.
