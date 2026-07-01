@@ -317,6 +317,58 @@ void main() {
     await _finish(tester);
   });
 
+  testWidgets('bulk add-members dialog opens and closes cleanly', (
+    tester,
+  ) async {
+    final api = HearthTestApi();
+    await tester.pumpWidget(
+      HearthApp(keyStore: InMemoryKeyStore(), autoPoll: false, testApi: api),
+    );
+    await _settle(tester);
+    await _createChannel(tester, 'general');
+
+    // Make a peer a channel member with a suggested name: inject a profile
+    // (name suggestion) and a message (so they appear as a member author).
+    final session = api.activeChannel()!;
+    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
+    for (final content in [
+      const ProfileContent('Alice'),
+      const TextContent('hi'),
+    ]) {
+      final payload = await session.cipher.encrypt(content.encode());
+      await session.publish(
+        await Message.create(
+          author: peer,
+          channel: session.channelId,
+          payload: payload,
+        ),
+      );
+    }
+    await api.refresh();
+    await _settle(tester);
+
+    // Open the bulk add dialog → it renders an editable field for the member.
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Add members'));
+    await _settle(tester);
+    expect(find.text('Add members to contacts'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.text('Alice'),
+      ),
+      findsOneWidget,
+    );
+
+    // Close it. The per-member controllers must survive the exit animation —
+    // _finish asserts no framework warnings (the old code tripped a
+    // "TextEditingController used after being disposed" assertion here).
+    await tester.tap(find.text('Add selected'));
+    await _settle(tester);
+    expect(find.text('Add members to contacts'), findsNothing);
+
+    await _finish(tester);
+  });
+
   testWidgets('switching channels clears the reply draft', (tester) async {
     await _boot(tester);
     await _createChannel(tester, 'alpha');

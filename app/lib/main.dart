@@ -3808,73 +3808,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       return;
     }
-    final selected = {for (final key in members.keys) key: true};
-    // One editable petname field per member, pre-filled with their suggestion —
-    // so you can amend any name before adding.
-    final names = {
-      for (final entry in members.entries)
-        entry.key: TextEditingController(text: entry.value),
-    };
-    final confirmed = await showDialog<bool>(
+    // A dedicated widget owns the per-member controllers so they outlive the
+    // dialog's exit animation (disposing them synchronously here would trip a
+    // "used after disposed" assertion — same reason as _TextPromptDialog).
+    final result = await showDialog<Map<String, String>>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheet) => AlertDialog(
-          title: const Text('Add members to contacts'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView(
-              shrinkWrap: true,
-              children: [
-                for (final key in members.keys)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Row(
-                      children: [
-                        Checkbox(
-                          value: selected[key],
-                          onChanged: (v) =>
-                              setSheet(() => selected[key] = v ?? false),
-                        ),
-                        Expanded(
-                          child: TextField(
-                            controller: names[key],
-                            decoration: InputDecoration(
-                              isDense: true,
-                              labelText:
-                                  'hearth#${_fingerprint(Uint8List.fromList(hex.decode(key)))}',
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Not now'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Add selected'),
-            ),
-          ],
-        ),
+      builder: (context) => _AddMembersDialog(
+        members: members,
+        labelFor: (key) =>
+            'hearth#${_fingerprint(Uint8List.fromList(hex.decode(key)))}',
       ),
     );
-    if (confirmed == true) {
-      for (final key in members.keys) {
-        final name = names[key]!.text.trim();
-        if (selected[key] == true && name.isNotEmpty) {
-          await _contacts?.setName(key, name);
-        }
+    if (result != null) {
+      for (final entry in result.entries) {
+        await _contacts?.setName(entry.key, entry.value);
       }
       if (mounted) setState(() {});
-    }
-    for (final controller in names.values) {
-      controller.dispose();
     }
   }
 
@@ -6143,6 +6092,88 @@ class _TextPromptDialogState extends State<_TextPromptDialog> {
       FilledButton(
         onPressed: () => Navigator.pop(context, _controller.text),
         child: Text(widget.action),
+      ),
+    ],
+  );
+}
+
+/// Bulk "add channel members to contacts" dialog. Owns one editable petname
+/// controller per member and disposes them on unmount (so they outlive the
+/// dialog's exit animation). Pops a map of the ticked members' final names
+/// (empty ones dropped), or null if cancelled.
+class _AddMembersDialog extends StatefulWidget {
+  const _AddMembersDialog({required this.members, required this.labelFor});
+
+  final Map<String, String> members; // pubkeyHex -> suggested name
+  final String Function(String key) labelFor;
+
+  @override
+  State<_AddMembersDialog> createState() => _AddMembersDialogState();
+}
+
+class _AddMembersDialogState extends State<_AddMembersDialog> {
+  late final Map<String, bool> _selected = {
+    for (final key in widget.members.keys) key: true,
+  };
+  late final Map<String, TextEditingController> _controllers = {
+    for (final entry in widget.members.entries)
+      entry.key: TextEditingController(text: entry.value),
+  };
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Add members to contacts'),
+    content: SizedBox(
+      width: double.maxFinite,
+      child: ListView(
+        shrinkWrap: true,
+        children: [
+          for (final key in widget.members.keys)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Checkbox(
+                    value: _selected[key],
+                    onChanged: (v) =>
+                        setState(() => _selected[key] = v ?? false),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: _controllers[key],
+                      decoration: InputDecoration(
+                        isDense: true,
+                        labelText: widget.labelFor(key),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Not now'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, <String, String>{
+          for (final key in widget.members.keys)
+            if (_selected[key] == true &&
+                _controllers[key]!.text.trim().isNotEmpty)
+              key: _controllers[key]!.text.trim(),
+        }),
+        child: const Text('Add selected'),
       ),
     ],
   );
