@@ -51,10 +51,12 @@ import 'voice.dart';
 import 'youtube_share.dart';
 
 /// Relay endpoint for local dev (signalling only).
-final Uri kRelayUrl = Uri.parse(const String.fromEnvironment(
-  'RELAY_URL',
-  defaultValue: 'http://localhost:8787',
-));
+final Uri kRelayUrl = Uri.parse(
+  const String.fromEnvironment(
+    'RELAY_URL',
+    defaultValue: 'http://localhost:8787',
+  ),
+);
 
 /// Held for process lifetime to enforce single-instance.
 // ignore: unused_element
@@ -389,12 +391,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Timer? _updateCheckTimer;
   // Read receipts: per-peer watermark (channelId -> (peerHex -> messageIdHex))
   final Map<String, Map<String, String>> _readWatermarks = {};
-  final Set<String> _readReceiptsDisabled = {}; // DM channelIds with receipts off
-  final Set<String> _mutedChannels = {}; // channels with notifications suppressed
-  final Map<String, Set<String>> _pinnedMessages = {}; // channelId -> pinned msg IDs
+  final Set<String> _readReceiptsDisabled =
+      {}; // DM channelIds with receipts off
+  final Set<String> _mutedChannels =
+      {}; // channels with notifications suppressed
+  final Map<String, Set<String>> _pinnedMessages =
+      {}; // channelId -> pinned msg IDs
   final Set<String> _blocked = {}; // globally blocked pubkey hexes
-  final Set<String> _voiceMuted = {}; // per-session muted peers (cleared on leave)
-  final Map<String, String> _lastBroadcastWatermark = {}; // channelId -> last sent
+  final Set<String> _voiceMuted =
+      {}; // per-session muted peers (cleared on leave)
+  final Map<String, String> _lastBroadcastWatermark =
+      {}; // channelId -> last sent
   // Cached watermark message timestamps for O(1) tick rendering.
   // channelId -> (messageIdHex -> timestampMs)
   final Map<String, Map<String, int>> _watermarkTs = {};
@@ -446,10 +453,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _saveBackgroundState() async {
     final channels = _channels;
     if (channels == null) return;
-    final channelIds = channels.sessions.map((s) => s.channelId).toList();
+    // Exclude muted channels — the background isolate has no mute list, so if we
+    // handed them over it would notify for channels the user silenced.
+    final sessions = channels.sessions
+        .where((s) => !_mutedChannels.contains(s.channelId))
+        .toList();
+    // Seed each channel's cursor with the relay seq the foreground courier has
+    // already reached, so the background poll only counts genuinely-new
+    // messages (not the backlog, not anything already read in-app).
+    final cursors = <String, int>{
+      for (final s in sessions)
+        if ((s.relaySince ?? 0) > 0) s.channelId: s.relaySince!,
+    };
     await saveBackgroundPollState(
       relayUrl: _relayUrl.toString(),
-      channelIds: channelIds,
+      channelIds: sessions.map((s) => s.channelId).toList(),
+      cursors: cursors,
+      selfAuthor: base64Url.encode(widget.identity.publicKey),
     );
   }
 
@@ -466,9 +486,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     Clipboard.setData(ClipboardData(text: text));
     Future.delayed(const Duration(seconds: 30), () {
       // Clipboard.getData may throw on web (no user gesture for read access).
-      Clipboard.getData('text/plain').then((data) {
-        if (data?.text == text) Clipboard.setData(const ClipboardData(text: ''));
-      }).catchError((_) {});
+      Clipboard.getData('text/plain')
+          .then((data) {
+            if (data?.text == text) {
+              Clipboard.setData(const ClipboardData(text: ''));
+            }
+          })
+          .catchError((_) {});
     });
   }
 
@@ -568,9 +592,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: _relayUrl,
-      fallbackUrls: (_settings?.fallbackRelays ?? [])
-          .map(Uri.parse)
-          .toList(),
+      fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: blobStore,
@@ -611,8 +633,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Load pinned messages for this channel.
       final pinsCsv = settings?.channelPref(session.channelId, 'pinned');
       if (pinsCsv != null && pinsCsv.isNotEmpty) {
-        _pinnedMessages[session.channelId] =
-            pinsCsv.split(',').where((s) => s.isNotEmpty).toSet();
+        _pinnedMessages[session.channelId] = pinsCsv
+            .split(',')
+            .where((s) => s.isNotEmpty)
+            .toSet();
       }
     }
     // Decrypt the active channel's loaded history: the onUpdate calls during the
@@ -634,8 +658,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (peerCount > lastCount) {
         final wm = _lastBroadcastWatermark[active.channelId];
         if (wm != null && !_readReceiptsDisabled.contains(active.channelId)) {
-          active.broadcast(ReadWatermarkControl(
-              channelId: active.channelId, messageId: wm));
+          active.broadcast(
+            ReadWatermarkControl(channelId: active.channelId, messageId: wm),
+          );
         }
       }
       _lastPeerCount[active.channelId] = peerCount;
@@ -651,7 +676,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         .where((s) => s.channelId == channelId)
         .firstOrNull;
     // Suppress notifications for DMs from blocked users.
-    if (session != null && session.isDm && session.peerPubkey != null &&
+    if (session != null &&
+        session.isDm &&
+        session.peerPubkey != null &&
         _blocked.contains(hex.encode(session.peerPubkey!))) {
       return;
     }
@@ -686,7 +713,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
 
-    final title = isDm ? (sender.isNotEmpty ? sender : channelName) : '#$channelName';
+    final title = isDm
+        ? (sender.isNotEmpty ? sender : channelName)
+        : '#$channelName';
     final body = sender.isNotEmpty
         ? (isDm ? preview : '$sender: $preview')
         : 'New message';
@@ -754,7 +783,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, DateTime> _inferCooldown = {};
 
   /// Handles incoming inference controls from a peer in [channelId].
-  void _handleMeshControl(String fromHex, String channelId, MeshControl control) {
+  void _handleMeshControl(
+    String fromHex,
+    String channelId,
+    MeshControl control,
+  ) {
     if (control is VoicePresenceControl) {
       setState(() {
         if (control.channelId.isEmpty) {
@@ -784,16 +817,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       setState(() {
         (_readWatermarks[control.channelId] ??= {})[fromHex] =
             control.messageId;
-        // Cache the timestamp for O(1) tick rendering.
-        final session = _channels?.sessions
-            .where((s) => s.channelId == control.channelId)
-            .firstOrNull;
-        if (session != null) {
-          final msg = session.repository.ordered().cast<Message?>().firstWhere(
-              (m) => m!.idHex == control.messageId, orElse: () => null);
-          if (msg != null) {
-            (_watermarkTs[control.channelId] ??= {})[control.messageId] =
-                msg.timestampMs;
+        // Cache the timestamp for O(1) tick rendering — but only if we haven't
+        // already resolved this id, so repeat watermarks don't each trigger an
+        // O(n) scan of the message history. (_backfillWatermarkTs covers ids
+        // that aren't in our DAG yet, on the next refresh.)
+        final cache = _watermarkTs[control.channelId] ??= {};
+        if (!cache.containsKey(control.messageId)) {
+          final session = _channels?.sessions
+              .where((s) => s.channelId == control.channelId)
+              .firstOrNull;
+          if (session != null) {
+            final msg = session.repository
+                .ordered()
+                .cast<Message?>()
+                .firstWhere(
+                  (m) => m!.idHex == control.messageId,
+                  orElse: () => null,
+                );
+            if (msg != null) cache[control.messageId] = msg.timestampMs;
           }
         }
       });
@@ -994,14 +1035,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
     final onlinePeers = _allOnlinePeers();
     final active = members
-        .where((k) =>
-            onlinePeers.contains(k) ||
-            (now - (lastSeen[k] ?? 0)) < sevenDays)
+        .where(
+          (k) =>
+              onlinePeers.contains(k) || (now - (lastSeen[k] ?? 0)) < sevenDays,
+        )
         .toList();
     final inactive = members
-        .where((k) =>
-            !onlinePeers.contains(k) &&
-            (now - (lastSeen[k] ?? 0)) >= sevenDays)
+        .where(
+          (k) =>
+              !onlinePeers.contains(k) &&
+              (now - (lastSeen[k] ?? 0)) >= sevenDays,
+        )
         .toList();
 
     return [
@@ -1526,10 +1570,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         onPressed: () async {
                           try {
                             final stream = await navigator.mediaDevices
-                                .getUserMedia({
-                                  'audio': true,
-                                  'video': false,
-                                });
+                                .getUserMedia({'audio': true, 'video': false});
                             await Future<void>.delayed(
                               const Duration(milliseconds: 500),
                             );
@@ -1669,8 +1710,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 8),
-                  for (final url
-                      in _settings?.fallbackRelays ?? <String>[])
+                  for (final url in _settings?.fallbackRelays ?? <String>[])
                     ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
@@ -1683,7 +1723,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             ..remove(url);
                           unawaited(_settings!.setFallbackRelays(list));
                           _channels?.updateFallbackUrls(
-                              list.map(Uri.parse).toList());
+                            list.map(Uri.parse).toList(),
+                          );
                           setTabState(() {});
                         },
                       ),
@@ -1707,7 +1748,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       final list = [..._settings!.fallbackRelays, input];
                       await _settings!.setFallbackRelays(list);
                       _channels?.updateFallbackUrls(
-                          list.map(Uri.parse).toList());
+                        list.map(Uri.parse).toList(),
+                      );
                       setTabState(() {});
                     },
                     icon: const Icon(Icons.add),
@@ -1786,8 +1828,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           if (_blocked.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 16),
-              child: Text('No blocked users',
-                  style: TextStyle(color: Colors.grey)),
+              child: Text(
+                'No blocked users',
+                style: TextStyle(color: Colors.grey),
+              ),
             )
           else
             for (final pubHex in _blocked.toList())
@@ -1795,17 +1839,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 leading: _avatar(
-                    Uint8List.fromList(hex.decode(pubHex)), radius: 14),
+                  Uint8List.fromList(hex.decode(pubHex)),
+                  radius: 14,
+                ),
                 title: Text(
-                    _displayName(Uint8List.fromList(hex.decode(pubHex)))),
+                  _displayName(Uint8List.fromList(hex.decode(pubHex))),
+                ),
                 trailing: TextButton(
                   onPressed: () {
                     setState(() => _blocked.remove(pubHex));
                     setLocal(() {});
                     unawaited(_settings?.unblockUser(pubHex));
                   },
-                  child: const Text('Unblock',
-                      style: TextStyle(color: Colors.green)),
+                  child: const Text(
+                    'Unblock',
+                    style: TextStyle(color: Colors.green),
+                  ),
                 ),
               ),
         ],
@@ -1990,9 +2039,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final channels = ChannelManager(
       identity: widget.identity,
       relayUrl: _relayUrl,
-      fallbackUrls: (_settings?.fallbackRelays ?? [])
-          .map(Uri.parse)
-          .toList(),
+      fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       live: widget.autoPoll,
       onUpdate: _onUpdate,
       blobStore: _blobStore,
@@ -2095,8 +2142,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _sendGif() async {
     final store = _blobStore;
     if (store == null) return;
-    final url = await pickGif(context, _relayUrl,
-        tokenProvider: () => _channels?.active?.mesh?.authToken);
+    final url = await pickGif(
+      context,
+      _relayUrl,
+      tokenProvider: () => _channels?.active?.mesh?.authToken,
+    );
     if (url == null) return;
     try {
       final res = await http.get(Uri.parse(url));
@@ -2124,9 +2174,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     final stickers = library?.byKind(MediaKind.sticker) ?? [];
     // Pre-fetch blob bytes so FutureBuilder doesn't re-fire on rebuild.
-    final stickerFutures = [
-      for (final item in stickers) store.get(item.hash),
-    ];
+    final stickerFutures = [for (final item in stickers) store.get(item.hash)];
 
     final picked = await showModalBottomSheet<String>(
       context: context,
@@ -2139,8 +2187,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             children: [
               Row(
                 children: [
-                  Text('Stickers',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  Text(
+                    'Stickers',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                   const Spacer(),
                   TextButton.icon(
                     onPressed: () async {
@@ -2154,7 +2204,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                                content: Text('Image too large (max 10 MB)')),
+                              content: Text('Image too large (max 10 MB)'),
+                            ),
                           );
                         }
                         return;
@@ -2163,8 +2214,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       await library?.add(hash, MediaKind.sticker);
                       if (context.mounted) Navigator.pop(context, hash);
                     },
-                    icon: const Icon(Icons.add_photo_alternate_outlined,
-                        size: 18),
+                    icon: const Icon(
+                      Icons.add_photo_alternate_outlined,
+                      size: 18,
+                    ),
                     label: const Text('Upload'),
                   ),
                 ],
@@ -2173,9 +2226,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               if (stickers.isEmpty)
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Text('No stickers yet — upload one or receive '
-                      'some in chat!',
-                      style: TextStyle(color: Colors.grey)),
+                  child: Text(
+                    'No stickers yet — upload one or receive '
+                    'some in chat!',
+                    style: TextStyle(color: Colors.grey),
+                  ),
                 )
               else
                 SizedBox(
@@ -2183,10 +2238,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   child: GridView.builder(
                     gridDelegate:
                         const SliverGridDelegateWithFixedCrossAxisCount(
-                      crossAxisCount: 4,
-                      crossAxisSpacing: 8,
-                      mainAxisSpacing: 8,
-                    ),
+                          crossAxisCount: 4,
+                          crossAxisSpacing: 8,
+                          mainAxisSpacing: 8,
+                        ),
                     itemCount: stickers.length,
                     itemBuilder: (context, i) {
                       final item = stickers[i];
@@ -2196,11 +2251,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           final bytes = snap.data;
                           if (bytes == null) {
                             return const Center(
-                                child: SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2)));
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                            );
                           }
                           return GestureDetector(
                             onTap: () => Navigator.pop(context, item.hash),
@@ -2371,8 +2429,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _searchSound() async {
     final store = _blobStore;
     if (store == null) return;
-    final picked = await pickSound(context, _relayUrl,
-        tokenProvider: () => _channels?.active?.mesh?.authToken);
+    final picked = await pickSound(
+      context,
+      _relayUrl,
+      tokenProvider: () => _channels?.active?.mesh?.authToken,
+    );
     if (picked == null) return;
     try {
       final res = await http.get(Uri.parse(picked.url));
@@ -3194,8 +3255,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           _readReceiptsDisabled.add(session.channelId);
                         }
                       });
-                      unawaited(_settings?.setReadReceiptsDisabled(
-                          session.channelId, !v));
+                      unawaited(
+                        _settings?.setReadReceiptsDisabled(
+                          session.channelId,
+                          !v,
+                        ),
+                      );
                     },
                   ),
                 if (session.isDm) const Divider(height: 28),
@@ -3213,8 +3278,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         _mutedChannels.remove(session.channelId);
                       }
                     });
-                    unawaited(_settings?.setChannelPref(
-                        session.channelId, 'muted', v ? 'true' : null));
+                    unawaited(
+                      _settings?.setChannelPref(
+                        session.channelId,
+                        'muted',
+                        v ? 'true' : null,
+                      ),
+                    );
                   },
                 ),
                 ListTile(
@@ -3247,8 +3317,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
-                ]
-                else ...[
+                ] else ...[
                   Row(
                     children: [
                       IconButton(
@@ -3267,9 +3336,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           defaultTargetPlatform == TargetPlatform.iOS)
                         PopupMenuButton<String>(
                           icon: Icon(
-                            _speakerOn
-                                ? Icons.volume_up
-                                : Icons.phone_in_talk,
+                            _speakerOn ? Icons.volume_up : Icons.phone_in_talk,
                           ),
                           tooltip: 'Audio output',
                           onSelected: (value) async {
@@ -3280,8 +3347,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               await Helper.setSpeakerphoneOn(false);
                               setState(() => _speakerOn = false);
                             } else if (value == 'bluetooth') {
-                              await Helper
-                                  .setSpeakerphoneOnButPreferBluetooth();
+                              await Helper.setSpeakerphoneOnButPreferBluetooth();
                               setState(() => _speakerOn = true);
                             }
                           },
@@ -3415,8 +3481,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     String name,
   ) {
     final speaking = voice.speaking(key);
-    final isMuted = key != 'self' &&
-        (_voiceMuted.contains(key) || _blocked.contains(key));
+    final isMuted =
+        key != 'self' && (_voiceMuted.contains(key) || _blocked.contains(key));
     return InkWell(
       onTap: key == 'self' || isMuted
           ? null
@@ -3630,7 +3696,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 onLongPress: () {
                   Navigator.pop(context);
                   unawaited(
-                      _peerActions(Uint8List.fromList(hex.decode(entry.key))));
+                    _peerActions(Uint8List.fromList(hex.decode(entry.key))),
+                  );
                 },
               ),
           ],
@@ -3906,7 +3973,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             return FadeTransition(
                               opacity: animation,
                               child: SlideTransition(
-                                  position: slide, child: child),
+                                position: slide,
+                                child: child,
+                              ),
                             );
                           },
                           layoutBuilder: (currentChild, previousChildren) =>
@@ -3932,8 +4001,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ).animate(animation);
                       return FadeTransition(
                         opacity: animation,
-                        child:
-                            SlideTransition(position: slide, child: child),
+                        child: SlideTransition(position: slide, child: child),
                       );
                     },
                     layoutBuilder: (currentChild, previousChildren) =>
@@ -3975,9 +4043,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 child: IgnorePointer(
                   ignoring: !_showScrollDown,
                   child: AnimatedSlide(
-                    offset: _showScrollDown
-                        ? Offset.zero
-                        : const Offset(0, 2),
+                    offset: _showScrollDown ? Offset.zero : const Offset(0, 2),
                     duration: const Duration(milliseconds: 200),
                     curve: Curves.easeOutCubic,
                     child: AnimatedOpacity(
@@ -3987,14 +4053,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         backgroundColor: _channelAccent(session),
                         onPressed: _showScrollDown
                             ? () => _scroll.animateTo(
-                                  _scroll.position.maxScrollExtent,
-                                  duration: const Duration(milliseconds: 200),
-                                  curve: Curves.easeOut,
-                                )
+                                _scroll.position.maxScrollExtent,
+                                duration: const Duration(milliseconds: 200),
+                                curve: Curves.easeOut,
+                              )
                             : null,
                         tooltip: 'Scroll to bottom',
-                        child: const Icon(Icons.keyboard_arrow_down,
-                            color: Colors.white),
+                        child: const Icon(
+                          Icons.keyboard_arrow_down,
+                          color: Colors.white,
+                        ),
                       ),
                     ),
                   ),
@@ -4275,8 +4343,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               return TweenAnimationBuilder<double>(
                 key: ValueKey(msg.idHex),
                 tween: Tween(begin: 0, end: 1),
-                duration: Duration(
-                    milliseconds: 250 + stagger.toInt()),
+                duration: Duration(milliseconds: 250 + stagger.toInt()),
                 curve: Curves.easeOutCubic,
                 builder: (context, value, child) {
                   // Delay the visual start by the stagger amount.
@@ -4694,8 +4761,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (!_readReceiptsDisabled.contains(session.channelId) &&
           _lastBroadcastWatermark[session.channelId] != lastId) {
         _lastBroadcastWatermark[session.channelId] = lastId;
-        session.broadcast(ReadWatermarkControl(
-            channelId: session.channelId, messageId: lastId));
+        session.broadcast(
+          ReadWatermarkControl(channelId: session.channelId, messageId: lastId),
+        );
       }
     }
   }
@@ -4709,7 +4777,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final uncached = watermarks.values.where((id) => !cache.containsKey(id));
     if (uncached.isEmpty) return;
     final ordered = session.repository.ordered();
-    final tsMap = <String, int>{for (final m in ordered) m.idHex: m.timestampMs};
+    final tsMap = <String, int>{
+      for (final m in ordered) m.idHex: m.timestampMs,
+    };
     for (final id in uncached) {
       final ts = tsMap[id];
       if (ts != null) cache[id] = ts;
@@ -5024,33 +5094,43 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Message status',
-                style: Theme.of(ctx).textTheme.titleSmall),
+            Text('Message status', style: Theme.of(ctx).textTheme.titleSmall),
             const SizedBox(height: 12),
             for (final member in members)
               ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 leading: _avatar(
-                    Uint8List.fromList(hex.decode(member)), radius: 14),
-                title: Text(_displayName(
-                    Uint8List.fromList(hex.decode(member)))),
-                trailing: Builder(builder: (_) {
-                  final wmId = watermarks[member];
-                  if (wmId != null) {
-                    final ts = wmTs[wmId] ?? 0;
-                    if (ts >= msgTs) {
-                      return const Text('Read',
-                          style: TextStyle(color: Colors.blue, fontSize: 12));
+                  Uint8List.fromList(hex.decode(member)),
+                  radius: 14,
+                ),
+                title: Text(
+                  _displayName(Uint8List.fromList(hex.decode(member))),
+                ),
+                trailing: Builder(
+                  builder: (_) {
+                    final wmId = watermarks[member];
+                    if (wmId != null) {
+                      final ts = wmTs[wmId] ?? 0;
+                      if (ts >= msgTs) {
+                        return const Text(
+                          'Read',
+                          style: TextStyle(color: Colors.blue, fontSize: 12),
+                        );
+                      }
                     }
-                  }
-                  if (peers.contains(member)) {
-                    return const Text('Delivered',
-                        style: TextStyle(color: Colors.grey, fontSize: 12));
-                  }
-                  return const Text('Sent',
-                      style: TextStyle(color: Colors.grey, fontSize: 12));
-                }),
+                    if (peers.contains(member)) {
+                      return const Text(
+                        'Delivered',
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      );
+                    }
+                    return const Text(
+                      'Sent',
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
+                    );
+                  },
+                ),
               ),
           ],
         ),
@@ -5079,7 +5159,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       onTap: () {
                         Navigator.pop(ctx);
                         unawaited(
-                            _publish(ReactionContent(message.idHex, emoji)));
+                          _publish(ReactionContent(message.idHex, emoji)),
+                        );
                       },
                       child: Text(emoji, style: const TextStyle(fontSize: 28)),
                     ),
@@ -5096,7 +5177,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               },
             ),
             ListTile(
-              leading: Icon(isPinned ? Icons.push_pin : Icons.push_pin_outlined),
+              leading: Icon(
+                isPinned ? Icons.push_pin : Icons.push_pin_outlined,
+              ),
               title: Text(isPinned ? 'Unpin' : 'Pin'),
               onTap: () {
                 Navigator.pop(ctx);
@@ -5119,8 +5202,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     });
     final pins = _pinnedMessages[channelId] ?? {};
-    unawaited(_settings?.setChannelPref(
-        channelId, 'pinned', pins.isEmpty ? null : pins.join(',')));
+    unawaited(
+      _settings?.setChannelPref(
+        channelId,
+        'pinned',
+        pins.isEmpty ? null : pins.join(','),
+      ),
+    );
   }
 
   /// Opens a search dialog for the current channel's messages.
@@ -5138,15 +5226,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           builder: (ctx, setLocal) {
             final results = query.isEmpty
                 ? <Message>[]
-                : session.repository.ordered().where((m) {
-                    final content = session.contentOf(m);
-                    if (content is TextContent) {
-                      return content.text
-                          .toLowerCase()
-                          .contains(query.toLowerCase());
-                    }
-                    return false;
-                  }).toList().reversed.toList();
+                : session.repository
+                      .ordered()
+                      .where((m) {
+                        final content = session.contentOf(m);
+                        if (content is TextContent) {
+                          return content.text.toLowerCase().contains(
+                            query.toLowerCase(),
+                          );
+                        }
+                        return false;
+                      })
+                      .toList()
+                      .reversed
+                      .toList();
             return Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -5165,9 +5258,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     child: results.isEmpty
                         ? Center(
                             child: Text(
-                              query.isEmpty
-                                  ? 'Type to search'
-                                  : 'No results',
+                              query.isEmpty ? 'Type to search' : 'No results',
                               style: const TextStyle(color: Colors.grey),
                             ),
                           )
@@ -5180,8 +5271,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                   (session.contentOf(msg) as TextContent).text;
                               return ListTile(
                                 dense: true,
-                                leading:
-                                    _avatar(msg.author, radius: 12),
+                                leading: _avatar(msg.author, radius: 12),
                                 title: Text(
                                   _displayName(msg.author),
                                   style: const TextStyle(fontSize: 12),
@@ -5195,7 +5285,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                 trailing: Text(
                                   _time(msg.timestampMs),
                                   style: const TextStyle(
-                                      fontSize: 10, color: Colors.grey),
+                                    fontSize: 10,
+                                    color: Colors.grey,
+                                  ),
                                 ),
                                 onTap: () => Navigator.pop(ctx),
                               );
@@ -5224,20 +5316,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Pinned messages',
-                  style: Theme.of(ctx).textTheme.titleMedium),
+              Text(
+                'Pinned messages',
+                style: Theme.of(ctx).textTheme.titleMedium,
+              ),
               const SizedBox(height: 12),
               if (pinned.isEmpty)
-                const Text('No pinned messages',
-                    style: TextStyle(color: Colors.grey))
+                const Text(
+                  'No pinned messages',
+                  style: TextStyle(color: Colors.grey),
+                )
               else
                 for (final msg in pinned)
                   ListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     leading: _avatar(msg.author, radius: 12),
-                    title: Text(_displayName(msg.author),
-                        style: const TextStyle(fontSize: 12)),
+                    title: Text(
+                      _displayName(msg.author),
+                      style: const TextStyle(fontSize: 12),
+                    ),
                     subtitle: Text(
                       _contentPreview(session, msg),
                       maxLines: 1,
@@ -5259,8 +5357,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  String _contentPreview(ChannelSession session, Message msg,
-      {int maxLength = 60}) {
+  String _contentPreview(
+    ChannelSession session,
+    Message msg, {
+    int maxLength = 60,
+  }) {
     final content = session.contentOf(msg);
     if (content is TextContent) {
       return content.text.length > maxLength
@@ -5278,7 +5379,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Computes reactions for a message: {emoji: [authorHex, ...]}.
   /// A second react with the same emoji from the same author = toggle off.
   Map<String, List<String>> _reactionsFor(
-      ChannelSession session, String messageId) {
+    ChannelSession session,
+    String messageId,
+  ) {
     final reactions = <String, Set<String>>{};
     for (final msg in session.repository.ordered()) {
       final content = session.contentOf(msg);
@@ -5317,8 +5420,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHigh
-                  .withAlpha(100),
+              color: Theme.of(
+                context,
+              ).colorScheme.surfaceContainerHigh.withAlpha(100),
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(12),
                 topRight: Radius.circular(12),
@@ -5383,12 +5487,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if ((_pinnedMessages[session.channelId] ?? {})
-                      .contains(message.idHex))
+                  if ((_pinnedMessages[session.channelId] ?? {}).contains(
+                    message.idHex,
+                  ))
                     Padding(
                       padding: const EdgeInsets.only(right: 3),
-                      child: Icon(Icons.push_pin, size: 10,
-                          color: scheme.onSurfaceVariant),
+                      child: Icon(
+                        Icons.push_pin,
+                        size: 10,
+                        color: scheme.onSurfaceVariant,
+                      ),
                     ),
                   Text(
                     _time(message.timestampMs),
@@ -5397,10 +5505,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       fontSize: 10,
                     ),
                   ),
-                  if (mine) Padding(
-                    padding: const EdgeInsets.only(left: 3),
-                    child: _tickIcon(session, message),
-                  ),
+                  if (mine)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 3),
+                      child: _tickIcon(session, message),
+                    ),
                 ],
               ),
             ),
@@ -5413,7 +5522,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     Widget? quoteWidget;
     if (content.replyTo != null) {
       final original = session.repository.ordered().cast<Message?>().firstWhere(
-          (m) => m!.idHex == content.replyTo, orElse: () => null);
+        (m) => m!.idHex == content.replyTo,
+        orElse: () => null,
+      );
       if (original != null) {
         final origText = _contentPreview(session, original);
         final origName = _displayName(original.author);
@@ -5422,24 +5533,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           decoration: BoxDecoration(
             border: Border(
-              left: BorderSide(
-                color: _userColor(original.author),
-                width: 3,
-              ),
+              left: BorderSide(color: _userColor(original.author), width: 3),
             ),
-            color: Theme.of(context).colorScheme.surfaceContainerHigh
-                .withAlpha(80),
+            color: Theme.of(
+              context,
+            ).colorScheme.surfaceContainerHigh.withAlpha(80),
             borderRadius: BorderRadius.circular(4),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(origName,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: _userColor(original.author),
-                  )),
+              Text(
+                origName,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: _userColor(original.author),
+                ),
+              ),
               Text(
                 origText,
                 style: const TextStyle(fontSize: 11),
@@ -5453,8 +5564,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final bubbleWithQuote = quoteWidget != null
         ? Column(
-            crossAxisAlignment:
-                mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            crossAxisAlignment: mine
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
             children: [quoteWidget, bubble],
           )
         : bubble;
@@ -5463,8 +5575,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final bubbleFinal = reactions.isEmpty
         ? bubbleWithQuote
         : Column(
-            crossAxisAlignment:
-                mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            crossAxisAlignment: mine
+                ? CrossAxisAlignment.end
+                : CrossAxisAlignment.start,
             children: [
               bubbleWithQuote,
               Padding(
@@ -5474,11 +5587,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   children: [
                     for (final entry in reactions.entries)
                       GestureDetector(
-                        onTap: () => unawaited(_publish(
-                            ReactionContent(message.idHex, entry.key))),
+                        onTap: () => unawaited(
+                          _publish(ReactionContent(message.idHex, entry.key)),
+                        ),
                         child: TweenAnimationBuilder<double>(
-                          key: ValueKey(
-                              '${entry.key}:${entry.value.length}'),
+                          key: ValueKey('${entry.key}:${entry.value.length}'),
                           tween: Tween(begin: 1.3, end: 1.0),
                           duration: const Duration(milliseconds: 300),
                           curve: Curves.elasticOut,
@@ -5486,16 +5599,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               Transform.scale(scale: scale, child: child),
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
+                              horizontal: 6,
+                              vertical: 2,
+                            ),
                             decoration: BoxDecoration(
-                              color: entry.value.contains(
-                                      widget.identity.publicKeyHex)
-                                  ? Theme.of(context)
-                                      .colorScheme
-                                      .primaryContainer
-                                  : Theme.of(context)
-                                      .colorScheme
-                                      .surfaceContainerHigh,
+                              color:
+                                  entry.value.contains(
+                                    widget.identity.publicKeyHex,
+                                  )
+                                  ? Theme.of(
+                                      context,
+                                    ).colorScheme.primaryContainer
+                                  : Theme.of(
+                                      context,
+                                    ).colorScheme.surfaceContainerHigh,
                               borderRadius: BorderRadius.circular(10),
                             ),
                             child: Text(
@@ -5629,92 +5746,92 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           Row(
             children: [
               IconButton(
-            onPressed: () => unawaited(_insertEmoji()),
-            icon: const Icon(Icons.emoji_emotions_outlined),
-            tooltip: 'Emoji',
-            focusNode: FocusNode(skipTraversal: true),
-          ),
-          IconButton(
-            onPressed: () => unawaited(_sendGif()),
-            icon: const Icon(Icons.gif_box_outlined),
-            tooltip: 'GIF',
-            focusNode: FocusNode(skipTraversal: true),
-          ),
-          IconButton(
-            onPressed: () => unawaited(_sendSticker()),
-            icon: const Icon(Icons.image_outlined),
-            tooltip: 'Sticker',
-            focusNode: FocusNode(skipTraversal: true),
-          ),
-          IconButton(
-            onPressed: () => unawaited(_sendFile()),
-            icon: const Icon(Icons.attach_file),
-            tooltip: 'Attach file',
-            focusNode: FocusNode(skipTraversal: true),
-          ),
-          Expanded(
-            child: _composerOnFire
-                ? _FlameBox(
-                    child: TextField(
-                      controller: _input,
-                      focusNode: _composerFocus,
-                      onSubmitted: (_) {
-                        unawaited(_send());
-                        _composerFocus.requestFocus();
-                      },
-                      decoration: InputDecoration(
-                        hintText: 'Message ${_channelTitle(session)}',
-                        filled: true,
-                        fillColor: Theme.of(
-                          context,
-                        ).colorScheme.surfaceContainerHighest,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 10,
-                        ),
-                      ),
-                    ),
-                  )
-                : TextField(
-                    controller: _input,
-                    focusNode: _composerFocus,
-                    onSubmitted: (_) {
-                      unawaited(_send());
-                      _composerFocus.requestFocus();
-                    },
-                    decoration: InputDecoration(
-                      hintText: 'Message ${_channelTitle(session)}',
-                      filled: true,
-                      fillColor: Theme.of(
-                        context,
-                      ).colorScheme.surfaceContainerHighest,
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
-                      ),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 10,
-                      ),
-                    ),
-                  ),
-          ),
-          const SizedBox(width: 8),
-          _PressableScale(
-            child: IconButton.filled(
-              style: IconButton.styleFrom(
-                backgroundColor: _channelAccent(session),
+                onPressed: () => unawaited(_insertEmoji()),
+                icon: const Icon(Icons.emoji_emotions_outlined),
+                tooltip: 'Emoji',
+                focusNode: FocusNode(skipTraversal: true),
               ),
-              onPressed: _sending ? null : () => unawaited(_send()),
-              icon: const Icon(Icons.send),
-            ),
+              IconButton(
+                onPressed: () => unawaited(_sendGif()),
+                icon: const Icon(Icons.gif_box_outlined),
+                tooltip: 'GIF',
+                focusNode: FocusNode(skipTraversal: true),
+              ),
+              IconButton(
+                onPressed: () => unawaited(_sendSticker()),
+                icon: const Icon(Icons.image_outlined),
+                tooltip: 'Sticker',
+                focusNode: FocusNode(skipTraversal: true),
+              ),
+              IconButton(
+                onPressed: () => unawaited(_sendFile()),
+                icon: const Icon(Icons.attach_file),
+                tooltip: 'Attach file',
+                focusNode: FocusNode(skipTraversal: true),
+              ),
+              Expanded(
+                child: _composerOnFire
+                    ? _FlameBox(
+                        child: TextField(
+                          controller: _input,
+                          focusNode: _composerFocus,
+                          onSubmitted: (_) {
+                            unawaited(_send());
+                            _composerFocus.requestFocus();
+                          },
+                          decoration: InputDecoration(
+                            hintText: 'Message ${_channelTitle(session)}',
+                            filled: true,
+                            fillColor: Theme.of(
+                              context,
+                            ).colorScheme.surfaceContainerHighest,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16,
+                              vertical: 10,
+                            ),
+                          ),
+                        ),
+                      )
+                    : TextField(
+                        controller: _input,
+                        focusNode: _composerFocus,
+                        onSubmitted: (_) {
+                          unawaited(_send());
+                          _composerFocus.requestFocus();
+                        },
+                        decoration: InputDecoration(
+                          hintText: 'Message ${_channelTitle(session)}',
+                          filled: true,
+                          fillColor: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 10,
+                          ),
+                        ),
+                      ),
+              ),
+              const SizedBox(width: 8),
+              _PressableScale(
+                child: IconButton.filled(
+                  style: IconButton.styleFrom(
+                    backgroundColor: _channelAccent(session),
+                  ),
+                  onPressed: _sending ? null : () => unawaited(_send()),
+                  icon: const Icon(Icons.send),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
         ],
       ),
     );
@@ -6224,9 +6341,10 @@ class _PressableScaleState extends State<_PressableScale>
       vsync: this,
       duration: const Duration(milliseconds: 100),
     );
-    _scale = Tween(begin: 1.0, end: 0.93).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
+    _scale = Tween(
+      begin: 1.0,
+      end: 0.93,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeInOut));
   }
 
   @override

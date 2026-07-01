@@ -68,6 +68,10 @@ class WebRtcMesh {
   /// The relay currently being used (follows failover).
   Uri get activeUrl => _activeUrl;
 
+  /// Last time the primary relay was confirmed reachable — used to periodically
+  /// re-prefer it after a failover so we don't stay pinned to a fallback forever.
+  DateTime _primaryOkAt = DateTime.now();
+
   /// Channel everyone in this mesh shares.
   final String channel;
 
@@ -240,6 +244,15 @@ class WebRtcMesh {
         'ts': ts,
         'sig': sig,
       });
+      // Re-probe the primary ~once a minute so we return to it after it
+      // recovers — otherwise failover is sticky and we'd stay on a fallback
+      // indefinitely even once the primary is healthy again.
+      if (_activeUrl != baseUrl &&
+          DateTime.now().difference(_primaryOkAt) >
+              const Duration(seconds: 60)) {
+        _activeUrl = baseUrl;
+        _primaryOkAt = DateTime.now();
+      }
       // Try active URL first, then fallbacks.
       final urls = {_activeUrl, ...fallbackUrls, baseUrl}.toList();
       for (final url in urls) {
@@ -253,6 +266,7 @@ class WebRtcMesh {
               .timeout(const Duration(seconds: 5));
           if (res.statusCode != 200) continue;
           _activeUrl = url;
+          if (url == baseUrl) _primaryOkAt = DateTime.now();
           final body = jsonDecode(res.body) as Map<String, dynamic>;
           _authToken = body['token'] as String?;
           for (final peer in (body['peers'] as List).cast<String>().take(
@@ -672,8 +686,10 @@ class _PeerLink implements FrameChannel {
       final frame = SyncFrame.decode(split.body);
       if (frame != null && !_frames.isClosed) _frames.add(frame);
       if (frame == null && message.isBinary) {
-        debugPrint('[hearth] dropped malformed binary frame '
-            '(${message.binary.length} bytes) from $peerHex');
+        debugPrint(
+          '[hearth] dropped malformed binary frame '
+          '(${message.binary.length} bytes) from $peerHex',
+        );
       }
     };
     channel.onDataChannelState = (state) {

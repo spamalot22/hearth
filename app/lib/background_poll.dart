@@ -24,7 +24,8 @@ void backgroundFetchHeadlessTask(HeadlessEvent event) async {
 
 /// Configures background fetch. Call once on app startup (Android/iOS only).
 Future<void> initBackgroundFetch() async {
-  if (kIsWeb || defaultTargetPlatform == TargetPlatform.windows ||
+  if (kIsWeb ||
+      defaultTargetPlatform == TargetPlatform.windows ||
       defaultTargetPlatform == TargetPlatform.linux ||
       defaultTargetPlatform == TargetPlatform.macOS) {
     return;
@@ -52,14 +53,33 @@ Future<void> initBackgroundFetch() async {
 
 /// Saves relay state so the headless isolate can poll independently.
 /// Call this whenever channels or relay URL change.
+///
+/// [cursors] seeds each channel's poll cursor with the relay seq the foreground
+/// has already caught up to, so the background poll only counts genuinely-new
+/// messages — never the whole backlog, never messages already read in-app. A
+/// cursor is only ever advanced, never rewound. [selfAuthor] is the local
+/// identity's base64url author key, used to skip our own echoed messages.
 Future<void> saveBackgroundPollState({
   required String relayUrl,
   required List<String> channelIds,
+  Map<String, int> cursors = const {},
+  String? selfAuthor,
 }) async {
   await Hive.initFlutter();
   final box = await Hive.openBox<String>('hearth.bg_poll');
   await box.put('relayUrl', relayUrl);
   await box.put('channels', channelIds.join(','));
+  if (selfAuthor != null) await box.put('self', selfAuthor);
+  if (cursors.isNotEmpty) {
+    final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
+    for (final entry in cursors.entries) {
+      // Only ever move the cursor forward — rewinding would re-notify messages
+      // a previous background poll already reported.
+      if (entry.value > (cursorBox.get(entry.key) ?? 0)) {
+        await cursorBox.put(entry.key, entry.value);
+      }
+    }
+  }
 }
 
 /// Polls relay from Hive-stored state (works in headless isolate).
@@ -69,6 +89,7 @@ Future<void> _pollFromStorage() async {
     final box = await Hive.openBox<String>('hearth.bg_poll');
     final relayUrl = box.get('relayUrl');
     final channelsRaw = box.get('channels');
+    final selfAuthor = box.get('self');
 
     if (relayUrl == null || channelsRaw == null || channelsRaw.isEmpty) return;
 
@@ -78,11 +99,11 @@ Future<void> _pollFromStorage() async {
 
     var totalNew = 0;
     for (final channelId in channels) {
+      // First time we ever poll this channel in the background: establish the
+      // baseline silently instead of notifying for the entire backlog.
+      final hasBaseline = cursorBox.containsKey(channelId);
       final since = cursorBox.get(channelId) ?? 0;
-      final params = <String, String>{
-        'channel': channelId,
-        'since': '$since',
-      };
+      final params = <String, String>{'channel': channelId, 'since': '$since'};
 
       final res = await http.get(
         relay.replace(path: '/poll', queryParameters: params),
@@ -93,7 +114,12 @@ Future<void> _pollFromStorage() async {
       final messages = body['messages'] as List? ?? [];
       final seq = body['seq'] as int? ?? since;
       await cursorBox.put(channelId, seq);
-      totalNew += messages.length;
+      if (!hasBaseline) continue; // baseline just set — nothing to report yet
+      // Count new messages, excluding our own (the relay echoes them back).
+      for (final m in messages) {
+        if (m is Map && m['author'] == selfAuthor) continue;
+        totalNew++;
+      }
     }
 
     if (totalNew > 0) {

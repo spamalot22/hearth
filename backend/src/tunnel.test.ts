@@ -54,6 +54,31 @@ describe('tunnel', () => {
       expect(hub.drain('alice', 'bob', 1001)).toEqual(['a2b']);
       expect(hub.drain('bob', 'alice', 1001)).toEqual(['b2a']);
     });
+
+    it('evicts the oldest pair once over the pair cap', () => {
+      const hub = new TunnelHub();
+      // Simulate an attacker posting to many never-drained recipients. The
+      // first pair should be evicted (LRU) rather than growing unbounded.
+      for (let i = 0; i < 10_001; i++) {
+        hub.post('attacker', `victim${i}`, 'x', 1000);
+      }
+      // The very first pair was pushed out; a recent one survives.
+      expect(hub.drain('attacker', 'victim0', 1001)).toEqual([]);
+      expect(hub.drain('attacker', 'victim10000', 1001)).toEqual(['x']);
+    });
+
+    it('re-posting an existing pair keeps it fresh (LRU touch)', () => {
+      const hub = new TunnelHub();
+      hub.post('attacker', 'victim0', 'keep', 1000);
+      for (let i = 1; i < 10_000; i++) {
+        hub.post('attacker', `victim${i}`, 'x', 1000);
+      }
+      // Touch victim0 so it is no longer the oldest, then overflow by one.
+      hub.post('attacker', 'victim0', 'keep2', 1001);
+      hub.post('attacker', 'victim-new', 'x', 1002);
+      // victim0 survived because the touch moved it to the end.
+      expect(hub.drain('attacker', 'victim0', 1003)).toEqual(['keep', 'keep2']);
+    });
   });
 
   describe('POST /tunnel', () => {

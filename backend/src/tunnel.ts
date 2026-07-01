@@ -22,6 +22,10 @@ function bearerToken(c: { req: { header(name: string): string | undefined } }): 
 
 const TUNNEL_TTL_MS = 30_000;
 const MAX_BUFFER = 100;
+// Cap distinct (from|to) pairs. Undrained buffers to peers that never poll
+// (e.g. an attacker posting to random `to` values) would otherwise grow the map
+// without bound — the TTL only fires on drain.
+const MAX_PAIRS = 10_000;
 
 interface TunnelEntry {
   data: string;
@@ -34,10 +38,18 @@ export class TunnelHub {
 
   post(from: string, to: string, data: string, nowMs: number): void {
     const key = `${from}|${to}`;
+    // Touch for LRU: delete + re-insert so active pairs move to the end and the
+    // oldest pair sits at the front for eviction.
     const buf = this.buffers.get(key) ?? [];
+    this.buffers.delete(key);
     buf.push({ data, ts: nowMs });
     if (buf.length > MAX_BUFFER) buf.splice(0, buf.length - MAX_BUFFER);
     this.buffers.set(key, buf);
+    // Evict the least-recently-posted pair once over the cap.
+    if (this.buffers.size > MAX_PAIRS) {
+      const oldest = this.buffers.keys().next().value;
+      if (oldest !== undefined) this.buffers.delete(oldest);
+    }
   }
 
   /** Drains buffered frames for [to] from [from], pruning stale entries. */

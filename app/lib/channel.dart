@@ -100,6 +100,10 @@ class ChannelSession {
   /// The underlying WebRTC mesh (for peer count / connectivity status).
   WebRtcMesh? get mesh => _mesh;
 
+  /// The relay poll cursor (seq) the courier has caught up to, or null if this
+  /// session has no live courier. Used to seed the background poller's baseline.
+  int? get relaySince => _relayCourier?.since;
+
   static Future<ChannelSession> open({
     required String channelId,
     required Identity identity,
