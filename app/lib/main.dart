@@ -1212,7 +1212,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               Center(
                 child: QrImageView(
                   data: phrase,
-                  size: 200,
+                  size: 240, // the 24-word phrase is denser than the old code
                   backgroundColor: Colors.white,
                 ),
               ),
@@ -1318,9 +1318,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (code == null || code.trim().isEmpty) return;
     // Decode the 24-word recovery phrase. A scanned QR encodes the same phrase,
     // so this handles both. Null if a word is unknown or the checksum fails.
+    // Require a 32-byte seed: a shorter but valid BIP39 phrase (e.g. a 12-word
+    // wallet phrase) would otherwise be written and then brick the next launch,
+    // since Ed25519 key derivation needs exactly 32 bytes.
     final seed = await mnemonicToSeed(code.trim());
-    if (seed == null) {
-      if (mounted) _setError('invalid recovery phrase');
+    if (seed == null || seed.length != 32) {
+      if (mounted) _setError('invalid recovery phrase (need a 24-word phrase)');
       return;
     }
     if (!mounted) return;

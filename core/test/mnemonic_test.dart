@@ -70,6 +70,18 @@ void main() {
       expect(await mnemonicToSeed('abandon abandon abandon'), isNull);
     });
 
+    test('a valid 12-word phrase decodes to a 16-byte seed', () async {
+      // Callers that need a 32-byte Ed25519 seed must check the length: a valid
+      // shorter phrase (e.g. a 12-word wallet phrase) decodes fine but is not a
+      // usable identity seed.
+      final seed = await mnemonicToSeed(
+        'abandon abandon abandon abandon abandon abandon '
+        'abandon abandon abandon abandon abandon about',
+      );
+      expect(seed, isNotNull);
+      expect(seed, hasLength(16));
+    });
+
     test('is case- and whitespace-insensitive on decode', () async {
       final seed = Uint8List.fromList(List<int>.filled(32, 0x7f));
       final phrase = await seedToMnemonic(seed);
