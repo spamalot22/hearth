@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Drives the real app widget tree (autoPoll off → everything in-memory, no mesh)
-// through the recent messaging-UX features: create a channel, send a message,
-// then react / pin / reply on it. This is the running app, driven the way a user
-// drives it — taps and text, asserting the resulting widget tree.
+// through the recent messaging-UX features, the way a user drives it — taps and
+// text, asserting the resulting widget tree. Covers: create/send, react (+ the
+// toggle-off), pin, reply, in-channel search, per-channel mute, QR invite, and
+// the "switching channels clears the reply draft" fix.
 //
-// Non-fatal FlutterErrors (framework layout warnings) are drained and surfaced
-// via `warnings` rather than failing the flow, so we assert on real behaviour;
-// the warnings themselves are reported as verification findings.
+// Non-fatal FlutterErrors are drained into `warnings` (reset per test) and each
+// test asserts it stayed empty, so a stray framework notice can't silently mask
+// the behavioural assertions.
 import 'package:core/core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/main.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 final warnings = <String>{};
 
@@ -37,9 +39,25 @@ Future<void> _boot(WidgetTester tester) async {
 }
 
 Future<void> _createChannel(WidgetTester tester, String name) async {
-  await tester.tap(find.widgetWithText(FilledButton, 'Create a channel'));
+  // Empty state has a FilledButton; once a channel exists, use the drawer entry.
+  final fab = find.widgetWithText(FilledButton, 'Create a channel');
+  if (fab.evaluate().isNotEmpty) {
+    await tester.tap(fab);
+  } else {
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await _settle(tester);
+    await tester.tap(find.widgetWithText(ListTile, 'Create a channel'));
+  }
   await _settle(tester);
-  await tester.enterText(find.byType(TextField), name);
+  // Scope to the dialog's field — once a channel exists, its composer TextField
+  // is also on screen, so a bare find.byType(TextField) would be ambiguous.
+  await tester.enterText(
+    find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    ),
+    name,
+  );
   await tester.tap(find.widgetWithText(FilledButton, 'Create'));
   await _settle(tester);
 }
@@ -50,19 +68,24 @@ Future<void> _send(WidgetTester tester, String text) async {
   await _settle(tester);
 }
 
-Future<void> _openActions(WidgetTester tester) async {
-  await tester.longPress(find.text('hello world').first);
+Future<void> _openActions(WidgetTester tester, String messageText) async {
+  await tester.longPress(find.text(messageText).first);
   await _settle(tester);
 }
 
+Future<void> _finish(WidgetTester tester) async {
+  await tester.pump(const Duration(seconds: 6)); // let one-shot timers fire
+  _drain(tester);
+  expect(warnings, isEmpty, reason: 'unexpected framework warnings: $warnings');
+}
+
 void main() {
-  testWidgets('create → send → react → pin → reply all drive the real UI', (
-    tester,
-  ) async {
+  setUp(warnings.clear);
+
+  testWidgets('create → send → react → pin → reply', (tester) async {
     await _boot(tester);
     expect(find.text('Welcome to Hearth'), findsOneWidget);
 
-    // Create a channel → the channel view (composer) renders.
     await _createChannel(tester, 'test channel');
     expect(
       find.text('Message test channel'),
@@ -70,7 +93,6 @@ void main() {
       reason: 'composer should render after create',
     );
 
-    // Send a message locally (no mesh) → its bubble renders.
     await _send(tester, 'hello world');
     expect(
       find.text('hello world'),
@@ -78,52 +100,155 @@ void main() {
       reason: 'a locally-sent message should render its bubble',
     );
 
-    // React: long-press → tap 👍 → a reaction chip appears on the message.
-    await _openActions(tester);
-    expect(
-      find.text('👍'),
-      findsOneWidget,
-      reason: 'quick-emoji row should show',
-    );
+    await _openActions(tester, 'hello world');
+    expect(find.text('👍'), findsOneWidget, reason: 'quick-emoji row shows');
     await tester.tap(find.text('👍'));
     await _settle(tester);
     expect(
       find.textContaining('👍'),
       findsWidgets,
-      reason: 'reaction chip should render after reacting',
+      reason: 'reaction chip renders after reacting',
     );
 
-    // Pin: long-press → Pin → a pin indicator appears.
-    await _openActions(tester);
+    await _openActions(tester, 'hello world');
     await tester.tap(find.text('Pin'));
     await _settle(tester);
     expect(
       find.byIcon(Icons.push_pin),
       findsWidgets,
-      reason: 'pin indicator should render after pinning',
+      reason: 'pin indicator renders after pinning',
     );
 
-    // Reply: long-press → Reply → the composer shows a reply preview banner,
-    // which duplicates the quoted text (so it now appears twice).
-    await _openActions(tester);
+    await _openActions(tester, 'hello world');
     await tester.tap(find.text('Reply'));
     await _settle(tester);
     expect(
       find.text('hello world'),
       findsNWidgets(2),
-      reason: 'reply banner should quote the message above the composer',
+      reason: 'reply banner quotes the message above the composer',
     );
 
-    // Let any pending one-shot animation timers fire before teardown.
-    await tester.pump(const Duration(seconds: 6));
-    _drain(tester);
+    await _finish(tester);
+  });
 
-    // `warnings` should stay empty now; the drain is defensive so a stray
-    // non-fatal framework notice can't mask the behavioural assertions above.
+  testWidgets('reacting with the same emoji twice toggles it off', (
+    tester,
+  ) async {
+    await _boot(tester);
+    await _createChannel(tester, 'general');
+    await _send(tester, 'toggle me');
+
+    await _openActions(tester, 'toggle me');
+    await tester.tap(find.text('❤️'));
+    await _settle(tester);
+    expect(find.textContaining('❤️'), findsWidgets, reason: 'chip appears');
+
+    await _openActions(tester, 'toggle me');
+    await tester.tap(find.text('❤️'));
+    await _settle(tester);
     expect(
-      warnings,
-      isEmpty,
-      reason: 'unexpected framework warnings: $warnings',
+      find.textContaining('❤️'),
+      findsNothing,
+      reason: 'same emoji from the same author toggles the reaction off',
     );
+
+    await _finish(tester);
+  });
+
+  testWidgets('in-channel search filters to matching messages', (tester) async {
+    await _boot(tester);
+    await _createChannel(tester, 'general');
+    await _send(tester, 'apples and oranges');
+    await _send(tester, 'bananas');
+
+    await tester.tap(find.byTooltip('Search messages'));
+    await _settle(tester);
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Search messages…'),
+      'banana',
+    );
+    await _settle(tester);
+    // The sheet is modal over the chat, so each message's own bubble is still in
+    // the tree behind it. A match appears twice (bubble + result row); a non-match
+    // appears once (only its background bubble, not in the results).
+    expect(
+      find.text('bananas'),
+      findsNWidgets(2),
+      reason: 'match shows in results',
+    );
+    expect(
+      find.text('apples and oranges'),
+      findsOneWidget,
+      reason: 'non-matching message is filtered out of the results',
+    );
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Search messages…'),
+      'zzzzz',
+    );
+    await _settle(tester);
+    expect(find.text('No results'), findsOneWidget);
+
+    await _finish(tester);
+  });
+
+  testWidgets('per-channel mute toggle flips on', (tester) async {
+    await _boot(tester);
+    await _createChannel(tester, 'general');
+
+    final muteTile = find.widgetWithText(SwitchListTile, 'Mute notifications');
+    expect(tester.widget<SwitchListTile>(muteTile).value, isFalse);
+    await tester.tap(muteTile);
+    await _settle(tester);
+    expect(
+      tester.widget<SwitchListTile>(muteTile).value,
+      isTrue,
+      reason: 'muting a channel flips its switch on',
+    );
+
+    await _finish(tester);
+  });
+
+  testWidgets('invite dialog renders a QR code', (tester) async {
+    await _boot(tester);
+    await _createChannel(tester, 'general');
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Invite'));
+    await _settle(tester);
+    expect(
+      find.byType(QrImageView),
+      findsOneWidget,
+      reason: 'the invite dialog shows a scannable QR code',
+    );
+
+    await _finish(tester);
+  });
+
+  testWidgets('switching channels clears the reply draft', (tester) async {
+    await _boot(tester);
+    await _createChannel(tester, 'alpha');
+    await _createChannel(tester, 'bravo'); // now active
+    await _send(tester, 'bravo message');
+
+    // Start a reply on bravo → the banner quotes it (text appears twice).
+    await _openActions(tester, 'bravo message');
+    await tester.tap(find.text('Reply'));
+    await _settle(tester);
+    expect(find.text('bravo message'), findsNWidgets(2));
+
+    // Switch to alpha via the drawer.
+    await tester.tap(find.byTooltip('Open navigation menu'));
+    await _settle(tester);
+    await tester.tap(find.widgetWithText(ListTile, 'alpha'));
+    await _settle(tester);
+
+    expect(find.text('Message alpha'), findsOneWidget, reason: 'now on alpha');
+    expect(
+      find.text('bravo message'),
+      findsNothing,
+      reason: 'the reply draft (and its quoted preview) is cleared on switch',
+    );
+
+    await _finish(tester);
   });
 }
