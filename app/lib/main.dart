@@ -252,11 +252,29 @@ class _HearthTrayListener extends TrayListener {
   }
 }
 
+/// Test-only seam: lets a widget test simulate a peer's frames arriving (a mesh
+/// control, or a received message) without a real WebRTC peer, so two-peer
+/// receive-and-render behaviour (read-receipt ticks, block redaction) can be
+/// driven. Bound by [ChatScreen] once its state is live.
+@visibleForTesting
+class HearthTestApi {
+  /// Delivers a control as if it arrived from peer [fromHex] over the mesh.
+  late void Function(String fromHex, String channelId, MeshControl control)
+  injectControl;
+
+  /// The active channel session (for its cipher, repository, publish).
+  late ChannelSession? Function() activeChannel;
+
+  /// Re-decrypts + re-renders the active channel (call after injecting a message).
+  late Future<void> Function() refresh;
+}
+
 class HearthApp extends StatelessWidget {
   const HearthApp({
     required this.keyStore,
     this.relayUrl,
     this.autoPoll = true,
+    this.testApi,
     super.key,
   });
 
@@ -265,6 +283,9 @@ class HearthApp extends StatelessWidget {
 
   /// Disabled in widget tests so there's no background polling timer.
   final bool autoPoll;
+
+  /// Test-only seam for injecting simulated peer frames. Null in production.
+  final HearthTestApi? testApi;
 
   @override
   Widget build(BuildContext context) {
@@ -298,6 +319,7 @@ class HearthApp extends StatelessWidget {
         keyStore: keyStore,
         relayUrl: relayUrl ?? kRelayUrl,
         autoPoll: autoPoll,
+        testApi: testApi,
       ),
     );
   }
@@ -309,11 +331,13 @@ class _Bootstrap extends StatefulWidget {
     required this.keyStore,
     required this.relayUrl,
     required this.autoPoll,
+    this.testApi,
   });
 
   final KeyStore keyStore;
   final Uri relayUrl;
   final bool autoPoll;
+  final HearthTestApi? testApi;
 
   @override
   State<_Bootstrap> createState() => _BootstrapState();
@@ -346,6 +370,7 @@ class _BootstrapState extends State<_Bootstrap> {
           relayUrl: widget.relayUrl,
           keyStore: widget.keyStore,
           autoPoll: widget.autoPoll,
+          testApi: widget.testApi,
         );
       },
     );
@@ -358,6 +383,7 @@ class ChatScreen extends StatefulWidget {
     required this.relayUrl,
     required this.keyStore,
     this.autoPoll = true,
+    this.testApi,
     super.key,
   });
 
@@ -365,6 +391,7 @@ class ChatScreen extends StatefulWidget {
   final Uri relayUrl;
   final KeyStore keyStore;
   final bool autoPoll;
+  final HearthTestApi? testApi;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -517,6 +544,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _input.addListener(_onInputChanged);
     _scroll.addListener(_onScroll);
+    widget.testApi
+      ?..injectControl = _handleMeshControl
+      ..activeChannel = (() => _channels?.active)
+      ..refresh = _refresh;
     unawaited(_init());
   }
 

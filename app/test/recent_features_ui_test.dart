@@ -11,7 +11,9 @@
 import 'package:core/core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/content.dart';
 import 'package:hearth/main.dart';
+import 'package:hearth/mesh_control.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 final warnings = <String>{};
@@ -219,6 +221,97 @@ void main() {
       find.byType(QrImageView),
       findsOneWidget,
       reason: 'the invite dialog shows a scannable QR code',
+    );
+
+    await _finish(tester);
+  });
+
+  testWidgets('a peer read-watermark turns my message tick blue', (
+    tester,
+  ) async {
+    final api = HearthTestApi();
+    await tester.pumpWidget(
+      HearthApp(keyStore: InMemoryKeyStore(), autoPoll: false, testApi: api),
+    );
+    await _settle(tester);
+    await _createChannel(tester, 'general');
+    await _send(tester, 'ping');
+
+    // Before any peer reads it: a grey single-check (sent, not delivered/read).
+    final before = tester.widget<Icon>(find.byIcon(Icons.done));
+    expect(before.color, Colors.grey);
+
+    // Simulate a peer reporting they've read up to my message.
+    final session = api.activeChannel()!;
+    final msgId = session.repository.ordered().last.idHex;
+    api.injectControl(
+      'peer-pubkey-hex',
+      session.channelId,
+      ReadWatermarkControl(channelId: session.channelId, messageId: msgId),
+    );
+    await _settle(tester);
+
+    // Now it's a blue double-check (read).
+    final after = tester.widget<Icon>(find.byIcon(Icons.done_all));
+    expect(after.icon, Icons.done_all);
+    expect(
+      after.color,
+      anyOf(Colors.blue, Colors.blue.shade200),
+      reason: 'a received read-watermark should render a blue read tick',
+    );
+
+    await _finish(tester);
+  });
+
+  testWidgets('blocking a peer redacts their messages', (tester) async {
+    final api = HearthTestApi();
+    await tester.pumpWidget(
+      HearthApp(keyStore: InMemoryKeyStore(), autoPoll: false, testApi: api),
+    );
+    await _settle(tester);
+    await _createChannel(tester, 'general');
+
+    // Craft a message from a second identity, encrypted to this channel's key,
+    // and inject it as if it arrived over the mesh.
+    final session = api.activeChannel()!;
+    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
+    final payload = await session.cipher.encrypt(
+      const TextContent('secret msg').encode(),
+    );
+    final foreign = await Message.create(
+      author: peer,
+      channel: session.channelId,
+      payload: payload,
+    );
+    await session.publish(foreign);
+    await api.refresh();
+    await _settle(tester);
+    expect(
+      find.text('secret msg'),
+      findsOneWidget,
+      reason: 'a peer-authored message renders',
+    );
+
+    // Tap the peer's avatar → Block.
+    final row = find
+        .ancestor(of: find.text('secret msg'), matching: find.byType(Row))
+        .first;
+    await tester.tap(
+      find.descendant(of: row, matching: find.byType(GestureDetector)).first,
+    );
+    await _settle(tester);
+    await tester.tap(find.text('Block'));
+    await _settle(tester);
+
+    expect(
+      find.text('secret msg'),
+      findsNothing,
+      reason: 'a blocked author\'s message is hidden',
+    );
+    expect(
+      find.text('Blocked message'),
+      findsOneWidget,
+      reason: 'and replaced with a redacted placeholder',
     );
 
     await _finish(tester);
