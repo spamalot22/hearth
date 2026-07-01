@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import 'dart:typed_data';
+
+import 'package:convert/convert.dart';
+import 'package:core/core.dart';
+import 'package:test/test.dart';
+
+void main() {
+  group('BIP39 mnemonic codec', () {
+    test('wordlist is the canonical 2048 words', () {
+      expect(bip39Words, hasLength(2048));
+      expect(bip39Words.first, 'abandon');
+      expect(bip39Words.last, 'zoo');
+    });
+
+    // Official BIP39 English test vectors (entropy -> mnemonic).
+    test('matches the all-zero 16-byte vector (12 words)', () async {
+      final entropy = Uint8List(16); // all zeros
+      expect(
+        await seedToMnemonic(entropy),
+        'abandon abandon abandon abandon abandon abandon '
+        'abandon abandon abandon abandon abandon about',
+      );
+    });
+
+    test('matches the all-zero 32-byte vector (24 words)', () async {
+      final entropy = Uint8List(32); // all zeros
+      final m = await seedToMnemonic(entropy);
+      expect(m.split(' '), hasLength(24));
+      expect(m.endsWith('art'), isTrue); // known 256-bit all-zero checksum word
+    });
+
+    test('matches the 0x7f... 32-byte vector', () async {
+      final entropy = Uint8List.fromList(List<int>.filled(32, 0x7f));
+      expect(
+        await seedToMnemonic(entropy),
+        'legal winner thank year wave sausage worth useful legal winner thank '
+        'year wave sausage worth useful legal winner thank year wave sausage '
+        'worth title',
+      );
+    });
+
+    test('round-trips an arbitrary 32-byte seed', () async {
+      final seed = Uint8List.fromList(
+        hex.decode(
+          'a1b2c3d4e5f6071819202122232425262728292a2b2c2d2e2f30313233343536',
+        ),
+      );
+      final phrase = await seedToMnemonic(seed);
+      expect(phrase.split(' '), hasLength(24));
+      expect(await mnemonicToSeed(phrase), seed);
+    });
+
+    test('rejects a phrase with a bad checksum (one word changed)', () async {
+      final seed = Uint8List(32);
+      final words = (await seedToMnemonic(seed)).split(' ');
+      // Flip the first word to a different valid word → checksum must fail.
+      words[0] = words[0] == 'abandon' ? 'ability' : 'abandon';
+      expect(await mnemonicToSeed(words.join(' ')), isNull);
+    });
+
+    test('rejects an unknown word', () async {
+      final seed = Uint8List(32);
+      final words = (await seedToMnemonic(seed)).split(' ');
+      words[5] = 'notaword';
+      expect(await mnemonicToSeed(words.join(' ')), isNull);
+    });
+
+    test('rejects a wrong-length phrase', () async {
+      expect(await mnemonicToSeed('abandon abandon abandon'), isNull);
+    });
+
+    test('is case- and whitespace-insensitive on decode', () async {
+      final seed = Uint8List.fromList(List<int>.filled(32, 0x7f));
+      final phrase = await seedToMnemonic(seed);
+      final messy = '  ${phrase.toUpperCase().replaceAll(' ', '   ')}  ';
+      expect(await mnemonicToSeed(messy), seed);
+    });
+
+    test('looksLikeMnemonic distinguishes phrases from codes', () {
+      expect(looksLikeMnemonic('abandon ' * 11 + 'about'), isTrue);
+      expect(looksLikeMnemonic('kQm3n8...'), isFalse); // base64-ish
+      expect(looksLikeMnemonic('deadbeef00'), isFalse); // hex-ish
+    });
+  });
+}

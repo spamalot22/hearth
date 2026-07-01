@@ -344,11 +344,18 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       (sealed-box per member); requires the membership above. **MLS** (Rust
       `openmls`) is the upgrade for forward secrecy + efficient key rotation. (DMs
       are already sealed-box-encrypted from Phase 2.)
-- [ ] Multi-device identity, two tiers: **(a) export/import** the root seed
-      (recovery phrase / QR) — the simple "same key on another device" path, and
-      also the *only* identity **backup/recovery** mechanism; **(b) per-device
-      subkeys** certified by a root key — adds per-device revocation. Until this
-      ships there is **no identity backup**: clearing storage loses the key.
+- Multi-device identity, two tiers:
+      - [x] **(a) export/import the root seed** — DONE. A settings "reveal
+        recovery phrase" screen shows a **BIP39 24-word mnemonic** (+ a QR
+        encoding the same phrase) with a copy-and-auto-clear; restore accepts the
+        phrase (checksum-validated, so a mistyped word is rejected rather than
+        silently restoring the wrong key) or scans the QR, and still accepts the
+        legacy base64/hex codes. This is both "same key on another device" and
+        the identity **backup/recovery** mechanism. Codec lives in `core`
+        (`mnemonic.dart`, BIP39-vector-tested).
+      - [ ] **(b) per-device subkeys** certified by a root key — adds per-device
+        revocation. Not built: "multi-device" today means copying the same root
+        seed to each device.
 - [x] **Address cache + peer-exchange** — clients cache contacts'/members'
       last-known WebRTC candidates and gossip current ones over the mesh, so
       reconnects mostly skip the server (server = cold-start fallback only).
@@ -510,7 +517,8 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - **2026-06-21** — **Deferred all multi-device identity (incl. export/import) to
   Phase 3**, to keep Phase 2 on the delivery core (local persistence, gossip, DM
   encryption). Trade accepted for now: no identity backup until then — clearing a
-  device's storage loses that key irrecoverably.
+  device's storage loses that key irrecoverably. *(Resolved: seed export/import
+  shipped — see 2026-07-01 below.)*
 - **2026-06-21** — **Known robustness gaps** (found while testing, deferred): the
   dev relay's signal mailboxes never expire, so a long-lived relay accumulates
   stale offers a freshly-loaded client re-fetches (`since=0`) and churns on; and
@@ -810,3 +818,15 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   (3) WebRTC failover is no longer sticky — the client re-probes the primary relay
   ~once a minute and returns to it after it recovers. (4) Read-watermark timestamp
   lookup is cache-guarded (no O(n) history scan per repeat watermark).
+- **2026-07-01** — **Identity backup upgraded to a BIP39 recovery phrase.** The
+  seed export/import already existed (QR + base64/hex code); replaced the raw code
+  as the primary human form with a **24-word BIP39 mnemonic** — easier to write
+  down and, crucially, **checksummed**, so a mistyped/transposed word is rejected
+  instead of silently restoring a *different* identity (a raw base64/hex code
+  can't catch that). The QR now encodes the phrase too; restore accepts the phrase
+  or scans the QR, and still accepts the legacy base64/hex codes for backward
+  compatibility. Codec is a self-contained `core/mnemonic.dart` (the standard
+  entropy↔mnemonic mapping, *not* BIP39 PBKDF2 key-derivation — the seed already
+  is the Ed25519 key), verified against the official BIP39 English test vectors.
+  This closes the "no identity backup" gap flagged on 2026-06-21. Tier-b
+  (per-device subkeys + revocation) remains unbuilt.

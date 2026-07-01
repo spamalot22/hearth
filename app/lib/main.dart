@@ -1191,8 +1191,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// it's display-only with a warning.
   Future<void> _backupIdentity() async {
     final seed = await widget.identity.extractSeed();
-    final codeHex = hex.encode(seed);
-    final codeB64 = base64Url.encode(seed).replaceAll('=', '');
+    final phrase = await seedToMnemonic(seed);
     if (!mounted) return;
     await showDialog<void>(
       context: context,
@@ -1204,32 +1203,36 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text(
-                'Save this recovery code somewhere safe. Anyone who has it can '
-                'become you — never share it. It is the only way to restore your '
-                'identity if you lose this device.',
+                'Write these 24 words down in order and keep them somewhere '
+                'safe. Anyone who has them can become you — never share them. '
+                'They are the only way to restore your identity if you lose '
+                'this device.',
               ),
               const SizedBox(height: 16),
               Center(
                 child: QrImageView(
-                  data: codeB64,
+                  data: phrase,
                   size: 200,
                   backgroundColor: Colors.white,
                 ),
               ),
               const SizedBox(height: 16),
-              const Text('Recovery code:', style: TextStyle(fontSize: 12)),
+              const Text('Recovery phrase:', style: TextStyle(fontSize: 12)),
               const SizedBox(height: 4),
-              SelectableText(
-                codeB64,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 14),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Hex: $codeHex',
-                style: TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 10,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SelectableText(
+                  phrase,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 14,
+                    height: 1.6,
+                  ),
                 ),
               ),
             ],
@@ -1242,7 +1245,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ),
           FilledButton.icon(
             onPressed: () {
-              _copyAndClear(codeB64);
+              _copyAndClear(phrase);
               Navigator.pop(context);
             },
             icon: const Icon(Icons.copy),
@@ -1266,7 +1269,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         builder: (ctx) => AlertDialog(
           title: const Text('Restore identity'),
           content: const Text(
-            'Scan a QR code from another device, or paste a recovery code.',
+            'Scan a QR code from another device, or paste your recovery '
+            'phrase (or an older recovery code).',
           ),
           actions: [
             TextButton(
@@ -1300,14 +1304,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (code != null && code.isEmpty && mounted) {
         code = await _promptText(
           title: 'Restore identity',
-          hint: 'paste your recovery code',
+          hint: 'paste your recovery phrase or code',
           action: 'Restore',
         );
       }
     } else {
       code = await _promptText(
         title: 'Restore identity',
-        hint: 'paste your recovery code',
+        hint: 'paste your recovery phrase or code',
         action: 'Restore',
       );
     }
@@ -1315,11 +1319,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     Uint8List? seed;
     final trimmed = code.trim();
     try {
-      if (trimmed.length == 64 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(trimmed)) {
-        // Hex format (64 chars = 32 bytes).
+      if (looksLikeMnemonic(trimmed)) {
+        // BIP39 recovery phrase (24 words). Null if a word/checksum is wrong.
+        seed = await mnemonicToSeed(trimmed);
+      } else if (trimmed.length == 64 &&
+          RegExp(r'^[0-9a-fA-F]+$').hasMatch(trimmed)) {
+        // Legacy hex format (64 chars = 32 bytes).
         seed = Uint8List.fromList(hex.decode(trimmed));
       } else {
-        // Base64url format (43 chars without padding = 32 bytes).
+        // Legacy base64url format (43 chars without padding = 32 bytes).
         final padded = trimmed.padRight(
           trimmed.length + (4 - trimmed.length % 4) % 4,
           '=',
@@ -1331,7 +1339,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       seed = null;
     }
     if (seed == null) {
-      if (mounted) _setError('invalid recovery code');
+      if (mounted) _setError('invalid recovery phrase or code');
       return;
     }
     if (!mounted) return;
@@ -1805,7 +1813,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.key_outlined),
             title: const Text('Back up identity'),
-            subtitle: const Text('Export your recovery code'),
+            subtitle: const Text('Reveal your recovery phrase'),
             onTap: () {
               Navigator.pop(context);
               unawaited(_backupIdentity());
@@ -1815,7 +1823,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.restore),
             title: const Text('Restore identity'),
-            subtitle: const Text('Import a recovery code'),
+            subtitle: const Text('Restore from a recovery phrase'),
             onTap: () {
               Navigator.pop(context);
               unawaited(_restoreIdentity());
