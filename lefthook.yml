@@ -1,7 +1,9 @@
 # Git hooks for the Hearth monorepo — managed by Lefthook (https://lefthook.dev).
 #
 # One-time setup after cloning:  lefthook install
-# Fast checks run on commit; the test suite runs on push.
+# Pre-commit runs fast checks (format + analyze + typecheck). The test suites run
+# in CI (.github/workflows/ci.yml) on every push to main and every PR — not in a
+# pre-push hook, which lefthook v2 skips for these fileless commands anyway.
 
 pre-commit:
   parallel: true
@@ -15,13 +17,3 @@ pre-commit:
     backend-typecheck:
       glob: "backend/**/*.ts"
       run: cd backend && pnpm typecheck
-
-pre-push:
-  parallel: true
-  commands:
-    core-tests:
-      run: cd core && dart test
-    app-tests:
-      run: cd app && flutter test
-    backend-tests:
-      run: cd backend && pnpm test
