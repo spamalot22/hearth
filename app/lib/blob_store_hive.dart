@@ -19,6 +19,7 @@ class HiveBlobStore implements BlobStore {
   final Box<int> _times; // hash -> last access epoch ms
 
   static const int pruneDays = 30;
+
   /// Maximum blob size (10 MB). Rejects uploads and incoming blobs above this.
   static const int maxBytes = maxBlobBytes;
 
