@@ -175,15 +175,27 @@ Future<void> requestAndroidNotificationPermission() async {
       ?.requestNotificationsPermission();
 }
 
-/// Shows a local notification (desktop/Android, not web).
-Future<void> showLocalNotification(String title, String body) async {
+/// A stable, positive notification id for a conversation, so new messages in the
+/// same group/DM replace that conversation's notification instead of stacking up
+/// a new one per message.
+int notificationIdFor(String threadId) => threadId.hashCode & 0x7fffffff;
+
+/// Shows a local notification (desktop/Android, not web). When [threadId] (a
+/// channel id) is given, the notification stacks per conversation: a stable id +
+/// Android group so a group/DM shows one updating entry rather than one per
+/// message, all collapsed under a single Hearth group in the shade.
+Future<void> showLocalNotification(
+  String title,
+  String body, {
+  String? threadId,
+}) async {
   if (kIsWeb) {
     showWebNotification(title, body);
     return;
   }
-  _notificationId++;
+  final id = threadId != null ? notificationIdFor(threadId) : _notificationId++;
   await _notifications.show(
-    id: _notificationId,
+    id: id,
     title: title,
     body: body,
     notificationDetails: const NotificationDetails(
@@ -191,6 +203,7 @@ Future<void> showLocalNotification(String title, String body) async {
         'hearth_messages',
         'Messages',
         importance: Importance.high,
+        groupKey: 'com.hearth.app.messages',
       ),
       windows: WindowsNotificationDetails(),
     ),
@@ -593,10 +606,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       for (final s in sessions)
         if ((s.relaySince ?? 0) > 0) s.channelId: s.relaySince!,
     };
+    // Channel id -> local name, so background notifications can label each group/DM.
+    final names = <String, String>{
+      for (final s in sessions) s.channelId: _channelTitle(s),
+    };
     await saveBackgroundPollState(
       relayUrl: _relayUrl.toString(),
       channelIds: sessions.map((s) => s.channelId).toList(),
       cursors: cursors,
+      names: names,
       selfAuthor: base64Url.encode(widget.identity.publicKey),
     );
   }
@@ -903,7 +921,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
       );
     } else {
-      unawaited(showLocalNotification(title, body));
+      unawaited(showLocalNotification(title, body, threadId: channelId));
     }
   }
 

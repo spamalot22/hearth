@@ -63,12 +63,15 @@ Future<void> saveBackgroundPollState({
   required String relayUrl,
   required List<String> channelIds,
   Map<String, int> cursors = const {},
+  Map<String, String> names = const {},
   String? selfAuthor,
 }) async {
   await Hive.initFlutter();
   final box = await Hive.openBox<String>('hearth.bg_poll');
   await box.put('relayUrl', relayUrl);
   await box.put('channels', channelIds.join(','));
+  // Channel id -> local name, so per-channel notifications can be labelled.
+  await box.put('names', jsonEncode(names));
   if (selfAuthor != null) await box.put('self', selfAuthor);
   if (cursors.isNotEmpty) {
     final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
@@ -90,6 +93,10 @@ Future<void> _pollFromStorage() async {
     final relayUrl = box.get('relayUrl');
     final channelsRaw = box.get('channels');
     final selfAuthor = box.get('self');
+    final namesRaw = box.get('names');
+    final names = namesRaw != null
+        ? (jsonDecode(namesRaw) as Map).cast<String, String>()
+        : const <String, String>{};
 
     if (relayUrl == null || channelsRaw == null || channelsRaw.isEmpty) return;
 
@@ -97,7 +104,8 @@ Future<void> _pollFromStorage() async {
     final channels = channelsRaw.split(',').where((s) => s.isNotEmpty).toList();
     final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
 
-    var totalNew = 0;
+    // Per-channel new counts → one notification per group/DM (below).
+    final newPerChannel = <String, int>{};
     for (final channelId in channels) {
       // First time we ever poll this channel in the background: establish the
       // baseline silently instead of notifying for the entire backlog.
@@ -116,37 +124,57 @@ Future<void> _pollFromStorage() async {
       await cursorBox.put(channelId, seq);
       if (!hasBaseline) continue; // baseline just set — nothing to report yet
       // Count new messages, excluding our own (the relay echoes them back).
+      var count = 0;
       for (final m in messages) {
         if (m is Map && m['author'] == selfAuthor) continue;
-        totalNew++;
+        count++;
       }
+      if (count > 0) newPerChannel[channelId] = count;
     }
 
-    if (totalNew > 0) {
-      await _showBgNotification(totalNew);
+    if (newPerChannel.isNotEmpty) {
+      final plugin = FlutterLocalNotificationsPlugin();
+      await plugin.initialize(
+        settings: const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ),
+      );
+      for (final entry in newPerChannel.entries) {
+        await _showBgNotification(
+          plugin,
+          entry.key,
+          names[entry.key] ?? 'New messages',
+          entry.value,
+        );
+      }
     }
   } catch (_) {
     // Best-effort — don't crash the background isolate.
   }
 }
 
-Future<void> _showBgNotification(int count) async {
-  final plugin = FlutterLocalNotificationsPlugin();
-  await plugin.initialize(
-    settings: const InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-    ),
-  );
+/// Stable per-conversation id — must match `notificationIdFor` in main.dart so a
+/// background notification and a later foreground one for the same channel
+/// replace each other rather than doubling up.
+int _bgNotificationId(String channelId) => channelId.hashCode & 0x7fffffff;
+
+Future<void> _showBgNotification(
+  FlutterLocalNotificationsPlugin plugin,
+  String channelId,
+  String name,
+  int count,
+) async {
   await plugin.show(
-    id: 99, // fixed ID for background notifications (overwrite previous)
-    title: 'Hearth',
-    body: '$count new message${count > 1 ? 's' : ''} waiting',
+    id: _bgNotificationId(channelId), // per channel → stacks per group/DM
+    title: name,
+    body: '$count new message${count > 1 ? 's' : ''}',
     notificationDetails: const NotificationDetails(
       android: AndroidNotificationDetails(
         'hearth_messages',
         'Messages',
         importance: Importance.high,
         priority: Priority.high,
+        groupKey: 'com.hearth.app.messages',
       ),
     ),
   );
