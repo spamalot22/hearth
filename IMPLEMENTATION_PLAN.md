@@ -856,3 +856,14 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   `animations` package); and an animated **send button**. Continuous ambient
   animations are gated behind `_ambientAnimations` (off under `flutter test`, so
   `pumpAndSettle` still settles); one-shot animations run normally.
+- **2026-07-02** — **Android updates download via the system DownloadManager.**
+  Previously the APK streamed in-process (`http`), so locking the screen or
+  closing the app mid-download killed it. Now a platform channel
+  (`hearth/downloader` in `MainActivity.kt`) hands the download to Android's
+  **DownloadManager**, which runs in a system process that survives
+  background/lock/close and resumes across connectivity drops. Dart enqueues,
+  polls status for progress, then **stream-verifies the SHA-256 against the
+  signed manifest** before install (same guarantee as before). The pending
+  download id + hash are persisted, so `resumePendingUpdate()` on next launch
+  finishes an interrupted one (verify + install, or re-attach if still running).
+  Windows keeps the in-process flow. No new permissions (app-private storage).

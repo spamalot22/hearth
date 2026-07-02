@@ -5,11 +5,20 @@ import 'dart:io';
 import 'package:convert/convert.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'update_checker.dart';
+
+/// Bridge to Android's system DownloadManager (see MainActivity.kt).
+const MethodChannel _downloader = MethodChannel('hearth/downloader');
+
+// android.app.DownloadManager status codes.
+const int _dlSuccessful = 8;
+const int _dlFailed = 16;
 
 /// Deletes any leftover update APKs/ZIPs from previous downloads.
 Future<void> cleanupOldUpdates() async {
@@ -48,18 +57,34 @@ Future<void> downloadAndInstall(
   final expectedHash = (asset['sha256'] as String).toLowerCase();
 
   // Download directly from the public GitHub release.
-  final url = Uri.parse(
-    'https://github.com/spamalot22/hearth/releases/download/${info.version}/$fileName',
-  );
+  final url =
+      'https://github.com/spamalot22/hearth/releases/download/'
+      '${info.version}/$fileName';
+
+  // Android: hand off to the system DownloadManager so the download survives the
+  // app being backgrounded, screen-locked, or closed (and resumes across
+  // connectivity drops). Everything else streams in-process (Windows).
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final id = await _downloader.invokeMethod<int>('enqueue', {
+      'url': url,
+      'fileName': fileName,
+    });
+    if (id == null) throw StateError('failed to start download');
+    await _savePending(id, expectedHash);
+    await _awaitAndroidDownload(id, expectedHash, onProgress);
+    return;
+  }
+
+  final uri = Uri.parse(url);
   final dir = await getTemporaryDirectory();
   final outFile = File('${dir.path}${Platform.pathSeparator}$fileName');
   final client = http.Client();
   try {
-    final resp = await client.send(http.Request('GET', url));
+    final resp = await client.send(http.Request('GET', uri));
     if (resp.statusCode != 200) {
       throw http.ClientException(
         'download failed: HTTP ${resp.statusCode}',
-        url,
+        uri,
       );
     }
     final total = resp.contentLength ?? 0;
@@ -85,6 +110,121 @@ Future<void> downloadAndInstall(
   } finally {
     client.close();
   }
+}
+
+/// Polls the DownloadManager until the download finishes, then verifies its
+/// SHA-256 against the signed manifest and hands it to the installer. Runs while
+/// the app is foregrounded; if the app is closed first, [resumePendingUpdate]
+/// finishes it on next launch.
+Future<void> _awaitAndroidDownload(
+  int id,
+  String expectedHash,
+  void Function(double progress)? onProgress,
+) async {
+  while (true) {
+    final s = await _downloader.invokeMapMethod<String, dynamic>('status', {
+      'id': id,
+    });
+    if (s == null) {
+      await _clearPending();
+      throw StateError('download was cancelled');
+    }
+    final status = (s['status'] as num?)?.toInt() ?? 0;
+    final total = (s['total'] as num?)?.toDouble() ?? 0;
+    final done = (s['downloaded'] as num?)?.toDouble() ?? 0;
+    if (total > 0) onProgress?.call((done / total).clamp(0.0, 1.0));
+    if (status == _dlSuccessful) {
+      final path = s['path'] as String?;
+      await _clearPending(); // terminal — clear before verify so we don't loop
+      if (path == null) throw StateError('downloaded file not found');
+      await _verifyAndInstallApk(path, expectedHash);
+      return;
+    }
+    if (status == _dlFailed) {
+      await _clearPending();
+      throw StateError('download failed (reason ${s['reason']})');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+  }
+}
+
+/// Stream-hashes the downloaded APK, rejects it on mismatch, else installs it.
+Future<void> _verifyAndInstallApk(String path, String expectedHash) async {
+  final file = File(path);
+  final digestSink = AccumulatorSink<Digest>();
+  final input = sha256.startChunkedConversion(digestSink);
+  await for (final chunk in file.openRead()) {
+    input.add(chunk);
+  }
+  input.close();
+  if (digestSink.events.single.toString() != expectedHash) {
+    try {
+      await file.delete();
+    } catch (_) {}
+    throw StateError('update hash mismatch — download rejected');
+  }
+  await OpenFilex.open(path);
+}
+
+/// If an update download was in flight when the app closed, finish it on the
+/// next launch: a completed one is verified + installed, a failed one is
+/// cleared, and one still running is re-attached so it completes on its own.
+/// Safe to call on any platform (no-op unless there's a pending Android one).
+Future<void> resumePendingUpdate({
+  void Function(double progress)? onProgress,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.android) return;
+  try {
+    final pending = await _loadPending();
+    if (pending == null) return;
+    final (id, hash) = pending;
+    final s = await _downloader.invokeMapMethod<String, dynamic>('status', {
+      'id': id,
+    });
+    if (s == null) {
+      await _clearPending();
+      return;
+    }
+    final status = (s['status'] as num?)?.toInt() ?? 0;
+    if (status == _dlSuccessful) {
+      final path = s['path'] as String?;
+      await _clearPending();
+      if (path != null) {
+        try {
+          await _verifyAndInstallApk(path, hash);
+        } catch (_) {}
+      }
+    } else if (status == _dlFailed) {
+      await _clearPending();
+    } else {
+      // Still downloading — re-attach so it installs when it finishes.
+      unawaited(_awaitAndroidDownload(id, hash, onProgress).catchError((_) {}));
+    }
+  } catch (_) {}
+}
+
+// --- pending-download persistence (survives an app close mid-download) ---
+
+Future<Box<dynamic>> _pendingBox() async {
+  await Hive.initFlutter();
+  return Hive.openBox<dynamic>('hearth.update_dl');
+}
+
+Future<void> _savePending(int id, String hash) async {
+  final box = await _pendingBox();
+  await box.putAll({'id': id, 'hash': hash});
+}
+
+Future<(int, String)?> _loadPending() async {
+  final box = await _pendingBox();
+  final id = box.get('id');
+  final hash = box.get('hash');
+  return (id is int && hash is String) ? (id, hash) : null;
+}
+
+Future<void> _clearPending() async {
+  final box = await _pendingBox();
+  await box.clear();
 }
 
 Map<String, dynamic>? _platformAsset(Map<String, dynamic> assets) {
