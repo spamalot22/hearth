@@ -612,6 +612,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   UpdateInfo? _updateInfo;
   double? _updateProgress;
+  Offset _lastReactTap = Offset.zero; // where a quick-reaction was tapped
   bool _installing = false;
   String? _installError;
   // Track recent send timestamps for the composer flame effect.
@@ -3643,16 +3644,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Row(
           children: [
-            Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(
-                  color: speaking && !isMuted
-                      ? Colors.greenAccent
-                      : Colors.transparent,
-                  width: 2,
-                ),
-              ),
+            _SpeakingRings(
+              active: speaking && !isMuted,
+              level: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
+              color: Colors.greenAccent,
               child: _avatar(author, radius: 14),
             ),
             const SizedBox(width: 8),
@@ -4385,37 +4380,46 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }).toList();
     return messages.isEmpty
         ? const Center(child: Text('No messages yet — say something.'))
-        : ListView.builder(
-            controller: _scroll,
-            padding: const EdgeInsets.all(8),
-            itemCount: messages.length,
-            itemBuilder: (context, i) {
-              final msg = messages[i];
-              // Stagger: newer messages (higher index) appear first,
-              // older ones cascade in with 50ms delay each (max 300ms).
-              final stagger = ((messages.length - 1 - i) * 50)
-                  .clamp(0, 300)
-                  .toDouble();
-              return TweenAnimationBuilder<double>(
-                key: ValueKey(msg.idHex),
-                tween: Tween(begin: 0, end: 1),
-                duration: Duration(milliseconds: 250 + stagger.toInt()),
-                curve: Curves.easeOutCubic,
-                builder: (context, value, child) {
-                  // Delay the visual start by the stagger amount.
-                  final progress = ((value * (250 + stagger) - stagger) / 250)
-                      .clamp(0.0, 1.0);
-                  return Opacity(
-                    opacity: progress,
-                    child: Transform.translate(
-                      offset: Offset(0, 12 * (1 - progress)),
-                      child: child,
-                    ),
-                  );
-                },
-                child: _bubble(context, session, msg),
-              );
+        : RefreshIndicator(
+            // Pull down at the top to re-announce to the mesh + re-check the
+            // relay, tinted in the channel accent.
+            color: _channelAccent(session),
+            onRefresh: () async {
+              _channels?.reconnect();
+              await _checkRelay();
             },
+            child: ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.all(8),
+              itemCount: messages.length,
+              itemBuilder: (context, i) {
+                final msg = messages[i];
+                // Stagger: newer messages (higher index) appear first,
+                // older ones cascade in with 50ms delay each (max 300ms).
+                final stagger = ((messages.length - 1 - i) * 50)
+                    .clamp(0, 300)
+                    .toDouble();
+                return TweenAnimationBuilder<double>(
+                  key: ValueKey(msg.idHex),
+                  tween: Tween(begin: 0, end: 1),
+                  duration: Duration(milliseconds: 250 + stagger.toInt()),
+                  curve: Curves.easeOutCubic,
+                  builder: (context, value, child) {
+                    // Delay the visual start by the stagger amount.
+                    final progress = ((value * (250 + stagger) - stagger) / 250)
+                        .clamp(0.0, 1.0);
+                    return Opacity(
+                      opacity: progress,
+                      child: Transform.translate(
+                        offset: Offset(0, 12 * (1 - progress)),
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: _bubble(context, session, msg),
+                );
+              },
+            ),
           );
   }
 
@@ -4815,14 +4819,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     BuildContext context,
     ChannelSession session,
     Content content,
+    String messageId,
   ) {
     return switch (content) {
       TextContent(:final text) =>
         _isSingleEmoji(text)
             ? Text(text, style: const TextStyle(fontSize: 48))
             : Text(text),
-      GifContent(:final blob) => _imageBlobView(session, blob),
-      StickerContent(:final blob) => _imageBlobView(session, blob),
+      GifContent(:final blob) => _imageBlobView(session, blob, messageId),
+      StickerContent(:final blob) => _imageBlobView(session, blob, messageId),
       SoundContent(:final blob, :final name, :final emoji) => _soundView(
         session,
         blob,
@@ -4831,7 +4836,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ),
       FileContent(:final blob, :final name, :final mime) =>
         mime.startsWith('image/')
-            ? _imageBlobView(session, blob)
+            ? _imageBlobView(session, blob, messageId)
             : _isDangerousFile(name)
             ? Chip(
                 avatar: Icon(
@@ -4860,7 +4865,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// An image blob — sticker or GIF — once fetched (spinner until then).
   /// Image.memory animates GIFs.
-  Widget _imageBlobView(ChannelSession session, String blob) {
+  Widget _imageBlobView(ChannelSession session, String blob, String messageId) {
     final bytes = session.blobOf(blob);
     if (bytes == null) {
       return const SizedBox(
@@ -4869,11 +4874,48 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         child: Center(child: CircularProgressIndicator()),
       );
     }
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxHeight: 220, maxWidth: 260),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.memory(bytes, fit: BoxFit.contain),
+    final tag = 'img:$messageId:$blob'; // unique even if a blob repeats
+    return GestureDetector(
+      onTap: () => _openImageViewer(tag, bytes),
+      child: Hero(
+        tag: tag,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 220, maxWidth: 260),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.memory(bytes, fit: BoxFit.contain),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Opens a full-screen, pinch-zoomable image viewer with a Hero flight from
+  /// the tapped thumbnail. Tap anywhere (or swipe down) to dismiss.
+  void _openImageViewer(String tag, Uint8List bytes) {
+    Navigator.of(context).push(
+      PageRouteBuilder<void>(
+        opaque: false,
+        barrierColor: Colors.black.withAlpha(230),
+        transitionDuration: const Duration(milliseconds: 250),
+        pageBuilder: (ctx, _, _) => GestureDetector(
+          onTap: () => Navigator.of(ctx).pop(),
+          child: Dismissible(
+            key: const Key('image-viewer'),
+            direction: DismissDirection.vertical,
+            onDismissed: (_) => Navigator.of(ctx).pop(),
+            child: Center(
+              child: Hero(
+                tag: tag,
+                child: InteractiveViewer(
+                  minScale: 0.8,
+                  maxScale: 5,
+                  child: Image.memory(bytes, fit: BoxFit.contain),
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -5164,11 +5206,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 children: [
                   for (final emoji in quickEmojis)
                     GestureDetector(
+                      onTapDown: (d) => _lastReactTap = d.globalPosition,
                       onTap: () {
                         Navigator.pop(ctx);
                         unawaited(
                           _publish(ReactionContent(message.idHex, emoji)),
                         );
+                        _showReactionBurst(emoji, _lastReactTap);
                       },
                       child: Text(emoji, style: const TextStyle(fontSize: 28)),
                     ),
@@ -5198,6 +5242,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+
+  /// A short particle burst of [emoji] from [origin] when you add a reaction.
+  void _showReactionBurst(String emoji, Offset origin) {
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => _ReactionBurst(
+        emoji: emoji,
+        origin: origin,
+        onDone: () => entry.remove(),
+      ),
+    );
+    overlay.insert(entry);
   }
 
   void _togglePin(String channelId, String messageId) {
@@ -5487,7 +5546,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 ),
               ),
             ),
-          _contentView(context, session, session.contentOf(message)),
+          _contentView(
+            context,
+            session,
+            session.contentOf(message),
+            message.idHex,
+          ),
           Align(
             alignment: Alignment.centerRight,
             child: Padding(
@@ -6241,6 +6305,177 @@ class _AddMembersDialogState extends State<_AddMembersDialog> {
       ),
     ],
   );
+}
+
+/// A one-shot particle burst of an emoji, spraying upward-ish from [origin] and
+/// fading over ~700ms — shown as an overlay when a reaction is added. Calls
+/// [onDone] when finished so the overlay entry can remove itself.
+class _ReactionBurst extends StatefulWidget {
+  const _ReactionBurst({
+    required this.emoji,
+    required this.origin,
+    required this.onDone,
+  });
+
+  final String emoji;
+  final Offset origin;
+  final VoidCallback onDone;
+
+  @override
+  State<_ReactionBurst> createState() => _ReactionBurstState();
+}
+
+class _ReactionBurstState extends State<_ReactionBurst>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+  late final List<double> _angles;
+
+  @override
+  void initState() {
+    super.initState();
+    final rnd = Random();
+    // Six particles spread in an upward-biased fan.
+    _angles = List.generate(
+      6,
+      (_) => -pi / 2 + (rnd.nextDouble() - 0.5) * pi * 0.9,
+    );
+    _c =
+        AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 700),
+        )..addStatusListener((s) {
+          if (s == AnimationStatus.completed) widget.onDone();
+        });
+    _c.forward();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IgnorePointer(
+      child: AnimatedBuilder(
+        animation: _c,
+        builder: (context, _) {
+          final t = Curves.easeOut.transform(_c.value);
+          return Stack(
+            children: [
+              for (final a in _angles)
+                Positioned(
+                  left: widget.origin.dx + cos(a) * 64 * t - 12,
+                  top: widget.origin.dy + sin(a) * 64 * t - 12 - 24 * t,
+                  child: Opacity(
+                    opacity: (1 - t).clamp(0.0, 1.0),
+                    child: Transform.scale(
+                      scale: 0.6 + t * 0.7,
+                      child: Text(
+                        widget.emoji,
+                        style: const TextStyle(fontSize: 22),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Audio-reactive concentric rings that pulse outward from a speaking voice
+/// participant's avatar — the ring radius/opacity track the live mic [level].
+class _SpeakingRings extends StatefulWidget {
+  const _SpeakingRings({
+    required this.active,
+    required this.level,
+    required this.color,
+    required this.child,
+  });
+
+  final bool active;
+  final double level; // 0–1, normalised mic level
+  final Color color;
+  final Widget child;
+
+  @override
+  State<_SpeakingRings> createState() => _SpeakingRingsState();
+}
+
+class _SpeakingRingsState extends State<_SpeakingRings>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    if (_ambientAnimations) _c.repeat();
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 40,
+      height: 40,
+      child: AnimatedBuilder(
+        animation: _c,
+        builder: (context, child) => CustomPaint(
+          painter: _RingPainter(
+            phase: _c.value,
+            level: widget.active ? widget.level.clamp(0.0, 1.0) : 0.0,
+            color: widget.color,
+          ),
+          child: child,
+        ),
+        child: Center(child: widget.child),
+      ),
+    );
+  }
+}
+
+class _RingPainter extends CustomPainter {
+  _RingPainter({required this.phase, required this.level, required this.color});
+
+  final double phase; // 0–1 animation phase
+  final double level; // 0–1 mic level (0 = draw nothing)
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (level <= 0.02) return;
+    final center = size.center(Offset.zero);
+    const baseR = 15.0;
+    for (var i = 0; i < 2; i++) {
+      final p = (phase + i * 0.5) % 1.0;
+      final r = baseR + p * 9 * level;
+      final alpha = ((1 - p) * 0.55 * level * 255).round().clamp(0, 255);
+      canvas.drawCircle(
+        center,
+        r,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2
+          ..color = color.withAlpha(alpha),
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter old) =>
+      old.phase != phase || old.level != level;
 }
 
 /// A slow, breathing ember glow for the app-bar background — a gradient in the
