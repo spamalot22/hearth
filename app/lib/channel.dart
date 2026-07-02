@@ -305,6 +305,7 @@ class ChannelSession {
       StickerContent(:final blob) => blob,
       SoundContent(:final blob) => blob,
       FileContent(:final blob) => blob,
+      VoiceContent(:final blob) => blob,
       _ => null,
     };
     final store = blobStore;

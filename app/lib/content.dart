@@ -70,6 +70,23 @@ class SoundContent extends Content {
   };
 }
 
+/// A recorded voice message — audio in the blob store, referenced by [blob]
+/// hash, with its [durationMs] so the bubble can show length before the audio
+/// has been fetched from peers.
+class VoiceContent extends Content {
+  const VoiceContent(this.blob, this.durationMs);
+
+  final String blob;
+  final int durationMs;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'voice',
+    'blob': blob,
+    'dur': durationMs,
+  };
+}
+
 /// A one-off file attachment — any file stored as a content-addressed blob,
 /// with its [name] and [mime]. Images render inline; other files show as a chip.
 class FileContent extends Content {
@@ -185,6 +202,11 @@ Content parseContent(List<int> payload) {
           );
         case 'del':
           return DeleteContent(decoded['target'] as String? ?? '');
+        case 'voice':
+          return VoiceContent(
+            decoded['blob'] as String? ?? '',
+            decoded['dur'] as int? ?? 0,
+          );
         case 'file':
           return FileContent(
             decoded['blob'] as String? ?? '',

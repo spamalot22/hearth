@@ -20,6 +20,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:record/record.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
@@ -591,6 +592,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _sending = false;
   Message? _replyTo; // message being replied to (shown above composer)
   Message? _editing; // own message being edited (composer sends an EditContent)
+  AudioRecorder? _recorder; // voice-message capture (created on first use)
+  DateTime? _recordStart; // non-null while recording (composer shows the bar)
+  Timer? _recordTicker; // repaints the elapsed label once a second
 
   /// Persists relay state for the background fetch isolate.
   Future<void> _saveBackgroundState() async {
@@ -899,6 +903,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           preview = '🔊 ${content.name}';
         } else if (content is FileContent) {
           preview = '📎 ${content.name}';
+        } else if (content is VoiceContent) {
+          preview = 'sent a voice message';
         }
       }
     }
@@ -1130,6 +1136,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           break;
         case DeleteContent():
           break;
+        case VoiceContent():
+          break; // one-off recording, not a re-usable library item
       }
     }
   }
@@ -2307,6 +2315,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _typingTimer?.cancel();
     _fireTimer?.cancel();
     _errorTimer?.cancel();
+    _recordTicker?.cancel();
+    unawaited(_recorder?.dispose());
     super.dispose();
   }
 
@@ -2621,6 +2631,75 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         return 'image/webp';
       default:
         return 'application/octet-stream';
+    }
+  }
+
+  // --- voice messages ---
+
+  /// Starts recording a voice message; the composer swaps to a recording bar
+  /// until send or cancel. Recorded as AAC to a temp file, then blob-ified.
+  Future<void> _startVoiceRecording() async {
+    final recorder = _recorder ??= AudioRecorder();
+    try {
+      if (!await recorder.hasPermission()) {
+        if (mounted) _setError('microphone permission denied');
+        return;
+      }
+      final dir = await getTemporaryDirectory();
+      final path =
+          '${dir.path}${Platform.pathSeparator}'
+          'hearth_voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+      await recorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: path,
+      );
+      if (!mounted) return;
+      setState(() => _recordStart = DateTime.now());
+      _recordTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {}); // tick the elapsed label
+      });
+    } catch (_) {
+      if (mounted) _setError('could not start recording');
+    }
+  }
+
+  /// Discards an in-flight recording (stops + deletes the temp file).
+  Future<void> _cancelVoiceRecording() async {
+    _recordTicker?.cancel();
+    setState(() => _recordStart = null);
+    try {
+      await _recorder?.cancel();
+    } catch (_) {}
+  }
+
+  /// Stops recording and publishes the clip as a [VoiceContent] blob.
+  Future<void> _sendVoiceRecording() async {
+    final store = _blobStore;
+    final started = _recordStart;
+    _recordTicker?.cancel();
+    setState(() => _recordStart = null);
+    String? path;
+    try {
+      path = await _recorder?.stop();
+    } catch (_) {}
+    if (path == null || started == null || store == null) return;
+    final elapsed = DateTime.now().difference(started);
+    try {
+      final file = File(path);
+      final bytes = await file.readAsBytes();
+      try {
+        await file.delete();
+      } catch (_) {}
+      // A sub-half-second clip is an accidental tap, not a message.
+      if (elapsed.inMilliseconds < 500 || bytes.isEmpty) return;
+      if (bytes.length > HiveBlobStore.maxBytes) {
+        if (mounted) _setError('Recording too long (max 10 MB)');
+        return;
+      }
+      final hash = await store.put(bytes);
+      await _publish(VoiceContent(hash, elapsed.inMilliseconds));
+    } catch (_) {
+      if (mounted) _setError('could not send voice message');
     }
   }
 
@@ -4918,6 +4997,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         name,
         emoji,
       ),
+      VoiceContent(:final blob, :final durationMs) => _voiceView(
+        session,
+        blob,
+        durationMs,
+      ),
       FileContent(:final blob, :final name, :final mime) =>
         mime.startsWith('image/')
             ? _imageBlobView(session, blob, messageId)
@@ -4949,6 +5033,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     avatar: const Icon(Icons.insert_drive_file_outlined, size: 18),
     label: Text(name),
   );
+
+  /// A voice message — play/pause + progress once its audio blob has been
+  /// fetched, a duration chip with a spinner while it's still coming from peers.
+  Widget _voiceView(ChannelSession session, String blob, int durationMs) {
+    final bytes = session.blobOf(blob);
+    if (bytes == null) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Static icon under `flutter test` — a spinner never settles.
+          if (_ambientAnimations)
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            const Icon(Icons.mic_none, size: 18),
+          const SizedBox(width: 8),
+          Text('Voice message · ${formatClipTime(durationMs)}'),
+        ],
+      );
+    }
+    return _VoiceBubble(
+      key: ValueKey('voice:$blob'),
+      bytes: bytes,
+      durationMs: durationMs,
+    );
+  }
 
   /// An image blob — sticker or GIF — once fetched (spinner until then).
   /// Image.memory animates GIFs.
@@ -5605,6 +5718,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (content is StickerContent) return 'Sticker';
     if (content is SoundContent) return '🔊 ${content.name}';
     if (content is FileContent) return '📎 ${content.name}';
+    if (content is VoiceContent) {
+      return '🎤 Voice message (${formatClipTime(content.durationMs)})';
+    }
     if (content is ReactionContent) return '${content.emoji} reacted';
     return 'Message';
   }
@@ -6059,36 +6175,70 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 ],
               ),
             ),
-          Row(
-            children: [
-              IconButton(
-                onPressed: () => unawaited(_insertEmoji()),
-                icon: const Icon(Icons.emoji_emotions_outlined),
-                tooltip: 'Emoji',
-                focusNode: FocusNode(skipTraversal: true),
-              ),
-              IconButton(
-                onPressed: () => unawaited(_sendGif()),
-                icon: const Icon(Icons.gif_box_outlined),
-                tooltip: 'GIF',
-                focusNode: FocusNode(skipTraversal: true),
-              ),
-              IconButton(
-                onPressed: () => unawaited(_sendSticker()),
-                icon: const Icon(Icons.image_outlined),
-                tooltip: 'Sticker',
-                focusNode: FocusNode(skipTraversal: true),
-              ),
-              IconButton(
-                onPressed: () => unawaited(_sendFile()),
-                icon: const Icon(Icons.attach_file),
-                tooltip: 'Attach file',
-                focusNode: FocusNode(skipTraversal: true),
-              ),
-              Expanded(
-                child: _composerOnFire
-                    ? _FlameBox(
-                        child: TextField(
+          if (_recordStart != null)
+            _recordingBar(context, session)
+          else
+            Row(
+              children: [
+                IconButton(
+                  onPressed: () => unawaited(_insertEmoji()),
+                  icon: const Icon(Icons.emoji_emotions_outlined),
+                  tooltip: 'Emoji',
+                  focusNode: FocusNode(skipTraversal: true),
+                ),
+                IconButton(
+                  onPressed: () => unawaited(_sendGif()),
+                  icon: const Icon(Icons.gif_box_outlined),
+                  tooltip: 'GIF',
+                  focusNode: FocusNode(skipTraversal: true),
+                ),
+                IconButton(
+                  onPressed: () => unawaited(_sendSticker()),
+                  icon: const Icon(Icons.image_outlined),
+                  tooltip: 'Sticker',
+                  focusNode: FocusNode(skipTraversal: true),
+                ),
+                IconButton(
+                  onPressed: () => unawaited(_sendFile()),
+                  icon: const Icon(Icons.attach_file),
+                  tooltip: 'Attach file',
+                  focusNode: FocusNode(skipTraversal: true),
+                ),
+                Expanded(
+                  child: _composerOnFire
+                      ? _FlameBox(
+                          child: TextField(
+                            controller: _input,
+                            focusNode: _composerFocus,
+                            onSubmitted: (_) {
+                              unawaited(_send());
+                              _composerFocus.requestFocus();
+                            },
+                            decoration: InputDecoration(
+                              hintText: 'Message ${_channelTitle(session)}',
+                              filled: true,
+                              fillColor: Theme.of(
+                                context,
+                              ).colorScheme.surfaceContainerHighest,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(24),
+                                borderSide: BorderSide.none,
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(24),
+                                borderSide: BorderSide(
+                                  color: _channelAccent(session),
+                                  width: 1.5,
+                                ),
+                              ),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 10,
+                              ),
+                            ),
+                          ),
+                        )
+                      : TextField(
                           controller: _input,
                           focusNode: _composerFocus,
                           onSubmitted: (_) {
@@ -6118,47 +6268,57 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             ),
                           ),
                         ),
-                      )
-                    : TextField(
-                        controller: _input,
-                        focusNode: _composerFocus,
-                        onSubmitted: (_) {
-                          unawaited(_send());
-                          _composerFocus.requestFocus();
-                        },
-                        decoration: InputDecoration(
-                          hintText: 'Message ${_channelTitle(session)}',
-                          filled: true,
-                          fillColor: Theme.of(
-                            context,
-                          ).colorScheme.surfaceContainerHighest,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24),
-                            borderSide: BorderSide.none,
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24),
-                            borderSide: BorderSide(
-                              color: _channelAccent(session),
-                              width: 1.5,
-                            ),
-                          ),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 10,
-                          ),
-                        ),
-                      ),
-              ),
-              const SizedBox(width: 8),
-              _SendButton(
-                color: _channelAccent(session),
-                onPressed: _sending ? null : () => unawaited(_send()),
-              ),
-            ],
-          ),
+                ),
+                if (!kIsWeb)
+                  IconButton(
+                    onPressed: () => unawaited(_startVoiceRecording()),
+                    icon: const Icon(Icons.mic_none),
+                    tooltip: 'Voice message',
+                    focusNode: FocusNode(skipTraversal: true),
+                  ),
+                const SizedBox(width: 8),
+                _SendButton(
+                  color: _channelAccent(session),
+                  onPressed: _sending ? null : () => unawaited(_send()),
+                ),
+              ],
+            ),
         ],
       ),
+    );
+  }
+
+  /// The composer while a voice message records: red mic, ticking elapsed
+  /// time, discard and send.
+  Widget _recordingBar(BuildContext context, ChannelSession session) {
+    final scheme = Theme.of(context).colorScheme;
+    final elapsed = DateTime.now().difference(_recordStart ?? DateTime.now());
+    return Row(
+      children: [
+        const SizedBox(width: 12),
+        Icon(Icons.mic, color: scheme.error),
+        const SizedBox(width: 8),
+        Text(
+          formatClipTime(elapsed.inMilliseconds),
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            'Recording…',
+            style: TextStyle(color: scheme.onSurfaceVariant),
+          ),
+        ),
+        IconButton(
+          onPressed: () => unawaited(_cancelVoiceRecording()),
+          icon: const Icon(Icons.delete_outline),
+          tooltip: 'Discard',
+        ),
+        _SendButton(
+          color: _channelAccent(session),
+          onPressed: () => unawaited(_sendVoiceRecording()),
+        ),
+      ],
     );
   }
 
@@ -7015,6 +7175,109 @@ class _BouncingDotsState extends State<_BouncingDots>
 
 /// The composer's send button — a filled icon that plays a one-shot "launch"
 /// (the paper plane flies up-and-away and a fresh one settles in) on send.
+/// mm:ss for a clip length or playback position.
+String formatClipTime(int ms) {
+  final s = (ms / 1000).round();
+  return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+}
+
+/// Playback UI for a fetched voice message: play/pause, progress bar, time.
+/// The [AudioPlayer] is created on first play, so a rendered-but-unplayed
+/// bubble never touches the audio plugin (widget tests included).
+class _VoiceBubble extends StatefulWidget {
+  const _VoiceBubble({
+    super.key,
+    required this.bytes,
+    required this.durationMs,
+  });
+
+  final Uint8List bytes;
+  final int durationMs;
+
+  @override
+  State<_VoiceBubble> createState() => _VoiceBubbleState();
+}
+
+class _VoiceBubbleState extends State<_VoiceBubble> {
+  AudioPlayer? _player;
+  bool _playing = false;
+  Duration _position = Duration.zero;
+
+  @override
+  void dispose() {
+    unawaited(_player?.dispose());
+    super.dispose();
+  }
+
+  Future<void> _toggle() async {
+    var player = _player;
+    if (player == null) {
+      player = _player = AudioPlayer();
+      player.onPositionChanged.listen((p) {
+        if (mounted) setState(() => _position = p);
+      });
+      player.onPlayerComplete.listen((_) {
+        if (mounted) {
+          setState(() {
+            _playing = false;
+            _position = Duration.zero;
+          });
+        }
+      });
+    }
+    try {
+      if (_playing) {
+        await player.pause();
+        if (mounted) setState(() => _playing = false);
+      } else if (_position > Duration.zero) {
+        await player.resume();
+        if (mounted) setState(() => _playing = true);
+      } else {
+        await player.play(BytesSource(widget.bytes));
+        if (mounted) setState(() => _playing = true);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _playing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final active = _playing || _position > Duration.zero;
+    final progress = widget.durationMs == 0
+        ? 0.0
+        : (_position.inMilliseconds / widget.durationMs).clamp(0.0, 1.0);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          onPressed: () => unawaited(_toggle()),
+          icon: Icon(
+            _playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
+            size: 32,
+          ),
+          padding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          tooltip: _playing ? 'Pause' : 'Play',
+        ),
+        SizedBox(
+          width: 110,
+          child: LinearProgressIndicator(
+            value: progress,
+            minHeight: 3,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          formatClipTime(active ? _position.inMilliseconds : widget.durationMs),
+          style: const TextStyle(fontSize: 12),
+        ),
+      ],
+    );
+  }
+}
+
 class _SendButton extends StatefulWidget {
   const _SendButton({required this.color, required this.onPressed});
 
