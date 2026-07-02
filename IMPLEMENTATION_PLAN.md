@@ -844,3 +844,15 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   (`backend/src/manifest.ts` ↔ `update_checker.dart`), not `JSON.stringify`, so
   verification no longer depends on JS/Dart serializers matching byte-for-byte;
   a shared test literal in both suites guards cross-language drift.
+- **2026-07-02** — **UI polish pass (colour + animation).** Colour: per-user /
+  per-channel colours now derive from **OKLCH** (perceptually uniform, legible on
+  either theme) instead of HSL; gradient avatars; the channel accent tints the
+  drawer, unread badges and composer focus ring. Added a **light/dark/auto**
+  theme (warm parchment vs charcoal, dark default) with a settings selector, and
+  accent colours + badge text adapt to brightness. Animation: a breathing
+  **ember glow** app-bar background; audio-reactive **voice speaking rings**; a
+  **Hero** full-screen image viewer; **pull-to-refresh** (re-announce + relay
+  recheck); a **reaction burst**; **shared-axis** channel transitions (via the
+  `animations` package); and an animated **send button**. Continuous ambient
+  animations are gated behind `_ambientAnimations` (off under `flutter test`, so
+  `pumpAndSettle` still settles); one-shot animations run normally.
