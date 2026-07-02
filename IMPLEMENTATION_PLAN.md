@@ -400,6 +400,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       and **read receipts** (WhatsApp-style ticks via `ReadWatermarkControl`
       gossiped over the mesh, disable-able per DM). Plus animation polish
       (per-channel accent colour, typing dots, cascade-in, scroll-to-bottom FAB).
+      **2026-07-02 batch:** **edit & delete** (append-only DAG revisions,
+      author-verified), **chat markdown** (bold/italic/strike/code/links,
+      hand-rolled), **voice messages** (record → blob → inline playback), and
+      **custom avatars** (≤128px PNG blob riding the profile claim, gradient
+      ring kept as the identity cue).
 - [x] **Screen share + watch party (Windows)** — Discord-style **screen share**
       (per-sharer star-topology WebRTC mesh, pick window/screen, configurable
       resolution) and a channel-wide **synchronised YouTube watch party**
@@ -856,6 +861,25 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   `animations` package); and an animated **send button**. Continuous ambient
   animations are gated behind `_ambientAnimations` (off under `flutter test`, so
   `pumpAndSettle` still settles); one-shot animations run normally.
+- **2026-07-02** — **Messaging batch: edit/delete, markdown, voice messages,
+  avatars.** (1) **Edit & delete** fit the append-only DAG: an edit/tombstone is
+  a new envelope (`EditContent`/`DeleteContent`) referencing its target;
+  `ChannelSession` rebuilds a revision index on refresh where the
+  topologically-last edit wins (deterministic on every device) and revisions are
+  honoured **only when their author matches the target's author** — a forged
+  edit from another key is ignored (widget-tested). Composes under encryption;
+  nothing is ever removed from the DAG. (2) **Chat markdown** — a small
+  hand-rolled tokenizer (bold/italic/strike/inline code/fenced blocks/links; no
+  dependency — flutter_markdown is discontinued and document-shaped). Discord's
+  whitespace rule keeps `2 * 3 = 6` and snake_case literal. (3) **Voice
+  messages** — mic button records AAC (`record` package), sends as a
+  content-addressed blob with duration in the envelope; playback bubble with
+  lazy AudioPlayer. macOS gained the mic entitlement for dev. Hidden on web.
+  (4) **Custom avatars** — `ProfileContent` gains an optional avatar blob hash;
+  the picked image is downscaled to a ≤128px PNG via `dart:ui`, gossiped like
+  any blob, and rendered **inside** the pubkey-derived gradient (kept as a ring)
+  so the deterministic colours stay the spoof-resistant cue — consistent with
+  the petname model's "self-asserted = suggestion, never identity".
 - **2026-07-02** — **Android updates download via the system DownloadManager.**
   Previously the APK streamed in-process (`http`), so locking the screen or
   closing the app mid-download killed it. Now a platform channel
