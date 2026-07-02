@@ -4377,6 +4377,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             },
             child: ListView.builder(
               controller: _scroll,
+              // Always scrollable so pull-to-refresh works even when the
+              // messages don't fill the viewport.
+              physics: const AlwaysScrollableScrollPhysics(),
               padding: const EdgeInsets.all(8),
               itemCount: messages.length,
               itemBuilder: (context, i) {
