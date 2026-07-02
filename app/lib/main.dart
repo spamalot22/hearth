@@ -35,6 +35,7 @@ import 'gif_search.dart';
 import 'group_channel.dart';
 import 'inference_bot.dart';
 import 'key_store.dart';
+import 'markdown.dart';
 import 'media_library.dart';
 import 'mesh_control.dart';
 import 'network_status.dart';
@@ -4908,7 +4909,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       TextContent(:final text) =>
         _isSingleEmoji(text)
             ? Text(text, style: const TextStyle(fontSize: 48))
-            : Text(text),
+            : MarkdownText(text),
       GifContent(:final blob) => _imageBlobView(session, blob, messageId),
       StickerContent(:final blob) => _imageBlobView(session, blob, messageId),
       SoundContent(:final blob, :final name, :final emoji) => _soundView(
