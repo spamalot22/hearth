@@ -162,6 +162,19 @@ Future<void> _initNotifications() async {
   );
 }
 
+/// Android 13+ (API 33) requires an explicit runtime grant for POST_NOTIFICATIONS
+/// — without it every notification (live and background_fetch) is silently
+/// dropped. The permission is merged into the manifest by the plugin. Requested
+/// once the UI is up (not before runApp, or it'd block the app behind a dialog).
+Future<void> requestAndroidNotificationPermission() async {
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+  await _notifications
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >()
+      ?.requestNotificationsPermission();
+}
+
 /// Shows a local notification (desktop/Android, not web).
 Future<void> showLocalNotification(String title, String body) async {
   if (kIsWeb) {
@@ -614,6 +627,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   UpdateInfo? _updateInfo;
   double? _updateProgress;
   Offset _lastReactTap = Offset.zero; // where a quick-reaction was tapped
+  bool _foreground =
+      true; // app is focused → prefer in-app over OS notifications
   bool _installing = false;
   String? _installError;
   // Track recent send timestamps for the composer flame effect.
@@ -790,6 +805,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(_refresh());
     // Background fetch: poll relay for notifications when app is backgrounded.
     unawaited(initBackgroundFetch());
+    // Ask for the Android 13+ notification grant now the UI is up.
+    if (widget.autoPoll) unawaited(requestAndroidNotificationPermission());
     unawaited(_saveBackgroundState());
   }
 
@@ -866,22 +883,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ? (isDm ? preview : '$sender: $preview')
         : 'New message';
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(isDm ? body : '$title — $body'),
-        duration: const Duration(seconds: 3),
-        behavior: SnackBarBehavior.floating,
-        action: SnackBarAction(
-          label: 'Open',
-          onPressed: () {
-            _channels?.activate(channelId);
-            if (session != null) _markRead(session);
-            _replyTo = null;
-          },
+    // Foreground: an in-app snackbar is enough. Backgrounded (but still alive):
+    // raise an OS notification instead — a toast while the app is focused is
+    // just noise, and a snackbar while backgrounded is invisible.
+    if (_foreground) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(isDm ? body : '$title — $body'),
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+          action: SnackBarAction(
+            label: 'Open',
+            onPressed: () {
+              _channels?.activate(channelId);
+              if (session != null) _markRead(session);
+              _replyTo = null;
+            },
+          ),
         ),
-      ),
-    );
-    unawaited(showLocalNotification(title, body));
+      );
+    } else {
+      unawaited(showLocalNotification(title, body));
+    }
   }
 
   // --- inference (P2P AI bot) ---
@@ -2223,6 +2246,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Track focus so we don't fire OS notifications while the app is in front.
+    _foreground = state == AppLifecycleState.resumed;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       // Save fresh token for background fetch before the app sleeps.
