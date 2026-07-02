@@ -103,16 +103,16 @@ class VoiceSession {
             'echoCancellation': true,
             if (enhancedNoiseSuppression) 'googNoiseSuppression': true,
             if (enhancedNoiseSuppression) 'googHighpassFilter': true,
-        };
-      } else if (enhancedNoiseSuppression) {
-        audioConstraint = {
-          'autoGainControl': true,
-          'noiseSuppression': true,
-          'echoCancellation': true,
-          'googNoiseSuppression': true,
-          'googHighpassFilter': true,
-        };
-      }
+          };
+        } else if (enhancedNoiseSuppression) {
+          audioConstraint = {
+            'autoGainControl': true,
+            'noiseSuppression': true,
+            'echoCancellation': true,
+            'googNoiseSuppression': true,
+            'googHighpassFilter': true,
+          };
+        }
       } catch (_) {
         // Fall through with default constraint.
       }

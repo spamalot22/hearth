@@ -292,8 +292,11 @@ class ReadWatermarkControl extends MeshControl {
   final String messageId; // hex id of the latest message read
 
   @override
-  Map<String, Object?> toJson() =>
-      {'t': 'read', 'ch': channelId, 'msg': messageId};
+  Map<String, Object?> toJson() => {
+    't': 'read',
+    'ch': channelId,
+    'msg': messageId,
+  };
 }
 
 /// Tags a gossip frame's text for the data channel.
