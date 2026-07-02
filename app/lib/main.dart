@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:animations/animations.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
@@ -4012,25 +4013,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   Row(
                     children: [
                       Expanded(
-                        child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 200),
-                          switchInCurve: Curves.easeOut,
-                          switchOutCurve: Curves.easeIn,
-                          transitionBuilder: (child, animation) {
-                            final slide = Tween<Offset>(
-                              begin: const Offset(0.05, 0),
-                              end: Offset.zero,
-                            ).animate(animation);
-                            return FadeTransition(
-                              opacity: animation,
-                              child: SlideTransition(
-                                position: slide,
+                        child: PageTransitionSwitcher(
+                          duration: const Duration(milliseconds: 300),
+                          transitionBuilder: (child, primary, secondary) =>
+                              SharedAxisTransition(
+                                animation: primary,
+                                secondaryAnimation: secondary,
+                                transitionType:
+                                    SharedAxisTransitionType.horizontal,
+                                fillColor: Colors.transparent,
                                 child: child,
                               ),
-                            );
-                          },
-                          layoutBuilder: (currentChild, previousChildren) =>
-                              currentChild ?? const SizedBox.shrink(),
                           child: KeyedSubtree(
                             key: ValueKey(session.channelId),
                             child: _chatColumn(session),
@@ -4041,22 +4034,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     ],
                   )
                 else
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 200),
-                    switchInCurve: Curves.easeOut,
-                    switchOutCurve: Curves.easeIn,
-                    transitionBuilder: (child, animation) {
-                      final slide = Tween<Offset>(
-                        begin: const Offset(0.05, 0),
-                        end: Offset.zero,
-                      ).animate(animation);
-                      return FadeTransition(
-                        opacity: animation,
-                        child: SlideTransition(position: slide, child: child),
-                      );
-                    },
-                    layoutBuilder: (currentChild, previousChildren) =>
-                        currentChild ?? const SizedBox.shrink(),
+                  PageTransitionSwitcher(
+                    duration: const Duration(milliseconds: 300),
+                    transitionBuilder: (child, primary, secondary) =>
+                        SharedAxisTransition(
+                          animation: primary,
+                          secondaryAnimation: secondary,
+                          transitionType: SharedAxisTransitionType.horizontal,
+                          fillColor: Colors.transparent,
+                          child: child,
+                        ),
                     child: KeyedSubtree(
                       key: ValueKey(session.channelId),
                       child: _chatColumn(session),
@@ -5907,14 +5894,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ),
               ),
               const SizedBox(width: 8),
-              _PressableScale(
-                child: IconButton.filled(
-                  style: IconButton.styleFrom(
-                    backgroundColor: _channelAccent(session),
-                  ),
-                  onPressed: _sending ? null : () => unawaited(_send()),
-                  icon: const Icon(Icons.send),
-                ),
+              _SendButton(
+                color: _channelAccent(session),
+                onPressed: _sending ? null : () => unawaited(_send()),
               ),
             ],
           ),
@@ -6769,6 +6751,65 @@ class _BouncingDotsState extends State<_BouncingDots>
             ),
           );
         }),
+      ),
+    );
+  }
+}
+
+/// The composer's send button — a filled icon that plays a one-shot "launch"
+/// (the paper plane flies up-and-away and a fresh one settles in) on send.
+class _SendButton extends StatefulWidget {
+  const _SendButton({required this.color, required this.onPressed});
+
+  final Color color;
+  final VoidCallback? onPressed;
+
+  @override
+  State<_SendButton> createState() => _SendButtonState();
+}
+
+class _SendButtonState extends State<_SendButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 420),
+  );
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  void _fire() {
+    widget.onPressed?.call();
+    if (_ambientAnimations) _c.forward(from: 0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _PressableScale(
+      child: IconButton.filled(
+        style: IconButton.styleFrom(backgroundColor: widget.color),
+        onPressed: widget.onPressed == null ? null : _fire,
+        icon: AnimatedBuilder(
+          animation: _c,
+          builder: (context, _) {
+            final t = _c.value;
+            // First half: fly up-right and fade out. Second half: settle a
+            // fresh icon back in from centre.
+            final launching = t < 0.5;
+            final phase = launching ? t * 2 : (t - 0.5) * 2;
+            final eased = Curves.easeOut.transform(phase);
+            return Transform.translate(
+              offset: launching ? Offset(eased * 14, -eased * 14) : Offset.zero,
+              child: Opacity(
+                opacity: (launching ? 1 - eased : eased).clamp(0.0, 1.0),
+                child: const Icon(Icons.send),
+              ),
+            );
+          },
+        ),
       ),
     );
   }

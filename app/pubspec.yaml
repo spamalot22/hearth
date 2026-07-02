@@ -73,6 +73,7 @@ dependencies:
   web: ^1.1.1
   shared_preferences: ^2.5.5
   background_fetch: ^1.7.0
+  animations: ^2.2.0
 
 dev_dependencies:
   flutter_test:
