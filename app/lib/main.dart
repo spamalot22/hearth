@@ -692,8 +692,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
     if (widget.autoPoll) unawaited(_checkRelay());
-    // Finish an update download that was interrupted by the app closing.
-    if (widget.autoPoll) unawaited(resumePendingUpdate());
+    // Finish an update download that was interrupted by the app closing. If one
+    // is still running, show the update gate + progress bar and track it.
+    if (widget.autoPoll) {
+      final resumed = await resumePendingUpdate(
+        onProgress: (p) {
+          if (mounted) setState(() => _updateProgress = p);
+        },
+      );
+      if (resumed != null && mounted) {
+        setState(() {
+          _updateInfo = resumed;
+          _installing = true;
+        });
+      }
+    }
     if (widget.autoPoll) await _checkUpdate();
     if (_updateInfo == null && widget.autoPoll) {
       _updateCheckTimer = Timer.periodic(

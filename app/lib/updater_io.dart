@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:convert/convert.dart';
@@ -70,7 +71,7 @@ Future<void> downloadAndInstall(
       'fileName': fileName,
     });
     if (id == null) throw StateError('failed to start download');
-    await _savePending(id, expectedHash);
+    await _savePending(id, info);
     await _awaitAndroidDownload(id, expectedHash, onProgress);
     return;
   }
@@ -168,22 +169,30 @@ Future<void> _verifyAndInstallApk(String path, String expectedHash) async {
 
 /// If an update download was in flight when the app closed, finish it on the
 /// next launch: a completed one is verified + installed, a failed one is
-/// cleared, and one still running is re-attached so it completes on its own.
+/// cleared, and one still running is re-attached (driving [onProgress]) so it
+/// completes on its own. Returns the [UpdateInfo] of a *still-running* resumed
+/// download so the caller can show the update UI + progress bar; otherwise null.
 /// Safe to call on any platform (no-op unless there's a pending Android one).
-Future<void> resumePendingUpdate({
+Future<UpdateInfo?> resumePendingUpdate({
   void Function(double progress)? onProgress,
 }) async {
-  if (defaultTargetPlatform != TargetPlatform.android) return;
+  if (defaultTargetPlatform != TargetPlatform.android) return null;
   try {
     final pending = await _loadPending();
-    if (pending == null) return;
-    final (id, hash) = pending;
+    if (pending == null) return null;
+    final (id, info) = pending;
+    final hash = (_platformAsset(info.assets)?['sha256'] as String?)
+        ?.toLowerCase();
+    if (hash == null) {
+      await _clearPending();
+      return null;
+    }
     final s = await _downloader.invokeMapMethod<String, dynamic>('status', {
       'id': id,
     });
     if (s == null) {
       await _clearPending();
-      return;
+      return null;
     }
     final status = (s['status'] as num?)?.toInt() ?? 0;
     if (status == _dlSuccessful) {
@@ -194,13 +203,19 @@ Future<void> resumePendingUpdate({
           await _verifyAndInstallApk(path, hash);
         } catch (_) {}
       }
+      return null;
     } else if (status == _dlFailed) {
       await _clearPending();
+      return null;
     } else {
-      // Still downloading — re-attach so it installs when it finishes.
+      // Still downloading — re-attach (drives onProgress) so it installs when it
+      // finishes, and hand the info back so the caller can show progress.
       unawaited(_awaitAndroidDownload(id, hash, onProgress).catchError((_) {}));
+      return info;
     }
-  } catch (_) {}
+  } catch (_) {
+    return null;
+  }
 }
 
 // --- pending-download persistence (survives an app close mid-download) ---
@@ -210,16 +225,31 @@ Future<Box<dynamic>> _pendingBox() async {
   return Hive.openBox<dynamic>('hearth.update_dl');
 }
 
-Future<void> _savePending(int id, String hash) async {
+Future<void> _savePending(int id, UpdateInfo info) async {
   final box = await _pendingBox();
-  await box.putAll({'id': id, 'hash': hash});
+  await box.putAll({
+    'id': id,
+    'version': info.version,
+    'seq': info.seq,
+    'assets': jsonEncode(info.assets),
+  });
 }
 
-Future<(int, String)?> _loadPending() async {
+Future<(int, UpdateInfo)?> _loadPending() async {
   final box = await _pendingBox();
   final id = box.get('id');
-  final hash = box.get('hash');
-  return (id is int && hash is String) ? (id, hash) : null;
+  final version = box.get('version');
+  final seq = box.get('seq');
+  final assetsRaw = box.get('assets');
+  if (id is int && version is String && seq is int && assetsRaw is String) {
+    try {
+      final assets = (jsonDecode(assetsRaw) as Map).cast<String, dynamic>();
+      return (id, UpdateInfo(version: version, seq: seq, assets: assets));
+    } catch (_) {
+      return null;
+    }
+  }
+  return null;
 }
 
 Future<void> _clearPending() async {
