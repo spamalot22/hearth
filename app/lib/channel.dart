@@ -93,6 +93,12 @@ class ChannelSession {
   final Map<String, Content> _content = {};
   final Map<String, Uint8List> _blobs = {};
   final Set<String> _requested = {};
+  // Revision index, rebuilt by refreshContent: the winning (topologically last)
+  // valid edit per target id, and the set of validly tombstoned ids. "Valid"
+  // means the edit/delete author matches the target's author — an edit from
+  // anyone else is ignored, so only you can rewrite or remove your messages.
+  final Map<String, EditContent> _edits = {};
+  final Set<String> _deleted = {};
   StreamSubscription<Message>? _courierSub;
 
   bool get isDm => peerPubkey != null;
@@ -239,9 +245,12 @@ class ChannelSession {
     } catch (_) {}
   }
 
-  /// Decrypts + parses any not-yet-cached messages, then makes sure any blob
-  /// (sticker/sound) they reference is fetched into the local cache.
+  /// Decrypts + parses any not-yet-cached messages, makes sure any blob
+  /// (sticker/sound) they reference is fetched into the local cache, and
+  /// rebuilds the edit/tombstone revision index.
   Future<void> refreshContent() async {
+    _edits.clear();
+    _deleted.clear();
     for (final message in repository.ordered()) {
       if (!_content.containsKey(message.idHex)) {
         try {
@@ -252,9 +261,42 @@ class ChannelSession {
           _content[message.idHex] = const TextContent('🔒 unreadable');
         }
       }
-      await _ensureBlob(_content[message.idHex]!);
+      final content = _content[message.idHex]!;
+      await _ensureBlob(content);
+      // ordered() is a deterministic topological sort, so overwriting here
+      // makes the last valid edit the winner on every device.
+      switch (content) {
+        case EditContent(:final targetId):
+          if (_sameAuthor(targetId, message.author)) {
+            _edits[targetId] = content;
+          }
+        case DeleteContent(:final targetId):
+          if (_sameAuthor(targetId, message.author)) _deleted.add(targetId);
+        default:
+          break;
+      }
     }
   }
+
+  /// True if the message with hex id [targetIdHex] exists locally and was
+  /// authored by [author]. False (edit/delete held off) until the target syncs.
+  bool _sameAuthor(String targetIdHex, List<int> author) {
+    final List<int> id;
+    try {
+      id = hex.decode(targetIdHex);
+    } catch (_) {
+      return false;
+    }
+    final target = repository.get(Uint8List.fromList(id));
+    return target != null && hex.encode(target.author) == hex.encode(author);
+  }
+
+  /// The winning edit for message [idHex], or null if it was never validly
+  /// edited. Deletion trumps edits — check [isDeleted] first.
+  EditContent? editOf(String idHex) => _edits[idHex];
+
+  /// True if [idHex] carries a valid tombstone from its own author.
+  bool isDeleted(String idHex) => _deleted.contains(idHex);
 
   /// Loads a referenced blob from the store, or asks peers for it once.
   Future<void> _ensureBlob(Content content) async {

@@ -14,10 +14,9 @@ sealed class Content {
   Map<String, Object?> toJson();
 
   /// Serialises to payload bytes.
-  List<int> encode() => utf8.encode(jsonEncode({
-        ...toJson(),
-        if (replyTo != null) 'replyTo': replyTo,
-      }));
+  List<int> encode() => utf8.encode(
+    jsonEncode({...toJson(), if (replyTo != null) 'replyTo': replyTo}),
+  );
 }
 
 /// Plain text (which already includes emoji — they're just Unicode).
@@ -102,6 +101,37 @@ class ProfileContent extends Content {
   Map<String, Object?> toJson() => {'t': 'profile', 'name': name};
 }
 
+/// An edit to an earlier text message. The DAG is append-only, so an edit is a
+/// new message referencing its [targetId]; clients render the target with the
+/// newest valid edit's [text] plus an "edited" tag. Only honoured when the
+/// edit's author matches the target's author (anyone can *send* one, but it's
+/// ignored — see ChannelSession's revision index).
+class EditContent extends Content {
+  const EditContent(this.targetId, this.text);
+
+  final String targetId; // hex ID of the message being edited
+  final String text;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'edit',
+    'target': targetId,
+    'text': text,
+  };
+}
+
+/// A deletion tombstone for an earlier message. Append-only like [EditContent]:
+/// the target stays in the DAG but renders as a "message deleted" placeholder.
+/// Only honoured when the tombstone's author matches the target's author.
+class DeleteContent extends Content {
+  const DeleteContent(this.targetId);
+
+  final String targetId; // hex ID of the message being deleted
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'del', 'target': targetId};
+}
+
 /// An emoji reaction to another message. Stored in the DAG (persistent).
 /// A second reaction with the same emoji from the same author = toggle off.
 class ReactionContent extends Content {
@@ -111,8 +141,11 @@ class ReactionContent extends Content {
   final String emoji;
 
   @override
-  Map<String, Object?> toJson() =>
-      {'t': 'react', 'target': targetId, 'emoji': emoji};
+  Map<String, Object?> toJson() => {
+    't': 'react',
+    'target': targetId,
+    'emoji': emoji,
+  };
 }
 
 /// Parses a payload into [Content], falling back to plain text for unknown or
@@ -124,8 +157,10 @@ Content parseContent(List<int> payload) {
       final replyTo = decoded['replyTo'] as String?;
       switch (decoded['t']) {
         case 'text':
-          return TextContent(decoded['text'] as String? ?? '',
-              replyTo: replyTo);
+          return TextContent(
+            decoded['text'] as String? ?? '',
+            replyTo: replyTo,
+          );
         case 'gif':
           return GifContent(decoded['blob'] as String? ?? '');
         case 'sticker':
@@ -143,6 +178,13 @@ Content parseContent(List<int> payload) {
             decoded['target'] as String? ?? '',
             decoded['emoji'] as String? ?? '👍',
           );
+        case 'edit':
+          return EditContent(
+            decoded['target'] as String? ?? '',
+            decoded['text'] as String? ?? '',
+          );
+        case 'del':
+          return DeleteContent(decoded['target'] as String? ?? '');
         case 'file':
           return FileContent(
             decoded['blob'] as String? ?? '',

@@ -589,6 +589,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Timer? _errorTimer;
   bool _sending = false;
   Message? _replyTo; // message being replied to (shown above composer)
+  Message? _editing; // own message being edited (composer sends an EditContent)
 
   /// Persists relay state for the background fetch isolate.
   Future<void> _saveBackgroundState() async {
@@ -878,6 +879,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         if (_blocked.contains(authorHex)) return;
         sender = _displayName(msg.author);
         final content = session.contentOf(msg);
+        // Bookkeeping envelopes aren't "a new message" — don't notify.
+        if (content is EditContent ||
+            content is DeleteContent ||
+            content is ReactionContent ||
+            content is ProfileContent) {
+          return;
+        }
         if (content is TextContent) {
           preview = content.text.length > 80
               ? '${content.text.substring(0, 80)}…'
@@ -1116,6 +1124,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         case FileContent():
           break; // one-off attachment, not a re-usable library item
         case ReactionContent():
+          break;
+        case EditContent():
+          break;
+        case DeleteContent():
           break;
       }
     }
@@ -2305,6 +2317,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_typingLocally) {
       _typingLocally = false;
       _channels?.active?.sendTyping(false);
+    }
+    final editing = _editing;
+    if (editing != null) {
+      await _publish(EditContent(editing.idHex, text));
+      setState(() => _editing = null);
+      _composerFocus.requestFocus();
+      return;
     }
     await _publish(TextContent(text, replyTo: _replyTo?.idHex));
     setState(() => _replyTo = null);
@@ -4434,7 +4453,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _messageList(BuildContext context, ChannelSession session) {
     final messages = session.repository.ordered().where((m) {
       final c = session.contentOf(m);
-      return c is! ProfileContent && c is! SoundContent;
+      return c is! ProfileContent &&
+          c is! SoundContent &&
+          c is! EditContent &&
+          c is! DeleteContent;
     }).toList();
     return messages.isEmpty
         ? const Center(child: Text('No messages yet — say something.'))
@@ -4915,6 +4937,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ProfileContent() => const SizedBox.shrink(),
       // Reactions are rendered as chips on their target, not inline.
       ReactionContent() => const SizedBox.shrink(),
+      // Edits/tombstones render as their target's state, never inline.
+      EditContent() => const SizedBox.shrink(),
+      DeleteContent() => const SizedBox.shrink(),
     };
   }
 
@@ -5254,6 +5279,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final quickEmojis = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
     final pinned = _pinnedMessages[session.channelId] ?? {};
     final isPinned = pinned.contains(message.idHex);
+    final mine = listEquals(message.author, widget.identity.publicKey);
+    final editable = mine && _effectiveContent(session, message) is TextContent;
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -5286,7 +5313,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               title: const Text('Reply'),
               onTap: () {
                 Navigator.pop(ctx);
-                setState(() => _replyTo = message);
+                setState(() {
+                  _replyTo = message;
+                  _editing = null;
+                });
               },
             ),
             ListTile(
@@ -5299,10 +5329,82 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 _togglePin(session.channelId, message.idHex);
               },
             ),
+            if (editable)
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('Edit'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _startEdit(session, message);
+                },
+              ),
+            if (mine)
+              ListTile(
+                leading: Icon(
+                  Icons.delete_outline,
+                  color: Theme.of(ctx).colorScheme.error,
+                ),
+                title: Text(
+                  'Delete',
+                  style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  unawaited(_confirmDelete(message));
+                },
+              ),
           ],
         ),
       ),
     );
+  }
+
+  /// Puts the composer into edit mode, prefilled with the message's current
+  /// (post-edit) text. Sending publishes an [EditContent] instead of a new
+  /// message.
+  void _startEdit(ChannelSession session, Message message) {
+    final content = _effectiveContent(session, message);
+    if (content is! TextContent) return;
+    setState(() {
+      _editing = message;
+      _replyTo = null;
+    });
+    _input.text = content.text;
+    _input.selection = TextSelection.collapsed(offset: content.text.length);
+    _composerFocus.requestFocus();
+  }
+
+  /// Confirms, then publishes a [DeleteContent] tombstone. The message stays in
+  /// the DAG (append-only) but renders as "Message deleted" for everyone.
+  Future<void> _confirmDelete(Message message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete message?'),
+        content: const Text(
+          'It will show as deleted for everyone in this channel.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Delete',
+              style: TextStyle(color: Theme.of(ctx).colorScheme.error),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    if (_editing?.idHex == message.idHex) {
+      setState(() => _editing = null);
+      _input.clear();
+    }
+    await _publish(DeleteContent(message.idHex));
   }
 
   /// A short particle burst of [emoji] from [origin] when you add a reaction.
@@ -5357,7 +5459,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 : session.repository
                       .ordered()
                       .where((m) {
-                        final content = session.contentOf(m);
+                        if (session.isDeleted(m.idHex)) return false;
+                        final content = _effectiveContent(session, m);
                         if (content is TextContent) {
                           return content.text.toLowerCase().contains(
                             query.toLowerCase(),
@@ -5490,7 +5593,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     Message msg, {
     int maxLength = 60,
   }) {
-    final content = session.contentOf(msg);
+    if (session.isDeleted(msg.idHex)) return 'Message deleted';
+    final content = _effectiveContent(session, msg);
     if (content is TextContent) {
       return content.text.length > maxLength
           ? '${content.text.substring(0, maxLength)}…'
@@ -5502,6 +5606,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (content is FileContent) return '📎 ${content.name}';
     if (content is ReactionContent) return '${content.emoji} reacted';
     return 'Message';
+  }
+
+  /// The content a message should *render* as: its winning edit's text (with
+  /// the original replyTo preserved) when validly edited, else the original.
+  /// Edits only apply to text messages; check [ChannelSession.isDeleted] first.
+  Content _effectiveContent(ChannelSession session, Message message) {
+    final content = session.contentOf(message);
+    final edit = session.editOf(message.idHex);
+    if (edit != null && content is TextContent) {
+      return TextContent(edit.text, replyTo: content.replyTo);
+    }
+    return content;
   }
 
   /// Computes reactions for a message: {emoji: [authorHex, ...]}.
@@ -5572,9 +5688,38 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!mine && session.isDm && _blocked.contains(authorHex)) {
       return const SizedBox.shrink();
     }
-    // Reactions are rendered as chips on their target, not as bubbles.
-    if (session.contentOf(message) is ReactionContent) {
+    // Reactions render as chips on their target, edits/tombstones as the
+    // target's own state — none of them get a bubble of their own.
+    final rawContent = session.contentOf(message);
+    if (rawContent is ReactionContent ||
+        rawContent is EditContent ||
+        rawContent is DeleteContent) {
       return const SizedBox.shrink();
+    }
+    // Deleted messages: an inert placeholder (no actions, no reactions).
+    if (session.isDeleted(message.idHex)) {
+      return Align(
+        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Theme.of(
+                context,
+              ).colorScheme.surfaceContainerHigh.withAlpha(100),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              'Message deleted',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+        ),
+      );
     }
 
     final scheme = Theme.of(context).colorScheme;
@@ -5610,7 +5755,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           _contentView(
             context,
             session,
-            session.contentOf(message),
+            _effectiveContent(session, message),
             message.idHex,
           ),
           Align(
@@ -5620,6 +5765,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (session.editOf(message.idHex) != null &&
+                      rawContent is TextContent)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 3),
+                      child: Text(
+                        'edited',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                          fontSize: 9,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ),
                   if ((_pinnedMessages[session.channelId] ?? {}).contains(
                     message.idHex,
                   ))
@@ -5836,6 +5994,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (_editing != null)
+            Container(
+              padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+              color: scheme.surfaceContainerHigh.withAlpha(120),
+              child: Row(
+                children: [
+                  Icon(Icons.edit_outlined, size: 16, color: scheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Editing message',
+                      style: TextStyle(fontSize: 11, color: scheme.primary),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 16),
+                    onPressed: () {
+                      setState(() => _editing = null);
+                      _input.clear();
+                    },
+                  ),
+                ],
+              ),
+            ),
           if (_replyTo != null)
             Container(
               padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
