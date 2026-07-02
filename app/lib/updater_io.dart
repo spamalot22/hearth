@@ -167,15 +167,13 @@ Future<void> _verifyAndInstallApk(String path, String expectedHash) async {
   await OpenFilex.open(path);
 }
 
-/// If an update download was in flight when the app closed, finish it on the
-/// next launch: a completed one is verified + installed, a failed one is
-/// cleared, and one still running is re-attached (driving [onProgress]) so it
-/// completes on its own. Returns the [UpdateInfo] of a *still-running* resumed
-/// download so the caller can show the update UI + progress bar; otherwise null.
-/// Safe to call on any platform (no-op unless there's a pending Android one).
-Future<UpdateInfo?> resumePendingUpdate({
-  void Function(double progress)? onProgress,
-}) async {
+/// If an update download was in flight when the app closed, decide what to do on
+/// the next launch: a completed one is verified + installed and a failed one is
+/// cleared (both here, silently); a still-running one returns its [UpdateInfo]
+/// so the caller can show the update gate + progress bar and then drive it to
+/// completion with [attachPendingDownload]. Returns null when there's nothing to
+/// resume. Safe on any platform (no-op unless there's a pending Android one).
+Future<UpdateInfo?> resumePendingUpdate() async {
   if (defaultTargetPlatform != TargetPlatform.android) return null;
   try {
     final pending = await _loadPending();
@@ -207,15 +205,31 @@ Future<UpdateInfo?> resumePendingUpdate({
     } else if (status == _dlFailed) {
       await _clearPending();
       return null;
-    } else {
-      // Still downloading — re-attach (drives onProgress) so it installs when it
-      // finishes, and hand the info back so the caller can show progress.
-      unawaited(_awaitAndroidDownload(id, hash, onProgress).catchError((_) {}));
-      return info;
     }
+    // Still downloading — the caller shows the gate and calls
+    // attachPendingDownload to drive/finish it (with proper error handling).
+    return info;
   } catch (_) {
     return null;
   }
+}
+
+/// Drives the persisted, still-running download to completion (verify + install),
+/// reporting [onProgress]. Throws on failure so the caller can reset the UI and
+/// surface an error. Call after [resumePendingUpdate] returns non-null.
+Future<void> attachPendingDownload({
+  void Function(double progress)? onProgress,
+}) async {
+  final pending = await _loadPending();
+  if (pending == null) return;
+  final (id, info) = pending;
+  final hash = (_platformAsset(info.assets)?['sha256'] as String?)
+      ?.toLowerCase();
+  if (hash == null) {
+    await _clearPending();
+    return;
+  }
+  await _awaitAndroidDownload(id, hash, onProgress);
 }
 
 // --- pending-download persistence (survives an app close mid-download) ---

@@ -695,16 +695,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Finish an update download that was interrupted by the app closing. If one
     // is still running, show the update gate + progress bar and track it.
     if (widget.autoPoll) {
-      final resumed = await resumePendingUpdate(
-        onProgress: (p) {
-          if (mounted) setState(() => _updateProgress = p);
-        },
-      );
+      final resumed = await resumePendingUpdate();
       if (resumed != null && mounted) {
         setState(() {
           _updateInfo = resumed;
           _installing = true;
+          _updateProgress = 0;
         });
+        // Drive it to completion in the background (don't block init). On
+        // failure, reset so the gate shows the Install button + error again.
+        unawaited(
+          attachPendingDownload(
+            onProgress: (p) {
+              if (mounted) setState(() => _updateProgress = p);
+            },
+          ).catchError((Object e) {
+            if (mounted) {
+              setState(() {
+                _installing = false;
+                _installError = 'Update failed: $e';
+              });
+            }
+          }),
+        );
       }
     }
     if (widget.autoPoll) await _checkUpdate();

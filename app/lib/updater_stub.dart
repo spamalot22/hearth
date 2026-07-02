@@ -5,9 +5,12 @@ import 'update_checker.dart';
 Future<void> cleanupOldUpdates() async {}
 
 /// No-op on web (no background download to resume).
-Future<UpdateInfo?> resumePendingUpdate({
+Future<UpdateInfo?> resumePendingUpdate() async => null;
+
+/// No-op on web.
+Future<void> attachPendingDownload({
   void Function(double progress)? onProgress,
-}) async => null;
+}) async {}
 
 /// Web stub — there's no in-app install on the web (it updates by reload), and
 /// `dart:io` isn't available, so this just refuses. The UI only offers Install on
