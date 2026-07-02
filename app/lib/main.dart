@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' as ui;
 
 import 'package:animations/animations.dart';
 import 'package:audioplayers/audioplayers.dart';
@@ -577,6 +578,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _checkingRelay = false;
   String? _myName;
   final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
+  // pubkeyHex -> fetched avatar image bytes (from self-asserted profiles).
+  final Map<String, Uint8List> _avatarBytes = {};
+  String? _myAvatar; // my avatar's blob hash (rides in profile announcements)
   final Set<String> _announced = {}; // channels we've published our name into
   final Set<String> _memberBaseline =
       {}; // channels whose baseline is scheduled
@@ -803,6 +807,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _library = library;
       _profile = profile;
       _myName = profile?.name;
+      _myAvatar = profile?.avatar;
       // Auto-prune old blobs (> 30 days, except bookmarked media).
       if (blobStore is HiveBlobStore && library != null) {
         final keep = library.allHashes();
@@ -811,6 +816,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _player = widget.autoPoll ? AudioPlayer() : null;
       _channels = channels;
     });
+    // My avatar bytes live in the blob store — warm the render cache.
+    final myAvatar = _myAvatar;
+    if (myAvatar != null && blobStore != null) {
+      final avatarBytes = await blobStore.get(myAvatar);
+      if (avatarBytes != null && mounted) {
+        setState(
+          () => _avatarBytes[widget.identity.publicKeyHex] = avatarBytes,
+        );
+      }
+    }
     // Mark all pre-existing channels as read so the drawer doesn't show stale
     // unread counts from history that was loaded before the user opened the app.
     for (final session in channels.sessions) {
@@ -1094,8 +1109,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _markRead(active);
       // Backfill any watermark timestamps that were unresolved when received.
       _backfillWatermarkTs(active);
-      // Publish our own name into a channel the first time we're active in it.
-      if (_myName != null && _announced.add(active.channelId)) {
+      // Publish our own name/avatar into a channel the first time we're
+      // active in it.
+      if ((_myName != null || _myAvatar != null) &&
+          _announced.add(active.channelId)) {
         await _announceName(active);
       }
     }
@@ -1142,24 +1159,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Records each author's latest self-asserted name as a *suggested* petname.
+  /// Records each author's latest self-asserted name as a *suggested* petname,
+  /// and their avatar image once its blob has been fetched.
   void _indexProfiles(ChannelSession session) {
     for (final message in session.repository.ordered()) {
       final content = session.contentOf(message);
-      if (content is ProfileContent && content.name.isNotEmpty) {
-        _suggested[hex.encode(message.author)] = content.name;
+      if (content is ProfileContent) {
+        final authorHex = hex.encode(message.author);
+        if (content.name.isNotEmpty) _suggested[authorHex] = content.name;
+        final avatar = content.avatar;
+        if (avatar != null) {
+          final bytes = session.blobOf(avatar);
+          if (bytes != null) _avatarBytes[authorHex] = bytes;
+        } else if (authorHex != widget.identity.publicKeyHex) {
+          // Their latest profile dropped the avatar — stop rendering the old
+          // one. (Self is exempt: local state is authoritative, and old
+          // pre-avatar announcements linger in history until we re-announce.)
+          _avatarBytes.remove(authorHex);
+        }
       }
     }
   }
 
-  /// Publishes our self-asserted name into [session] so members can suggest it.
+  /// Publishes our self-asserted name (+ avatar hash) into [session] so
+  /// members can suggest it.
   Future<void> _announceName(ChannelSession session) async {
     final name = _myName;
-    if (name == null) return;
+    if (name == null && _myAvatar == null) return;
     final message = await Message.create(
       author: widget.identity,
       channel: session.channelId,
-      payload: await session.encodePayload(ProfileContent(name)),
+      payload: await session.encodePayload(
+        ProfileContent(name ?? '', avatar: _myAvatar),
+      ),
       prev: session.repository.heads(),
     );
     await session.publish(message);
@@ -1181,6 +1213,67 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (mounted) setState(() {});
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
       if (_myName != null) await _announceName(session);
+      _announced.add(session.channelId);
+    }
+  }
+
+  /// Sets (or removes) your avatar: pick an image, downscale it to a small
+  /// PNG blob, and re-announce your profile everywhere.
+  Future<void> _setMyAvatar() async {
+    final store = _blobStore;
+    if (store == null) return;
+    // With an avatar set, offer change/remove; otherwise straight to the picker.
+    var remove = false;
+    if (_myAvatar != null) {
+      final choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.image_outlined),
+                title: const Text('Choose a new avatar'),
+                onTap: () => Navigator.pop(ctx, 'change'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: const Text('Remove avatar'),
+                onTap: () => Navigator.pop(ctx, 'remove'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (choice == null) return;
+      remove = choice == 'remove';
+    }
+    String? hash;
+    if (!remove) {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        withData: true,
+      );
+      final bytes = result?.files.single.bytes;
+      if (bytes == null) return;
+      final Uint8List png;
+      try {
+        png = await downscaleAvatar(bytes);
+      } catch (_) {
+        if (mounted) _setError('could not read that image');
+        return;
+      }
+      hash = await store.put(png);
+      _avatarBytes[widget.identity.publicKeyHex] = png;
+    } else {
+      _avatarBytes.remove(widget.identity.publicKeyHex);
+    }
+    await _profile?.setAvatar(hash);
+    _myAvatar = hash;
+    _announced.clear();
+    if (mounted) setState(() {});
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      await _announceName(session);
       _announced.add(session.channelId);
     }
   }
@@ -4864,10 +4957,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
         child: Row(
           children: [
-            Icon(
-              Icons.local_fire_department,
-              color: theme.colorScheme.primary,
-              size: 28,
+            Tooltip(
+              message: 'Set your avatar',
+              child: GestureDetector(
+                onTap: () => unawaited(_setMyAvatar()),
+                child: _myAvatar != null
+                    ? _avatar(widget.identity.publicKey, radius: 15)
+                    : Icon(
+                        Icons.local_fire_department,
+                        color: theme.colorScheme.primary,
+                        size: 28,
+                      ),
+              ),
             ),
             const SizedBox(width: 10),
             Expanded(
@@ -5256,18 +5357,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return oklch(l, c, hue);
   }
 
-  /// A small colour-coded avatar (initial of the display name) with a subtle
-  /// two-stop gradient derived from two pubkey bytes — deterministic, so each
-  /// identity keeps a recognisable look, but richer than a flat fill.
+  /// A small colour-coded avatar with a subtle two-stop gradient derived from
+  /// two pubkey bytes — deterministic, so each identity keeps a recognisable
+  /// look. When the author has shared an avatar image (self-asserted profile),
+  /// it renders inside the gradient, which stays visible as a ring — the
+  /// pubkey-derived colours remain the spoof-resistant cue; the picture is
+  /// just decoration.
   Widget _avatar(Uint8List author, {double radius = 16}) {
     final label = _displayName(author).replaceFirst('hearth#', '');
     final initial = label.isEmpty ? '?' : label[0].toUpperCase();
     final hue = _userHue(author);
     // Second stop shifts hue by a byte-derived amount for variety.
     final hue2 = hue + (author.length > 1 ? author[1] : 40) * 80.0 / 256.0 + 20;
+    final image = _avatarBytes[hex.encode(author)];
     return Container(
       width: radius * 2,
       height: radius * 2,
+      padding: image != null ? const EdgeInsets.all(1.5) : null,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         gradient: LinearGradient(
@@ -5277,14 +5383,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ),
       ),
       alignment: Alignment.center,
-      child: Text(
-        initial,
-        style: TextStyle(
-          fontSize: radius * 0.85,
-          fontWeight: FontWeight.w600,
-          color: Colors.black.withAlpha(160),
-        ),
-      ),
+      child: image != null
+          ? ClipOval(
+              child: Image.memory(
+                image,
+                fit: BoxFit.cover,
+                width: radius * 2,
+                height: radius * 2,
+                gaplessPlayback: true,
+              ),
+            )
+          : Text(
+              initial,
+              style: TextStyle(
+                fontSize: radius * 0.85,
+                fontWeight: FontWeight.w600,
+                color: Colors.black.withAlpha(160),
+              ),
+            ),
     );
   }
 
@@ -7175,6 +7291,28 @@ class _BouncingDotsState extends State<_BouncingDots>
 
 /// The composer's send button — a filled icon that plays a one-shot "launch"
 /// (the paper plane flies up-and-away and a fresh one settles in) on send.
+/// Decodes any picked image and re-encodes it as a small PNG (≤128px on the
+/// long side, aspect preserved) so avatars stay tiny for P2P gossip. Throws on
+/// undecodable input.
+Future<Uint8List> downscaleAvatar(Uint8List bytes) async {
+  // Probe the dimensions first so the target constrains the *long* side.
+  final probe = await ui.instantiateImageCodec(bytes);
+  final probed = (await probe.getNextFrame()).image;
+  final wide = probed.width >= probed.height;
+  final long = wide ? probed.width : probed.height;
+  probed.dispose();
+  final codec = await ui.instantiateImageCodec(
+    bytes,
+    targetWidth: wide ? min(128, long) : null,
+    targetHeight: wide ? null : min(128, long),
+  );
+  final image = (await codec.getNextFrame()).image;
+  final data = await image.toByteData(format: ui.ImageByteFormat.png);
+  image.dispose();
+  if (data == null) throw StateError('could not encode avatar');
+  return data.buffer.asUint8List();
+}
+
 /// mm:ss for a clip length or playback position.
 String formatClipTime(int ms) {
   final s = (ms / 1000).round();

@@ -20,4 +20,12 @@ class ProfileStore {
   }
 
   Future<void> setName(String name) => _box.put('name', name);
+
+  /// Blob hash of your chosen avatar image, or null for none.
+  String? get avatar {
+    final value = _box.get('avatar');
+    return (value == null || value.isEmpty) ? null : value;
+  }
+
+  Future<void> setAvatar(String? hash) => _box.put('avatar', hash ?? '');
 }

@@ -105,17 +105,26 @@ class FileContent extends Content {
   };
 }
 
-/// A signed, self-asserted display name. Not rendered as a message — clients
-/// index it as the *suggested* petname for its author, who can still be named
-/// locally however you like. Self-asserted, so treat it as a suggestion, never
-/// proof of identity (the author's pubkey is the real id).
+/// A signed, self-asserted display name (and optionally an avatar image, as a
+/// blob hash). Not rendered as a message — clients index it as the *suggested*
+/// petname + avatar for its author, who can still be named locally however you
+/// like. Self-asserted, so treat it as a suggestion, never proof of identity
+/// (the author's pubkey is the real id — which is why the pubkey-derived
+/// gradient stays the avatar fallback and border cue).
 class ProfileContent extends Content {
-  const ProfileContent(this.name);
+  const ProfileContent(this.name, {this.avatar});
 
   final String name;
 
+  /// Blob hash of the author's chosen avatar image, or null for none.
+  final String? avatar;
+
   @override
-  Map<String, Object?> toJson() => {'t': 'profile', 'name': name};
+  Map<String, Object?> toJson() => {
+    't': 'profile',
+    'name': name,
+    if (avatar != null) 'avatar': avatar,
+  };
 }
 
 /// An edit to an earlier text message. The DAG is append-only, so an edit is a
@@ -189,7 +198,10 @@ Content parseContent(List<int> payload) {
             decoded['emoji'] as String? ?? '🔊',
           );
         case 'profile':
-          return ProfileContent(decoded['name'] as String? ?? '');
+          return ProfileContent(
+            decoded['name'] as String? ?? '',
+            avatar: decoded['avatar'] as String?,
+          );
         case 'react':
           return ReactionContent(
             decoded['target'] as String? ?? '',
