@@ -861,6 +861,34 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   `animations` package); and an animated **send button**. Continuous ambient
   animations are gated behind `_ambientAnimations` (off under `flutter test`, so
   `pumpAndSettle` still settles); one-shot animations run normally.
+- **2026-07-03** — **Contact cards — cold-start DMs without a shared group.**
+  Closed the gap where you could only DM someone whose pubkey you already had
+  (via a mutual group or an invite). A **contact card** is the person-level
+  analogue of a channel invite: a `hearth-contact:` code (QR + paste, distinct
+  scheme so it's never confused with the recovery-phrase QR) carrying your
+  pubkey, suggested name, home relay, and an **unguessable rendezvous
+  capability** you listen on. The rendezvous id is random, **not** derived from
+  the pubkey, so only people you hand a card to can reach you — deliberately
+  **not** an always-on pubkey-addressed inbox (option B was considered and
+  rejected: it's the enumerable/spam surface). Leak/spam → mint a new card;
+  existing DMs are unaffected (they live on their own derived channel).
+  **First contact reuses the whole stack:** the joiner announces on the owner's
+  rendezvous (a bare `WebRtcMesh`, no cipher/DAG traffic — `rendezvous.dart`),
+  signed signalling (`signal_auth`) proves each side's identity, and both then
+  call the existing `openDm(peerPubkey)` → the identical derived + **PairBox**
+  DM. The rendezvous is introduction-only; the conversation is a normal DM, and
+  nothing in the DM/crypto path changed. Also folded in a latent fix: **DMs are
+  now persisted (`DmRegistry`) once they have real history and restored on
+  startup** like groups (previously only groups restored; a DM only lived while
+  on screen). `WebRtcMesh` gained an `onPeerConnectedHex` hook (symmetric with
+  `onPeerLeft`) so the rendezvous learns who reached it. **Known limits:** first
+  contact needs both peers online within the joiner's retry window (no offline
+  queue — that would edge toward option B); the owner opens a DM to anyone who
+  presents their card (consistent with "you gave them the card", but a
+  *publicly-posted* card is reachable by anyone who grabs it — use per-person
+  cards for private sharing, or rotate); live two-client rendezvous is
+  unverified without a real relay. Decisions taken with the user: one rendezvous
+  per identity (not per card), restore only DMs with established history.
 - **2026-07-02** — **Messaging batch: edit/delete, markdown, voice messages,
   avatars.** (1) **Edit & delete** fit the append-only DAG: an edit/tombstone is
   a new envelope (`EditContent`/`DeleteContent`) referencing its target;
