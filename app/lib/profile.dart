@@ -68,3 +68,59 @@ class DmRegistry {
 
   Future<void> remove(String peerPubkeyHex) => _box.delete(peerPubkeyHex);
 }
+
+/// One outbound first-contact attempt: the [ownerPubkeyHex] you're reaching and
+/// the [rendezvousId] from their card, plus when you accepted it.
+class PendingContact {
+  PendingContact(this.ownerPubkeyHex, this.rendezvousId, this.acceptedMs);
+
+  final String ownerPubkeyHex;
+  final String rendezvousId;
+  final int acceptedMs;
+}
+
+/// Outbound contact-card attempts that haven't connected yet. Persisted so a
+/// first contact keeps retrying across network drops *and* app restarts —
+/// resumed on startup, dropped once the DM connects (or after [_expiryMs] as a
+/// backstop, so a card to someone who never comes back doesn't linger forever).
+/// This stays purely *outbound* (people you chose to reach), never an inbound
+/// listen-for-anyone inbox. Keyed by owner pubkey hex → `rendezvousId|acceptedMs`.
+class PendingContactStore {
+  PendingContactStore._(this._box);
+
+  final Box<String> _box;
+
+  static const int _expiryMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  static Future<PendingContactStore> open() async {
+    await Hive.initFlutter();
+    final box = await Hive.openBox<String>('hearth.pending_contacts');
+    return PendingContactStore._(box);
+  }
+
+  /// Live (non-expired) pending contacts; prunes any that have aged out.
+  Future<List<PendingContact>> live() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final result = <PendingContact>[];
+    for (final key in _box.keys.cast<String>().toList()) {
+      final raw = _box.get(key);
+      if (raw == null) continue;
+      final sep = raw.indexOf('|');
+      final rv = sep < 0 ? raw : raw.substring(0, sep);
+      final ts = sep < 0 ? 0 : int.tryParse(raw.substring(sep + 1)) ?? 0;
+      if (now - ts > _expiryMs) {
+        await _box.delete(key);
+        continue;
+      }
+      result.add(PendingContact(key, rv, ts));
+    }
+    return result;
+  }
+
+  Future<void> save(String ownerPubkeyHex, String rendezvousId) => _box.put(
+    ownerPubkeyHex,
+    '$rendezvousId|${DateTime.now().millisecondsSinceEpoch}',
+  );
+
+  Future<void> remove(String ownerPubkeyHex) => _box.delete(ownerPubkeyHex);
+}

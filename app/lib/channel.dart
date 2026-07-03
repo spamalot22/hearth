@@ -126,6 +126,7 @@ class ChannelSession {
     CandidateCache? candidateCache,
     List<int>? peerPubkey,
     void Function()? onPeerConnected,
+    void Function(String peerHex)? onPeerConnectedHex,
     void Function(String fromHex, List<String> peers)? onContactsOnline,
     void Function(Map<String, Object?> manifest)? onVersionControl,
     void Function(String peerHex, bool typing)? onTyping,
@@ -153,6 +154,7 @@ class ChannelSession {
         channel: channelId,
         identity: identity,
         candidateCache: candidateCache,
+        onPeerConnectedHex: onPeerConnectedHex,
         onPeerLeft: (_) {
           // Resume relay polling when the last P2P peer drops.
           if (mesh?.peers.isEmpty ?? true) courier?.resume();
@@ -365,6 +367,7 @@ class ChannelManager {
     this.onBackgroundMessage,
     this.onForceUpdate,
     this.onInference,
+    this.onDmConnected,
   });
 
   final Identity identity;
@@ -386,6 +389,10 @@ class ChannelManager {
   /// tagged with that channelId so the response goes back to the right channel.
   final void Function(String fromHex, String channelId, MeshControl control)?
   onInference;
+
+  /// Fired with a peer's pubkey (hex) when a **DM** connects to them — used to
+  /// retire a pending first-contact once it lands.
+  final void Function(String peerHex)? onDmConnected;
 
   final Map<String, ChannelSession> _sessions = {};
   String? _activeId;
@@ -525,6 +532,7 @@ class ChannelManager {
         blobStore: blobStore,
         candidateCache: candidateCache,
         onPeerConnected: _broadcastContactsOnline,
+        onPeerConnectedHex: onDmConnected,
         onContactsOnline: _handleContactsOnline,
         onVersionControl: _handleVersionControl,
         onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),

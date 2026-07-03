@@ -531,9 +531,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ContactBook? _contacts;
   ChannelRegistry? _registry;
   DmRegistry? _dms; // established DMs, restored on startup
+  PendingContactStore? _pending; // outbound first-contacts not yet connected
   RendezvousListener? _rendezvous; // my standing contact-card inbox
-  // Transient joiner-side rendezvous meshes, keyed by the owner pubkey we're
-  // reaching — torn down once their DM connects (or on a timeout).
+  // Joiner-side rendezvous meshes, keyed by the owner pubkey we're reaching —
+  // torn down once their DM connects. Backed by [_pending] so they resume
+  // across restarts until first contact lands or the entry expires.
   final Map<String, RendezvousListener> _pendingContact = {};
   BlobStore? _blobStore;
   MediaLibrary? _library;
@@ -744,6 +746,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final peerCache = widget.autoPoll ? await CandidateCache.open() : null;
     final profile = widget.autoPoll ? await ProfileStore.open() : null;
     final dms = widget.autoPoll ? await DmRegistry.open() : null;
+    final pending = widget.autoPoll ? await PendingContactStore.open() : null;
     final settings = widget.autoPoll ? await SettingsStore.open() : null;
     _settings = settings;
     if (settings != null) {
@@ -820,6 +823,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         if (mounted) setState(() => _updateInfo = info);
       },
       onInference: _handleMeshControl,
+      onDmConnected: _onDmConnected,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -844,6 +848,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _contacts = contacts;
       _registry = registry;
       _dms = dms;
+      _pending = pending;
       _blobStore = blobStore;
       _library = library;
       _profile = profile;
@@ -894,6 +899,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ignore: {widget.identity.publicKeyHex},
         onContact: _onRendezvousContact,
       );
+    }
+    // Resume outbound first-contacts that hadn't connected yet — keep announcing
+    // on each owner's rendezvous (and re-open the DM) so a card scanned while
+    // they were offline connects whenever you're both next online.
+    if (widget.autoPoll) {
+      final keepActive = channels.activeId;
+      for (final p in await pending?.live() ?? const <PendingContact>[]) {
+        try {
+          await channels.openDm(hex.decode(p.ownerPubkeyHex));
+        } catch (_) {}
+        _startPendingRendezvous(p.ownerPubkeyHex, p.rendezvousId);
+      }
+      if (keepActive != null) channels.activate(keepActive);
     }
     // Background fetch: poll relay for notifications when app is backgrounded.
     unawaited(initBackgroundFetch());
@@ -1438,23 +1456,41 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     await _channels?.openDm(ownerKey);
     if (mounted) setState(() {});
     if (!widget.autoPoll) return; // no live mesh in tests
-    // Announce on the owner's rendezvous so they discover us and open the DM
-    // back. Tear it down when their DM connects, or after a grace period.
+    // Persist the attempt so it survives an app close, then announce on the
+    // owner's rendezvous so they discover us and open the DM back. It keeps
+    // trying (across restarts) until the DM connects or the entry expires —
+    // no fixed timeout; _onDmConnected retires it on success.
+    await _pending?.save(ownerHex, card.rendezvous);
+    _startPendingRendezvous(ownerHex, card.rendezvous);
+  }
+
+  /// Announces on [rendezvousId] to reach the card owner [ownerHex] for first
+  /// contact. Idempotent per owner (replaces any live listener).
+  void _startPendingRendezvous(String ownerHex, String rendezvousId) {
     unawaited(_pendingContact[ownerHex]?.close());
-    final listener = RendezvousListener.start(
+    _pendingContact[ownerHex] = RendezvousListener.start(
       relayUrl: _relayUrl,
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
-      rendezvousId: card.rendezvous,
+      rendezvousId: rendezvousId,
       identity: widget.identity,
       ignore: {widget.identity.publicKeyHex},
       // We already know the owner from the card, so a rendezvous connect just
-      // confirms reachability; the DM proper forms on its derived channel.
+      // confirms reachability; the DM proper forms on its derived channel and
+      // _onDmConnected retires this listener once it lands.
       onContact: (_) {},
     );
-    _pendingContact[ownerHex] = listener;
-    Future.delayed(const Duration(minutes: 2), () {
-      unawaited(_pendingContact.remove(ownerHex)?.close());
-    });
+  }
+
+  /// A DM to [peerHex] connected. If it was a pending first-contact, it's landed
+  /// — drop the persisted attempt, stop announcing on its rendezvous, and record
+  /// the DM so it restores on next launch even if no message is sent yet (a card
+  /// contact you deliberately reached and connected to is established).
+  void _onDmConnected(String peerHex) {
+    final listener = _pendingContact.remove(peerHex);
+    if (listener == null) return;
+    unawaited(listener.close());
+    unawaited(_pending?.remove(peerHex));
+    if (_persistedDms.add(peerHex)) unawaited(_dms?.save(peerHex));
   }
 
   /// Members (by id) who've posted in [session], excluding you.
@@ -2548,6 +2584,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         if (mounted) setState(() => _updateInfo = info);
       },
       onInference: _handleMeshControl,
+      onDmConnected: _onDmConnected,
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);

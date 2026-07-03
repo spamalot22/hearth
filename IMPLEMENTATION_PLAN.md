@@ -881,9 +881,15 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   now persisted (`DmRegistry`) once they have real history and restored on
   startup** like groups (previously only groups restored; a DM only lived while
   on screen). `WebRtcMesh` gained an `onPeerConnectedHex` hook (symmetric with
-  `onPeerLeft`) so the rendezvous learns who reached it. **Known limits:** first
-  contact needs both peers online within the joiner's retry window (no offline
-  queue — that would edge toward option B); the owner opens a DM to anyone who
+  `onPeerLeft`) so the rendezvous learns who reached it. **Durable first
+  contact (same day):** a scanned card is persisted as a `PendingContact` and
+  the joiner keeps announcing on the owner's rendezvous across network drops
+  *and* app restarts (resumed on `_init`), retiring the attempt only once the
+  DM connects (`onDmConnected` → also records the DM so it restores) or after a
+  7-day backstop expiry. So first contact now lands "whenever you're both next
+  online", not "both online in the same window". Stays purely outbound (people
+  you chose to reach), never an inbound stranger inbox. **Known limits:** the
+  owner opens a DM to anyone who
   presents their card (consistent with "you gave them the card", but a
   *publicly-posted* card is reachable by anyone who grabs it — use per-person
   cards for private sharing, or rotate); live two-client rendezvous is
