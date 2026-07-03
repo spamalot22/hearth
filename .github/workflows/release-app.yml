@@ -131,14 +131,28 @@ jobs:
           name: web
           path: hearth-web.zip
 
+  # GitHub releases are immutable once published (no asset changes, ever), so
+  # the flow is: upload everything to a DRAFT, then flip it to published only
+  # when all platforms built, then tell the relay. A partial build leaves a
+  # draft (re-runnable, or publishable by hand); it can never lock in a
+  # half-empty published release.
   release:
     needs: [android, windows, web]
-    # Release whatever built, even if one platform failed, so a flaky native build
-    # on one OS doesn't block shipping the others.
+    # Run even if a platform failed so its assets land on the draft — but the
+    # publish step below only fires when everything built.
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Guard against a pre-published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # releases/tags only resolves *published* releases; drafts 404 here.
+          if gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" --jq .id >/dev/null 2>&1; then
+            echo "::error::A published release already exists for ${{ github.ref_name }} — it is immutable, so CI cannot attach assets. Release by pushing a tag (git tag X.Y.Z && git push origin X.Y.Z), not via the GitHub UI publish button, and cut a new patch tag now."
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -167,27 +181,33 @@ jobs:
           pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
             android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip > ../dist/manifest.json
       - run: ls -lR dist
-      - uses: softprops/action-gh-release@v2
+      - name: Create draft release with assets
+        id: gh_release
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          draft: true
           generate_release_notes: true
-
-  # Publish the signed manifest to the relay so clients see the new version.
-  # The manifest was already uploaded as a release asset by the release job.
-  publish-manifest:
-    needs: [android, windows, web, release]
-    if: |
-      always() &&
-      needs.android.result == 'success' &&
-      needs.windows.result == 'success' &&
-      needs.web.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download manifest from release
+      - name: Publish release
+        # Only a complete release gets published (immutably). Otherwise the
+        # draft stays for a re-run to finish or a human to judge.
+        if: |
+          needs.android.result == 'success' &&
+          needs.windows.result == 'success' &&
+          needs.web.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release download "${{ github.ref_name }}" -p manifest.json -R "${{ github.repository }}"
-      - name: Publish to relay
+        run: |
+          gh api -X PATCH "repos/${{ github.repository }}/releases/${{ steps.gh_release.outputs.id }}" \
+            -F draft=false --jq .html_url
+      - name: Publish manifest to relay
+        # After the GH release is live — clients download assets from it, and
+        # draft assets aren't publicly fetchable. A failed publish step above
+        # stops the job, so ordering alone guarantees this never runs early.
+        if: |
+          needs.android.result == 'success' &&
+          needs.windows.result == 'success' &&
+          needs.web.result == 'success'
         env:
           RELEASE_SECRET: ${{ secrets.RELEASE_SECRET }}
           RELAY_URL: ${{ vars.RELAY_URL }}
@@ -201,4 +221,4 @@ jobs:
           curl -fsS -X POST "$RELAY_URL/version" \
             -H "authorization: Bearer $RELEASE_SECRET" \
             -H "content-type: application/json" \
-            --data @manifest.json
+            --data @dist/manifest.json
