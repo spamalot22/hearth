@@ -30,6 +30,7 @@ import 'background_poll.dart';
 import 'blob_store_hive.dart';
 import 'candidate_cache.dart';
 import 'channel.dart';
+import 'contact_card.dart';
 import 'contacts.dart';
 import 'content.dart';
 import 'emoji_picker.dart';
@@ -43,6 +44,7 @@ import 'mesh_control.dart';
 import 'network_status.dart';
 import 'notify.dart';
 import 'profile.dart';
+import 'rendezvous.dart';
 import 'screen_picker.dart';
 import 'screen_share.dart';
 import 'settings.dart';
@@ -326,6 +328,11 @@ class HearthTestApi {
 
   /// Re-decrypts + re-renders the active channel (call after injecting a message).
   late Future<void> Function() refresh;
+
+  /// Accepts a `hearth-contact:` card as if scanned/pasted, so the DM-bootstrap
+  /// wiring (add contact + openDm) can be driven without the paste dialog or a
+  /// live relay. Returns false if the string isn't a valid card.
+  late Future<bool> Function(String code) acceptCard;
 }
 
 /// The Hearth theme for a given [brightness] — the ember seed with warm surfaces
@@ -523,6 +530,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ChannelManager? _channels;
   ContactBook? _contacts;
   ChannelRegistry? _registry;
+  DmRegistry? _dms; // established DMs, restored on startup
+  RendezvousListener? _rendezvous; // my standing contact-card inbox
+  // Transient joiner-side rendezvous meshes, keyed by the owner pubkey we're
+  // reaching — torn down once their DM connects (or on a timeout).
+  final Map<String, RendezvousListener> _pendingContact = {};
   BlobStore? _blobStore;
   MediaLibrary? _library;
   AudioPlayer? _player;
@@ -687,7 +699,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     widget.testApi
       ?..injectControl = _handleMeshControl
       ..activeChannel = (() => _channels?.active)
-      ..refresh = _refresh;
+      ..refresh = _refresh
+      ..acceptCard = ((code) async {
+        final card = ContactCard.decode(code);
+        if (card == null) return false;
+        await _acceptContactCard(card);
+        return true;
+      });
     unawaited(_init());
   }
 
@@ -725,6 +743,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final library = widget.autoPoll ? await MediaLibrary.open() : null;
     final peerCache = widget.autoPoll ? await CandidateCache.open() : null;
     final profile = widget.autoPoll ? await ProfileStore.open() : null;
+    final dms = widget.autoPoll ? await DmRegistry.open() : null;
     final settings = widget.autoPoll ? await SettingsStore.open() : null;
     _settings = settings;
     if (settings != null) {
@@ -806,6 +825,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _groups[group.id] = group;
       await channels.openGroup(group.id, group.key);
     }
+    // Restore established DMs (peers you've actually messaged) so they keep
+    // receiving without a tap — the DM analogue of the group loop above.
+    // openDm activates each; restore the post-group active so startup lands
+    // where it did before (the last group, or the first DM if there are none).
+    final restoreActive = channels.activeId;
+    for (final peerHex in dms?.all() ?? const <String>[]) {
+      try {
+        await channels.openDm(hex.decode(peerHex));
+      } catch (_) {}
+    }
+    if (restoreActive != null) channels.activate(restoreActive);
     if (!mounted) {
       await channels.close();
       return;
@@ -813,6 +843,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     setState(() {
       _contacts = contacts;
       _registry = registry;
+      _dms = dms;
       _blobStore = blobStore;
       _library = library;
       _profile = profile;
@@ -852,6 +883,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Decrypt the active channel's loaded history: the onUpdate calls during the
     // open loop above ran before _channels was set, so they were no-ops.
     unawaited(_refresh());
+    // Listen on my contact-card rendezvous so anyone I handed a card to can
+    // reach me for first contact (see rendezvous.dart / contact_card.dart).
+    if (widget.autoPoll && profile != null) {
+      _rendezvous = RendezvousListener.start(
+        relayUrl: _relayUrl,
+        fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
+        rendezvousId: profile.rendezvousId,
+        identity: widget.identity,
+        ignore: {widget.identity.publicKeyHex},
+        onContact: _onRendezvousContact,
+      );
+    }
     // Background fetch: poll relay for notifications when app is backgrounded.
     unawaited(initBackgroundFetch());
     // Ask for the Android 13+ notification grant now the UI is up.
@@ -1108,6 +1151,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final active = _channels?.active;
     await active?.refreshContent();
     if (active != null) {
+      _maybePersistDm(active);
       await _indexLibrary(active);
       _indexProfiles(active);
       _detectNewMembers(active);
@@ -1319,6 +1363,98 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       await _announceName(session);
       _announced.add(session.channelId);
     }
+  }
+
+  // Peers whose DM we've already written to the registry this run.
+  final Set<String> _persistedDms = {};
+
+  /// Persists a DM once it has real (non-bookkeeping) history, so it restores on
+  /// the next launch. A DM with only a profile announce and no conversation is
+  /// left unsaved — nothing to restore. Only call with a decrypted session (the
+  /// active one, or a background one after its content is parsed).
+  void _maybePersistDm(ChannelSession session) {
+    final peer = session.peerPubkey;
+    if (!session.isDm || peer == null) return;
+    final peerHex = hex.encode(peer);
+    if (_persistedDms.contains(peerHex)) return;
+    final hasHistory = session.repository.ordered().any(
+      (m) => !session.contentOf(m).isBookkeeping,
+    );
+    if (!hasHistory) return;
+    _persistedDms.add(peerHex);
+    unawaited(_dms?.save(peerHex));
+  }
+
+  /// Owner side of first contact: someone holding my card connected to my
+  /// rendezvous, and signed signalling proved they're [peerHex]. Open the DM so
+  /// we connect on the derived channel; it persists once we exchange a message.
+  Future<void> _onRendezvousContact(String peerHex) async {
+    if (peerHex == widget.identity.publicKeyHex) return;
+    try {
+      await _channels?.openDm(hex.decode(peerHex));
+      if (mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  /// Joiner side: accept a scanned/pasted contact card. Adds the owner as a
+  /// contact (we have their card), opens the DM, and runs a *transient*
+  /// rendezvous on the owner's capability so they discover us — torn down once
+  /// the DM connects, or after a timeout if they're offline.
+  Future<void> _acceptContactCard(ContactCard card) async {
+    final ownerHex = card.pubkey;
+    if (ownerHex == widget.identity.publicKeyHex) {
+      if (mounted) _setError("that's your own contact card");
+      return;
+    }
+    // Adopt the card's relay if we're still on the bundled default (mirrors the
+    // channel-invite behaviour), so a fresh install can reach the owner.
+    if (card.relayUrl != null &&
+        card.relayUrl != _relayUrl.toString() &&
+        _relayUrl.toString() == kRelayUrl.toString()) {
+      final relay = Uri.tryParse(card.relayUrl!);
+      if (relay != null && relay.hasScheme && relay.hasAuthority) {
+        await _settings?.setRelayUrl(card.relayUrl!);
+        _relayUrl = relay;
+        _channels?.updateFallbackUrls(
+          (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
+        );
+      }
+    }
+    // Name suggestion from the card, unless we've already named them.
+    if (_contacts?.nameFor(ownerHex) == null) {
+      await _contacts?.setName(
+        ownerHex,
+        card.name ??
+            'hearth#${_fingerprint(Uint8List.fromList(hex.decode(ownerHex)))}',
+      );
+    }
+    List<int> ownerKey;
+    try {
+      ownerKey = hex.decode(ownerHex);
+    } catch (_) {
+      if (mounted) _setError('invalid contact card');
+      return;
+    }
+    await _channels?.openDm(ownerKey);
+    if (mounted) setState(() {});
+    if (!widget.autoPoll) return; // no live mesh in tests
+    // Announce on the owner's rendezvous so they discover us and open the DM
+    // back. Tear it down when their DM connects, or after a grace period.
+    unawaited(_pendingContact[ownerHex]?.close());
+    final listener = RendezvousListener.start(
+      relayUrl: _relayUrl,
+      fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
+      rendezvousId: card.rendezvous,
+      identity: widget.identity,
+      ignore: {widget.identity.publicKeyHex},
+      // We already know the owner from the card, so a rendezvous connect just
+      // confirms reachability; the DM proper forms on its derived channel.
+      onContact: (_) {},
+    );
+    _pendingContact[ownerHex] = listener;
+    Future.delayed(const Duration(minutes: 2), () {
+      unawaited(_pendingContact.remove(ownerHex)?.close());
+    });
   }
 
   /// Members (by id) who've posted in [session], excluding you.
@@ -2453,6 +2589,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _errorTimer?.cancel();
     _recordTicker?.cancel();
     unawaited(_recorder?.dispose());
+    unawaited(_rendezvous?.close());
+    for (final l in _pendingContact.values) {
+      unawaited(l.close());
+    }
     super.dispose();
   }
 
@@ -3038,8 +3178,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       code = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('Join via invite'),
-          content: const Text('Scan an invite QR code or paste the text.'),
+          title: const Text('Add via invite or card'),
+          content: const Text(
+            'Scan or paste a channel invite or a contact card.',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
@@ -3050,7 +3192,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 final result = await Navigator.push<String>(
                   ctx,
                   MaterialPageRoute<String>(
-                    builder: (_) => const _QrScanPage(title: 'Scan invite QR'),
+                    builder: (_) => const _QrScanPage(title: 'Scan QR'),
                   ),
                 );
                 if (ctx.mounted) Navigator.pop(ctx, result);
@@ -3069,22 +3211,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (code == null) return;
       if (code.isEmpty && mounted) {
         code = await _promptText(
-          title: 'Join via invite',
-          hint: 'paste the invite code',
-          action: 'Join',
+          title: 'Add via invite or card',
+          hint: 'paste an invite or contact code',
+          action: 'Add',
         );
       }
     } else {
       code = await _promptText(
-        title: 'Join via invite',
-        hint: 'paste the invite code',
-        action: 'Join',
+        title: 'Add via invite or card',
+        hint: 'paste an invite or contact code',
+        action: 'Add',
       );
     }
     if (code == null || code.trim().isEmpty) return;
+    // A contact card and a channel invite share this scan/paste entry — dispatch
+    // by prefix. A card starts a person-to-person DM rather than joining a group.
+    final card = ContactCard.decode(code.trim());
+    if (card != null) {
+      await _acceptContactCard(card);
+      return;
+    }
     final parsed = GroupChannel.fromInvite(code.trim());
     if (parsed == null) {
-      if (mounted) _setError('invalid invite code');
+      if (mounted) _setError('invalid invite or contact code');
       return;
     }
     final channel = parsed.channel;
@@ -3188,6 +3337,68 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           FilledButton.icon(
             onPressed: () {
               _copyAndClear(invite);
+              Navigator.pop(context);
+            },
+            icon: const Icon(Icons.copy),
+            label: const Text('Copy'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Shows my contact card — a QR + `hearth-contact:` code anyone can scan or
+  /// paste to start a DM with me, even with no shared group. The rendezvous id
+  /// is the standing one from my profile; sharing the card doesn't expose my
+  /// key inbox to anyone who doesn't hold it.
+  Future<void> _shareMyContact() async {
+    final profile = _profile;
+    if (profile == null) return;
+    final card = ContactCard(
+      pubkey: widget.identity.publicKeyHex,
+      rendezvous: profile.rendezvousId,
+      name: _myName,
+      relayUrl: _relayUrl.toString(),
+    ).encode();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('My contact card'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            const Text(
+              'Anyone who scans this can message you directly — share it '
+              'in person or over another app.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: 200,
+              height: 200,
+              child: QrImageView(
+                data: card,
+                padding: const EdgeInsets.all(12),
+                backgroundColor: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 12),
+            SelectableText(
+              card,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              _copyAndClear(card);
               Navigator.pop(context);
             },
             icon: const Icon(Icons.copy),
@@ -4916,7 +5127,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ),
                   ListTile(
                     leading: const Icon(Icons.link),
-                    title: const Text('Join via invite'),
+                    title: const Text('Add via invite or card'),
                     onTap: () {
                       Navigator.pop(context);
                       unawaited(_joinViaInvite());
@@ -4929,6 +5140,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     onTap: () {
                       Navigator.pop(context);
                       unawaited(_newDm());
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.qr_code_2),
+                    title: const Text('Share my contact'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      unawaited(_shareMyContact());
                     },
                   ),
                   for (final s in dms)

@@ -38,6 +38,7 @@ class WebRtcMesh {
     this.localStream,
     this.onRemoteStream,
     this.onPeerLeft,
+    this.onPeerConnectedHex,
     this.onControl,
     this.forceInitiator,
     this.candidateCache,
@@ -89,6 +90,11 @@ class WebRtcMesh {
   /// Called with a peer's id when its connection drops — for voice, to play a
   /// disconnect cue and release their audio.
   final void Function(String peerHex)? onPeerLeft;
+
+  /// Called with a peer's id when its data channel opens. Symmetric with
+  /// [onPeerLeft]; the rendezvous listener uses it to learn who reached it (the
+  /// [peerConnected] stream carries the channel but not the peer's identity).
+  final void Function(String peerHex)? onPeerConnectedHex;
 
   /// Called when a peer sends a mesh control message (peer-exchange / relayed
   /// signalling) over the data channel. Null until track A wires a handler.
@@ -399,6 +405,7 @@ class WebRtcMesh {
     final tunnel = _tunnels.remove(link.peerHex);
     if (tunnel != null) unawaited(tunnel.close());
     if (!_closed && !_peerConnected.isClosed) _peerConnected.add(link);
+    onPeerConnectedHex?.call(link.peerHex);
     // Persist this peer so next startup can try them immediately.
     unawaited(candidateCache?.touch(channel, link.peerHex) ?? Future.value());
     // Peer-exchange: tell the new peer about everyone else we're connected to.
@@ -469,6 +476,7 @@ class WebRtcMesh {
     if (!_closed && !_peerConnected.isClosed) {
       _peerConnected.add(tunnel);
     }
+    onPeerConnectedHex?.call(peerHex);
   }
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
