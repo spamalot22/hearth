@@ -99,6 +99,10 @@ class ChannelSession {
   // anyone else is ignored, so only you can rewrite or remove your messages.
   final Map<String, EditContent> _edits = {};
   final Set<String> _deleted = {};
+  // Validation verdicts by revision-message id. Once valid, always valid
+  // (authors are immutable); invalid may flip to valid when the target syncs,
+  // so only positives are cached.
+  final Set<String> _validRevisions = {};
   StreamSubscription<Message>? _courierSub;
 
   bool get isDm => peerPubkey != null;
@@ -267,28 +271,33 @@ class ChannelSession {
       // makes the last valid edit the winner on every device.
       switch (content) {
         case EditContent(:final targetId):
-          if (_sameAuthor(targetId, message.author)) {
-            _edits[targetId] = content;
-          }
+          if (_validRevision(message, targetId)) _edits[targetId] = content;
         case DeleteContent(:final targetId):
-          if (_sameAuthor(targetId, message.author)) _deleted.add(targetId);
+          if (_validRevision(message, targetId)) _deleted.add(targetId);
         default:
           break;
       }
     }
   }
 
-  /// True if the message with hex id [targetIdHex] exists locally and was
-  /// authored by [author]. False (edit/delete held off) until the target syncs.
-  bool _sameAuthor(String targetIdHex, List<int> author) {
-    final List<int> id;
-    try {
-      id = hex.decode(targetIdHex);
-    } catch (_) {
-      return false;
+  /// True if [revision]'s target exists locally and shares its author — checked
+  /// once per revision message, then cached (this runs on every refresh).
+  bool _validRevision(Message revision, String targetIdHex) {
+    if (_validRevisions.contains(revision.idHex)) return true;
+    final target = repository.getByHex(targetIdHex);
+    if (target == null || !_bytesEqual(target.author, revision.author)) {
+      return false; // may flip to valid once the target syncs — don't cache
     }
-    final target = repository.get(Uint8List.fromList(id));
-    return target != null && hex.encode(target.author) == hex.encode(author);
+    _validRevisions.add(revision.idHex);
+    return true;
+  }
+
+  static bool _bytesEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   /// The winning edit for message [idHex], or null if it was never validly

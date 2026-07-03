@@ -40,5 +40,6 @@ class MessageRepository {
   List<Uint8List> heads() => _index.heads();
   bool contains(Uint8List id) => _index.contains(id);
   Message? get(Uint8List id) => _index.get(id);
+  Message? getByHex(String idHex) => _index.getByHex(idHex);
   int get length => _index.length;
 }

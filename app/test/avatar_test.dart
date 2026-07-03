@@ -129,6 +129,46 @@ void main() {
     });
   });
 
+  testWidgets('a stale profile claim cannot clobber a newer one', (
+    tester,
+  ) async {
+    final api = await _boot(tester);
+    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
+    final session = api.activeChannel()!;
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    // Newest claim first, then a stale one (as if synced from another
+    // channel/device late) — latest-by-timestamp must win, not last-indexed.
+    for (final (name, ts) in [('fresh', now), ('stale', now - 60000)]) {
+      final message = await Message.create(
+        author: peer,
+        channel: session.channelId,
+        payload: await session.cipher.encrypt(ProfileContent(name).encode()),
+        prev: session.repository.heads(),
+        timestampMs: ts,
+      );
+      await session.publish(message);
+    }
+    final hello = await Message.create(
+      author: peer,
+      channel: session.channelId,
+      payload: await session.cipher.encrypt(const TextContent('yo').encode()),
+      prev: session.repository.heads(),
+    );
+    await session.publish(hello);
+    await api.refresh();
+    await _settle(tester);
+
+    expect(find.text('yo'), findsOneWidget);
+    // Bubble label + member panel both use the suggested name.
+    expect(
+      find.text('fresh'),
+      findsWidgets,
+      reason: 'the newer claim names the peer',
+    );
+    expect(find.text('stale'), findsNothing);
+    await _finish(tester);
+  });
+
   testWidgets('peers without a shared avatar keep the gradient initial', (
     tester,
   ) async {

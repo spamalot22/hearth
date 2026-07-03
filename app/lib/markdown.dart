@@ -134,27 +134,61 @@ class MarkdownText extends StatefulWidget {
 }
 
 class _MarkdownTextState extends State<MarkdownText> {
-  final List<TapGestureRecognizer> _recognizers = [];
+  // Parse output + link recognizers are derived from widget.text alone, so
+  // they're built once per text (not per rebuild — the chat screen setStates
+  // on every mesh event) and recognizers stay alive across frames instead of
+  // being disposed while a previous frame's spans might still route a tap.
+  late List<MdBlock> _blocks;
+  final Map<MdSegment, TapGestureRecognizer> _linkRecognizers = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _parse();
+  }
+
+  @override
+  void didUpdateWidget(MarkdownText oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text) _parse();
+  }
 
   @override
   void dispose() {
-    for (final r in _recognizers) {
+    for (final r in _linkRecognizers.values) {
       r.dispose();
     }
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    for (final r in _recognizers) {
+  void _parse() {
+    for (final r in _linkRecognizers.values) {
       r.dispose();
     }
-    _recognizers.clear();
+    _linkRecognizers.clear();
+    _blocks = parseMarkdown(widget.text);
+    for (final block in _blocks) {
+      if (block is! MdParagraph) continue;
+      for (final s in block.segments) {
+        final link = s.link;
+        if (link == null) continue;
+        _linkRecognizers[s] = TapGestureRecognizer()
+          ..onTap = () {
+            final uri = Uri.tryParse(link);
+            if (uri != null) {
+              launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          };
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final base = widget.style ?? DefaultTextStyle.of(context).style;
-    final blocks = parseMarkdown(widget.text);
     final children = <Widget>[
-      for (final block in blocks)
+      for (final block in _blocks)
         switch (block) {
           MdParagraph(:final segments) => Text.rich(
             TextSpan(
@@ -186,15 +220,9 @@ class _MarkdownTextState extends State<MarkdownText> {
 
   InlineSpan _span(MdSegment s, TextStyle base, ColorScheme scheme) {
     if (s.link != null) {
-      final recognizer = TapGestureRecognizer()
-        ..onTap = () {
-          final uri = Uri.tryParse(s.link!);
-          if (uri != null) launchUrl(uri, mode: LaunchMode.externalApplication);
-        };
-      _recognizers.add(recognizer);
       return TextSpan(
         text: s.text,
-        recognizer: recognizer,
+        recognizer: _linkRecognizers[s],
         style: base.copyWith(
           color: scheme.primary,
           decoration: TextDecoration.underline,

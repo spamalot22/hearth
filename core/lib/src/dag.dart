@@ -31,6 +31,10 @@ class MessageStore {
 
   Message? get(Uint8List id) => _byId[hex.encode(id)];
 
+  /// [get], keyed by the id's hex form — the index's native key, so callers
+  /// already holding a hex id skip a decode/encode round-trip.
+  Message? getByHex(String idHex) => _byId[idHex];
+
   int get length => _byId.length;
 
   Iterable<Message> get messages => _byId.values;

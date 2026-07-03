@@ -187,6 +187,35 @@ void main() {
     await _finish(tester);
   });
 
+  testWidgets('search matches and displays the edited text, not the original', (
+    tester,
+  ) async {
+    await _boot(tester);
+    await _send(tester, 'teh typo');
+    await _openActions(tester, 'teh typo');
+    await tester.tap(find.text('Edit'));
+    await _settle(tester);
+    await _send(tester, 'the fix');
+
+    await tester.tap(find.byIcon(Icons.search).first);
+    await _settle(tester);
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Search messages…'),
+      'fix',
+    );
+    await _settle(tester);
+
+    // Bubble + result tile — and the tile shows the post-edit text.
+    expect(find.text('the fix'), findsNWidgets(2));
+    expect(
+      find.text('teh typo'),
+      findsNothing,
+      reason: 'a result must never render the stale pre-edit text',
+    );
+
+    await _finish(tester);
+  });
+
   testWidgets('a peer editing their own message renders the new text', (
     tester,
   ) async {

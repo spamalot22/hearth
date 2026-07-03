@@ -13,6 +13,12 @@ sealed class Content {
 
   Map<String, Object?> toJson();
 
+  /// True for envelopes that annotate other messages or carry metadata
+  /// (profiles, reactions, edits, tombstones): they must never render as a
+  /// timeline bubble or notify as "a new message". Every filter site derives
+  /// from this — override it when adding a bookkeeping type.
+  bool get isBookkeeping => false;
+
   /// Serialises to payload bytes.
   List<int> encode() => utf8.encode(
     jsonEncode({...toJson(), if (replyTo != null) 'replyTo': replyTo}),
@@ -120,6 +126,9 @@ class ProfileContent extends Content {
   final String? avatar;
 
   @override
+  bool get isBookkeeping => true;
+
+  @override
   Map<String, Object?> toJson() => {
     't': 'profile',
     'name': name,
@@ -139,6 +148,9 @@ class EditContent extends Content {
   final String text;
 
   @override
+  bool get isBookkeeping => true;
+
+  @override
   Map<String, Object?> toJson() => {
     't': 'edit',
     'target': targetId,
@@ -155,6 +167,9 @@ class DeleteContent extends Content {
   final String targetId; // hex ID of the message being deleted
 
   @override
+  bool get isBookkeeping => true;
+
+  @override
   Map<String, Object?> toJson() => {'t': 'del', 'target': targetId};
 }
 
@@ -165,6 +180,9 @@ class ReactionContent extends Content {
 
   final String targetId; // hex ID of the message being reacted to
   final String emoji;
+
+  @override
+  bool get isBookkeeping => true;
 
   @override
   Map<String, Object?> toJson() => {

@@ -580,7 +580,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
   // pubkeyHex -> fetched avatar image bytes (from self-asserted profiles).
   final Map<String, Uint8List> _avatarBytes = {};
+  // pubkeyHex -> timestamp of the latest profile claim applied. Profiles
+  // arrive per channel, so without this an author's state would be whatever
+  // their newest claim in the *most recently indexed* channel said.
+  final Map<String, int> _profileTs = {};
   String? _myAvatar; // my avatar's blob hash (rides in profile announcements)
+
+  /// Largest avatar image we'll render from a peer. Senders downscale to
+  /// ≤128px, but that's a courtesy — receivers must not decode a 10 MB blob
+  /// into every message row just because a profile claims it's an avatar.
+  static const int _maxAvatarBytes = 256 * 1024;
   final Set<String> _announced = {}; // channels we've published our name into
   final Set<String> _memberBaseline =
       {}; // channels whose baseline is scheduled
@@ -900,12 +909,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         sender = _displayName(msg.author);
         final content = session.contentOf(msg);
         // Bookkeeping envelopes aren't "a new message" — don't notify.
-        if (content is EditContent ||
-            content is DeleteContent ||
-            content is ReactionContent ||
-            content is ProfileContent) {
-          return;
-        }
+        if (content.isBookkeeping) return;
         if (content is TextContent) {
           preview = content.text.length > 80
               ? '${content.text.substring(0, 80)}…'
@@ -1160,23 +1164,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   /// Records each author's latest self-asserted name as a *suggested* petname,
-  /// and their avatar image once its blob has been fetched.
+  /// and their avatar image once its blob has been fetched. "Latest" is by the
+  /// claim's timestamp across all channels (gated via [_profileTs]), so a stale
+  /// profile in one channel can't clobber a newer one from another — and an
+  /// avatar removal made on the author's other device propagates.
   void _indexProfiles(ChannelSession session) {
     for (final message in session.repository.ordered()) {
       final content = session.contentOf(message);
-      if (content is ProfileContent) {
-        final authorHex = hex.encode(message.author);
-        if (content.name.isNotEmpty) _suggested[authorHex] = content.name;
-        final avatar = content.avatar;
-        if (avatar != null) {
-          final bytes = session.blobOf(avatar);
-          if (bytes != null) _avatarBytes[authorHex] = bytes;
-        } else if (authorHex != widget.identity.publicKeyHex) {
-          // Their latest profile dropped the avatar — stop rendering the old
-          // one. (Self is exempt: local state is authoritative, and old
-          // pre-avatar announcements linger in history until we re-announce.)
-          _avatarBytes.remove(authorHex);
+      if (content is! ProfileContent) continue;
+      final authorHex = hex.encode(message.author);
+      // >= not >: an equal-ts re-pass applies bytes for a blob that has only
+      // now been fetched.
+      if (message.timestampMs < (_profileTs[authorHex] ?? 0)) continue;
+      _profileTs[authorHex] = message.timestampMs;
+      if (content.name.isNotEmpty) _suggested[authorHex] = content.name;
+      final avatar = content.avatar;
+      if (avatar != null) {
+        final bytes = session.blobOf(avatar);
+        if (bytes != null && bytes.length <= _maxAvatarBytes) {
+          _avatarBytes[authorHex] = bytes;
         }
+      } else {
+        // Their latest claim carries no avatar — stop rendering the old one.
+        _avatarBytes.remove(authorHex);
       }
     }
   }
@@ -2473,6 +2483,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _sendGif() async {
     final store = _blobStore;
     if (store == null) return;
+    _exitEditMode();
     final url = await pickGif(
       context,
       _relayUrl,
@@ -2502,6 +2513,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final store = _blobStore;
     final library = _library;
     if (store == null) return;
+    _exitEditMode();
 
     final stickers = library?.byKind(MediaKind.sticker) ?? [];
     // Pre-fetch blob bytes so FutureBuilder doesn't re-fire on rebuild.
@@ -2618,6 +2630,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _sendFile() async {
     final store = _blobStore;
     if (store == null) return;
+    _exitEditMode();
     final result = await FilePicker.platform.pickFiles(withData: true);
     final file = result?.files.single;
     final bytes = file?.bytes;
@@ -2767,6 +2780,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Stops recording and publishes the clip as a [VoiceContent] blob.
   Future<void> _sendVoiceRecording() async {
+    _exitEditMode();
     final store = _blobStore;
     final started = _recordStart;
     _recordTicker?.cancel();
@@ -3587,11 +3601,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _broadcastYt();
   }
 
-  String _fmtTime(double seconds) {
-    final s = seconds.isFinite && seconds > 0 ? seconds.round() : 0;
-    final sec = (s % 60).toString().padLeft(2, '0');
-    return '${s ~/ 60}:$sec';
-  }
+  String _fmtTime(double seconds) => formatClipTime(
+    seconds.isFinite && seconds > 0 ? (seconds * 1000).round() : 0,
+  );
 
   /// The right-hand **channel control panel** — channel-scoped actions (invite,
   /// voice) and, in a call, the participants with live speaking indicators. A
@@ -4626,10 +4638,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _messageList(BuildContext context, ChannelSession session) {
     final messages = session.repository.ordered().where((m) {
       final c = session.contentOf(m);
-      return c is! ProfileContent &&
-          c is! SoundContent &&
-          c is! EditContent &&
-          c is! DeleteContent;
+      // Soundboard clips render in the voice panel, not the timeline.
+      return !c.isBookkeeping && c is! SoundContent;
     }).toList();
     return messages.isEmpty
         ? const Center(child: Text('No messages yet — say something.'))
@@ -5390,6 +5400,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 fit: BoxFit.cover,
                 width: radius * 2,
                 height: radius * 2,
+                // Decode at display size — never at whatever the peer sent.
+                cacheWidth:
+                    (radius * 2 * MediaQuery.devicePixelRatioOf(context))
+                        .round(),
                 gaplessPlayback: true,
               ),
             )
@@ -5604,6 +5618,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _composerFocus.requestFocus();
   }
 
+  /// Leaves edit mode, dropping the prefilled draft. Called when a non-text
+  /// send (GIF, sticker, file, voice) happens while the edit banner is up —
+  /// otherwise edit mode stays silently armed and the *next* text send
+  /// rewrites the old message instead of posting a new one.
+  void _exitEditMode() {
+    if (_editing == null) return;
+    setState(() => _editing = null);
+    _input.clear();
+  }
+
   /// Confirms, then publishes a [DeleteContent] tombstone. The message stays in
   /// the DAG (append-only) but renders as "Message deleted" for everyone.
   Future<void> _confirmDelete(Message message) async {
@@ -5728,8 +5752,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             itemCount: results.length,
                             itemBuilder: (ctx, i) {
                               final msg = results[i];
+                              // Effective content — the filter matched the
+                              // post-edit text, so show that, not the original.
                               final text =
-                                  (session.contentOf(msg) as TextContent).text;
+                                  (_effectiveContent(session, msg)
+                                          as TextContent)
+                                      .text;
                               return ListTile(
                                 dense: true,
                                 leading: _avatar(msg.author, radius: 12),
@@ -5922,13 +5950,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return const SizedBox.shrink();
     }
     // Reactions render as chips on their target, edits/tombstones as the
-    // target's own state — none of them get a bubble of their own.
+    // target's own state — no bookkeeping envelope gets a bubble of its own.
     final rawContent = session.contentOf(message);
-    if (rawContent is ReactionContent ||
-        rawContent is EditContent ||
-        rawContent is DeleteContent) {
-      return const SizedBox.shrink();
-    }
+    if (rawContent.isBookkeeping) return const SizedBox.shrink();
     // Deleted messages: an inert placeholder (no actions, no reactions).
     if (session.isDeleted(message.idHex)) {
       return Align(
@@ -7293,24 +7317,28 @@ class _BouncingDotsState extends State<_BouncingDots>
 /// (the paper plane flies up-and-away and a fresh one settles in) on send.
 /// Decodes any picked image and re-encodes it as a small PNG (≤128px on the
 /// long side, aspect preserved) so avatars stay tiny for P2P gossip. Throws on
-/// undecodable input.
+/// undecodable input. Dimensions come from the image header
+/// ([ui.ImageDescriptor]) so the pixels are decoded exactly once, at target
+/// size — never at native resolution.
 Future<Uint8List> downscaleAvatar(Uint8List bytes) async {
-  // Probe the dimensions first so the target constrains the *long* side.
-  final probe = await ui.instantiateImageCodec(bytes);
-  final probed = (await probe.getNextFrame()).image;
-  final wide = probed.width >= probed.height;
-  final long = wide ? probed.width : probed.height;
-  probed.dispose();
-  final codec = await ui.instantiateImageCodec(
-    bytes,
-    targetWidth: wide ? min(128, long) : null,
-    targetHeight: wide ? null : min(128, long),
-  );
-  final image = (await codec.getNextFrame()).image;
-  final data = await image.toByteData(format: ui.ImageByteFormat.png);
-  image.dispose();
-  if (data == null) throw StateError('could not encode avatar');
-  return data.buffer.asUint8List();
+  final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+  final descriptor = await ui.ImageDescriptor.encoded(buffer);
+  try {
+    final wide = descriptor.width >= descriptor.height;
+    final long = wide ? descriptor.width : descriptor.height;
+    final codec = await descriptor.instantiateCodec(
+      targetWidth: wide ? min(128, long) : null,
+      targetHeight: wide ? null : min(128, long),
+    );
+    final image = (await codec.getNextFrame()).image;
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    if (data == null) throw StateError('could not encode avatar');
+    return data.buffer.asUint8List();
+  } finally {
+    descriptor.dispose();
+    buffer.dispose();
+  }
 }
 
 /// mm:ss for a clip length or playback position.
@@ -7337,17 +7365,32 @@ class _VoiceBubble extends StatefulWidget {
 }
 
 class _VoiceBubbleState extends State<_VoiceBubble> {
+  /// The bubble currently playing — starting another pauses it first, so two
+  /// voice messages never talk over each other.
+  static _VoiceBubbleState? _nowPlaying;
+
   AudioPlayer? _player;
   bool _playing = false;
   Duration _position = Duration.zero;
 
   @override
   void dispose() {
+    if (identical(_nowPlaying, this)) _nowPlaying = null;
     unawaited(_player?.dispose());
     super.dispose();
   }
 
+  /// Pause triggered by another bubble starting.
+  void _yield() {
+    unawaited(_player?.pause().catchError((_) {}));
+    if (mounted) setState(() => _playing = false);
+  }
+
   Future<void> _toggle() async {
+    if (!_playing && !identical(_nowPlaying, this)) {
+      _nowPlaying?._yield();
+      _nowPlaying = this;
+    }
     var player = _player;
     if (player == null) {
       player = _player = AudioPlayer();
