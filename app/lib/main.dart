@@ -580,10 +580,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, String> _suggested = {}; // pubkeyHex -> self-asserted name
   // pubkeyHex -> fetched avatar image bytes (from self-asserted profiles).
   final Map<String, Uint8List> _avatarBytes = {};
-  // pubkeyHex -> timestamp of the latest profile claim applied. Profiles
-  // arrive per channel, so without this an author's state would be whatever
-  // their newest claim in the *most recently indexed* channel said.
-  final Map<String, int> _profileTs = {};
+  // pubkeyHex -> (timestampMs, claimIdHex) of the profile claim applied.
+  // Profiles arrive per channel, so without this an author's state would be
+  // whatever their newest claim in the *most recently indexed* channel said.
+  // The id tiebreak keeps equal-timestamp claims deterministic across devices.
+  final Map<String, (int, String)> _profileClaim = {};
   String? _myAvatar; // my avatar's blob hash (rides in profile announcements)
 
   /// Largest avatar image we'll render from a peer. Senders downscale to
@@ -1163,30 +1164,62 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// True when profile claim [a] (timestampMs, claimIdHex) should replace [b]:
+  /// newer timestamp, ties broken by id so every client picks the same winner.
+  static bool _claimBeats((int, String) a, (int, String) b) =>
+      a.$1 > b.$1 || (a.$1 == b.$1 && a.$2.compareTo(b.$2) > 0);
+
   /// Records each author's latest self-asserted name as a *suggested* petname,
-  /// and their avatar image once its blob has been fetched. "Latest" is by the
-  /// claim's timestamp across all channels (gated via [_profileTs]), so a stale
-  /// profile in one channel can't clobber a newer one from another — and an
-  /// avatar removal made on the author's other device propagates.
+  /// and their avatar image once its blob has been fetched. "Latest" is the
+  /// claim with the highest (timestamp, id) across all channels (via
+  /// [_profileClaim]), so a stale profile in one channel can't clobber a newer
+  /// one from another and an avatar removal from the author's other device
+  /// propagates. Timestamps are self-asserted, so claims dated further than an
+  /// hour into the future are ignored until their time comes — otherwise one
+  /// skewed-clock announce would block an author's updates forever (claims are
+  /// immutable in the append-only DAG).
   void _indexProfiles(ChannelSession session) {
+    final maxSaneTs =
+        DateTime.now().toUtc().millisecondsSinceEpoch +
+        const Duration(hours: 1).inMilliseconds;
+    // Fold first: this session's winning claim per author…
+    final winners = <String, (Message, ProfileContent)>{};
     for (final message in session.repository.ordered()) {
       final content = session.contentOf(message);
       if (content is! ProfileContent) continue;
+      if (message.timestampMs > maxSaneTs) continue; // skewed-clock claim
       final authorHex = hex.encode(message.author);
-      // >= not >: an equal-ts re-pass applies bytes for a blob that has only
-      // now been fetched.
-      if (message.timestampMs < (_profileTs[authorHex] ?? 0)) continue;
-      _profileTs[authorHex] = message.timestampMs;
-      if (content.name.isNotEmpty) _suggested[authorHex] = content.name;
+      final cur = winners[authorHex];
+      if (cur == null ||
+          _claimBeats(
+            (message.timestampMs, message.idHex),
+            (cur.$1.timestampMs, cur.$1.idHex),
+          )) {
+        winners[authorHex] = (message, content);
+      }
+    }
+    // …then apply each winner against the cross-channel state. A same-claim
+    // re-pass applies too — its avatar blob may only now have been fetched.
+    for (final entry in winners.entries) {
+      final (message, content) = entry.value;
+      final claim = (message.timestampMs, message.idHex);
+      final prev = _profileClaim[entry.key];
+      if (prev != null &&
+          prev.$2 != message.idHex &&
+          !_claimBeats(claim, prev)) {
+        continue;
+      }
+      _profileClaim[entry.key] = claim;
+      if (content.name.isNotEmpty) _suggested[entry.key] = content.name;
       final avatar = content.avatar;
       if (avatar != null) {
         final bytes = session.blobOf(avatar);
         if (bytes != null && bytes.length <= _maxAvatarBytes) {
-          _avatarBytes[authorHex] = bytes;
+          _avatarBytes[entry.key] = bytes;
         }
       } else {
         // Their latest claim carries no avatar — stop rendering the old one.
-        _avatarBytes.remove(authorHex);
+        _avatarBytes.remove(entry.key);
       }
     }
   }
@@ -2607,7 +2640,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             onTap: () => Navigator.pop(context, item.hash),
                             child: ClipRRect(
                               borderRadius: BorderRadius.circular(8),
-                              child: Image.memory(bytes, fit: BoxFit.cover),
+                              child: Image.memory(
+                                bytes,
+                                fit: BoxFit.cover,
+                                // Decode at grid-cell size, not blob size.
+                                cacheWidth:
+                                    (120 *
+                                            MediaQuery.devicePixelRatioOf(
+                                              context,
+                                            ))
+                                        .round(),
+                              ),
                             ),
                           );
                         },
@@ -5194,7 +5237,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           constraints: const BoxConstraints(maxHeight: 220, maxWidth: 260),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: Image.memory(bytes, fit: BoxFit.contain),
+            child: Image.memory(
+              bytes,
+              fit: BoxFit.contain,
+              // Peer-sent blobs can be up to 10 MB — decode at the bubble's
+              // display size, never at whatever resolution the peer chose.
+              // (The tap-to-open viewer decodes full-res, as it should.)
+              cacheWidth: (260 * MediaQuery.devicePixelRatioOf(context))
+                  .round(),
+            ),
           ),
         ),
       ),
@@ -7321,23 +7372,30 @@ class _BouncingDotsState extends State<_BouncingDots>
 /// ([ui.ImageDescriptor]) so the pixels are decoded exactly once, at target
 /// size — never at native resolution.
 Future<Uint8List> downscaleAvatar(Uint8List bytes) async {
-  final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-  final descriptor = await ui.ImageDescriptor.encoded(buffer);
+  // Everything here is engine-owned memory — dispose all of it on every path,
+  // including the undecodable-input throw the caller catches.
+  ui.ImmutableBuffer? buffer;
+  ui.ImageDescriptor? descriptor;
+  ui.Codec? codec;
+  ui.Image? image;
   try {
+    buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    descriptor = await ui.ImageDescriptor.encoded(buffer);
     final wide = descriptor.width >= descriptor.height;
     final long = wide ? descriptor.width : descriptor.height;
-    final codec = await descriptor.instantiateCodec(
+    codec = await descriptor.instantiateCodec(
       targetWidth: wide ? min(128, long) : null,
       targetHeight: wide ? null : min(128, long),
     );
-    final image = (await codec.getNextFrame()).image;
+    image = (await codec.getNextFrame()).image;
     final data = await image.toByteData(format: ui.ImageByteFormat.png);
-    image.dispose();
     if (data == null) throw StateError('could not encode avatar');
     return data.buffer.asUint8List();
   } finally {
-    descriptor.dispose();
-    buffer.dispose();
+    image?.dispose();
+    codec?.dispose();
+    descriptor?.dispose();
+    buffer?.dispose();
   }
 }
 

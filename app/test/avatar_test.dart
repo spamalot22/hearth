@@ -138,7 +138,13 @@ void main() {
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     // Newest claim first, then a stale one (as if synced from another
     // channel/device late) — latest-by-timestamp must win, not last-indexed.
-    for (final (name, ts) in [('fresh', now), ('stale', now - 60000)]) {
+    // The far-future claim (skewed clock) must be ignored entirely, else one
+    // bad announce would immutably outrank every later update.
+    for (final (name, ts) in [
+      ('fromthefuture', now + 48 * 3600 * 1000),
+      ('fresh', now),
+      ('stale', now - 60000),
+    ]) {
       final message = await Message.create(
         author: peer,
         channel: session.channelId,
@@ -166,6 +172,11 @@ void main() {
       reason: 'the newer claim names the peer',
     );
     expect(find.text('stale'), findsNothing);
+    expect(
+      find.text('fromthefuture'),
+      findsNothing,
+      reason: 'a skewed-clock future claim must not outrank sane ones',
+    );
     await _finish(tester);
   });
 
