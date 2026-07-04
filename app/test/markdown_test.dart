@@ -118,4 +118,68 @@ void main() {
     );
     expect((box.decoration as BoxDecoration?)?.borderRadius, isNotNull);
   });
+
+  group('mentions', () {
+    // A real 64-char lowercase-hex pubkey shape.
+    final hexA = 'a' * 64;
+    final hexB = 'b' * 64;
+
+    test('extracts mentioned pubkeys in order', () {
+      expect(mentionedPubkeys('hi <@$hexA> and <@$hexB>'), [hexA, hexB]);
+      expect(mentionedPubkeys('no mentions here'), isEmpty);
+    });
+
+    test('mentionsPubkey detects a specific pubkey', () {
+      expect(mentionsPubkey('yo <@$hexA>', hexA), isTrue);
+      expect(mentionsPubkey('yo <@$hexA>', hexB), isFalse);
+    });
+
+    test('stripMentions resolves tokens to readable @names', () {
+      final out = stripMentions(
+        'hey <@$hexA> and <@$hexB>!',
+        (h) => h == hexA ? '@Alice' : '@Bob',
+      );
+      expect(out, 'hey @Alice and @Bob!');
+    });
+
+    test('a partial/short token is not a mention', () {
+      // 63 hex chars — not a full pubkey, so left as literal text.
+      final short = 'a' * 63;
+      expect(mentionedPubkeys('<@$short>'), isEmpty);
+      final blocks = parseMarkdown('<@$short>');
+      final segs = (blocks.single as MdParagraph).segments;
+      expect(segs.every((s) => s.mention == null), isTrue);
+    });
+
+    test('the tokenizer yields a mention segment', () {
+      final blocks = parseMarkdown('ping <@$hexA> now');
+      final segs = (blocks.single as MdParagraph).segments;
+      final mention = segs.firstWhere((s) => s.mention != null);
+      expect(mention.mention, hexA);
+    });
+
+    testWidgets('MarkdownText renders a mention via its label', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: MarkdownText(
+              'hey <@$hexA> there',
+              mentionLabel: (h) => '@Alice',
+              onMentionTap: (_) {},
+            ),
+          ),
+        ),
+      );
+      expect(
+        find.textContaining('@Alice', findRichText: true),
+        findsOneWidget,
+        reason: 'the mention renders resolved to the viewer label',
+      );
+      expect(
+        find.textContaining(hexA, findRichText: true),
+        findsNothing,
+        reason: 'the raw pubkey never shows',
+      );
+    });
+  });
 }

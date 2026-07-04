@@ -18,7 +18,16 @@ class MdSegment {
     this.strike = false,
     this.code = false,
     this.link,
-  });
+  }) : mention = null;
+
+  const MdSegment.mention(String pubkeyHex)
+    : mention = pubkeyHex,
+      text = pubkeyHex,
+      bold = false,
+      italic = false,
+      strike = false,
+      code = false,
+      link = null;
 
   final String text;
   final bool bold;
@@ -28,7 +37,26 @@ class MdSegment {
 
   /// Non-null when this run is a tappable URL.
   final String? link;
+
+  /// Non-null (pubkey hex) when this run is a `<@…>` mention. [text] holds the
+  /// raw pubkey; the renderer resolves it to the *viewer's* display name.
+  final String? mention;
 }
+
+final _mentionToken = RegExp(r'<@([0-9a-f]{64})>');
+
+/// The pubkey hexes mentioned in [text] (from its `<@hex>` tokens), in order.
+List<String> mentionedPubkeys(String text) =>
+    _mentionToken.allMatches(text).map((m) => m.group(1)!).toList();
+
+/// True if [selfHex] is mentioned in [text].
+bool mentionsPubkey(String text, String selfHex) =>
+    text.contains('<@$selfHex>');
+
+/// Rewrites `<@hex>` tokens to a readable `@name` via [label] — for previews,
+/// search and notifications where styling isn't available.
+String stripMentions(String text, String Function(String hex) label) =>
+    text.replaceAllMapped(_mentionToken, (m) => label(m.group(1)!));
 
 sealed class MdBlock {
   const MdBlock();
@@ -57,7 +85,8 @@ final _inline = RegExp(
   r'|(\*(?!\s)[^*\n]+?(?<!\s)\*)' // 4 italic (star)
   r'|((?<![\w*])_(?!\s)[^_\n]+?(?<!\s)_(?![\w]))' // 5 italic (underscore)
   r'|(~~(?!\s)[^~\n]+?(?<!\s)~~)' // 6 strikethrough
-  r'|(https?://[^\s<>]+)', // 7 bare URL
+  r'|(<@[0-9a-f]{64}>)' // 7 mention token
+  r'|(https?://[^\s<>]+)', // 8 bare URL
 );
 
 /// Splits [text] into fenced code blocks and paragraphs of inline segments.
@@ -107,6 +136,9 @@ List<MdSegment> parseInline(String text) {
       segments.add(
         MdSegment(token.substring(2, token.length - 2), strike: true),
       );
+    } else if (m.group(7) != null) {
+      // <@hex> — strip the <@ … > wrapper, keep the pubkey.
+      segments.add(MdSegment.mention(token.substring(2, token.length - 1)));
     } else {
       // Trailing punctuation is almost never part of a pasted URL.
       final trimmed = token.replaceFirst(RegExp(r'[.,;:!?)\]]+$'), '');
@@ -124,10 +156,23 @@ List<MdSegment> parseInline(String text) {
 /// Renders chat-flavoured markdown. Stateful only to own (and dispose) the
 /// link-tap gesture recognizers.
 class MarkdownText extends StatefulWidget {
-  const MarkdownText(this.text, {super.key, this.style});
+  const MarkdownText(
+    this.text, {
+    super.key,
+    this.style,
+    this.mentionLabel,
+    this.onMentionTap,
+  });
 
   final String text;
   final TextStyle? style;
+
+  /// Resolves a mention's pubkey hex to the viewer's display text (e.g.
+  /// `@Alice`). When null, a mention renders as its raw `@hex`.
+  final String Function(String pubkeyHex)? mentionLabel;
+
+  /// Called when a mention is tapped (with its pubkey hex).
+  final void Function(String pubkeyHex)? onMentionTap;
 
   @override
   State<MarkdownText> createState() => _MarkdownTextState();
@@ -139,7 +184,8 @@ class _MarkdownTextState extends State<MarkdownText> {
   // on every mesh event) and recognizers stay alive across frames instead of
   // being disposed while a previous frame's spans might still route a tap.
   late List<MdBlock> _blocks;
-  final Map<MdSegment, TapGestureRecognizer> _linkRecognizers = {};
+  // Tap recognizers for links and mentions, keyed by their segment.
+  final Map<MdSegment, TapGestureRecognizer> _recognizers = {};
 
   @override
   void initState() {
@@ -155,30 +201,35 @@ class _MarkdownTextState extends State<MarkdownText> {
 
   @override
   void dispose() {
-    for (final r in _linkRecognizers.values) {
+    for (final r in _recognizers.values) {
       r.dispose();
     }
     super.dispose();
   }
 
   void _parse() {
-    for (final r in _linkRecognizers.values) {
+    for (final r in _recognizers.values) {
       r.dispose();
     }
-    _linkRecognizers.clear();
+    _recognizers.clear();
     _blocks = parseMarkdown(widget.text);
     for (final block in _blocks) {
       if (block is! MdParagraph) continue;
       for (final s in block.segments) {
         final link = s.link;
-        if (link == null) continue;
-        _linkRecognizers[s] = TapGestureRecognizer()
-          ..onTap = () {
-            final uri = Uri.tryParse(link);
-            if (uri != null) {
-              launchUrl(uri, mode: LaunchMode.externalApplication);
-            }
-          };
+        final mention = s.mention;
+        if (link != null) {
+          _recognizers[s] = TapGestureRecognizer()
+            ..onTap = () {
+              final uri = Uri.tryParse(link);
+              if (uri != null) {
+                launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            };
+        } else if (mention != null && widget.onMentionTap != null) {
+          _recognizers[s] = TapGestureRecognizer()
+            ..onTap = () => widget.onMentionTap!(mention);
+        }
       }
     }
   }
@@ -222,10 +273,22 @@ class _MarkdownTextState extends State<MarkdownText> {
     if (s.link != null) {
       return TextSpan(
         text: s.text,
-        recognizer: _linkRecognizers[s],
+        recognizer: _recognizers[s],
         style: base.copyWith(
           color: scheme.primary,
           decoration: TextDecoration.underline,
+        ),
+      );
+    }
+    if (s.mention != null) {
+      final label = widget.mentionLabel?.call(s.mention!) ?? '@${s.mention}';
+      return TextSpan(
+        text: label,
+        recognizer: _recognizers[s],
+        style: base.copyWith(
+          color: scheme.primary,
+          fontWeight: FontWeight.w600,
+          backgroundColor: scheme.primary.withAlpha(28),
         ),
       );
     }

@@ -935,8 +935,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _notifyBackground(String channelId) {
     if (!mounted) return;
-    // Muted channels: no notification.
-    if (_mutedChannels.contains(channelId)) return;
     final session = _channels?.sessions
         .where((s) => s.channelId == channelId)
         .firstOrNull;
@@ -949,10 +947,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final channelName = session != null ? _channelTitle(session) : 'a channel';
     final isDm = session?.isDm ?? false;
+    final selfHex = widget.identity.publicKeyHex;
 
     // Get sender name + message preview from the latest message.
     String sender = '';
     String preview = 'New message';
+    var mentionsMe = false;
     if (session != null) {
       final ordered = session.repository.ordered();
       if (ordered.isNotEmpty) {
@@ -965,9 +965,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         // Bookkeeping envelopes aren't "a new message" — don't notify.
         if (content.isBookkeeping) return;
         if (content is TextContent) {
-          preview = content.text.length > 80
-              ? '${content.text.substring(0, 80)}…'
-              : content.text;
+          mentionsMe = mentionsPubkey(content.text, selfHex);
+          final shown = stripMentions(content.text, _mentionLabel);
+          preview = shown.length > 80 ? '${shown.substring(0, 80)}…' : shown;
         } else if (content is GifContent) {
           preview = 'sent a GIF';
         } else if (content is StickerContent) {
@@ -982,11 +982,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
 
+    // Muted channels stay silent — unless you were @mentioned, which pierces.
+    if (_mutedChannels.contains(channelId) && !mentionsMe) return;
+
     final title = isDm
         ? (sender.isNotEmpty ? sender : channelName)
-        : '#$channelName';
+        : (mentionsMe ? '#$channelName · mentioned you' : '#$channelName');
     final body = sender.isNotEmpty
-        ? (isDm ? preview : '$sender: $preview')
+        ? (isDm
+              ? preview
+              : mentionsMe
+              ? '$sender mentioned you: $preview'
+              : '$sender: $preview')
         : 'New message';
 
     // Foreground: an in-app snackbar is enough. Backgrounded (but still alive):
@@ -2778,14 +2785,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _send() async {
-    final text = _input.text.trim();
-    if (text.isEmpty) return;
+    final raw = _input.text.trim();
+    if (raw.isEmpty) return;
     _input.clear();
     _typingTimer?.cancel();
     if (_typingLocally) {
       _typingLocally = false;
       _channels?.active?.sendTyping(false);
     }
+    // Turn any @name matching a channel member into a <@hex> mention token.
+    final session = _channels?.active;
+    final text = session != null ? _resolveMentionsInText(raw, session) : raw;
     final editing = _editing;
     if (editing != null) {
       await _publish(EditContent(editing.idHex, text));
@@ -2797,8 +2807,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     setState(() => _replyTo = null);
     _composerFocus.requestFocus();
     // @bot trigger — broadcast an inference request to the mesh.
-    if (text.startsWith('@bot ')) {
-      final prompt = text.substring(5).trim();
+    if (raw.startsWith('@bot ')) {
+      final prompt = raw.substring(5).trim();
       if (prompt.isNotEmpty) {
         _requestInference(prompt);
       }
@@ -4440,6 +4450,80 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         'hearth#${_fingerprint(author)}';
   }
 
+  /// The viewer's `@name` label for a mention's [pubkeyHex] (resolved to their
+  /// own petname/suggested name, so a mention reads correctly for everyone).
+  String _mentionLabel(String pubkeyHex) {
+    try {
+      return '@${_displayName(Uint8List.fromList(hex.decode(pubkeyHex)))}';
+    } catch (_) {
+      return '@$pubkeyHex';
+    }
+  }
+
+  /// Rewrites any `@name` in [text] that matches a member of [session] into a
+  /// pubkey-anchored `<@hex>` token, so each recipient renders it as *their* own
+  /// name for that person and the notifier can tell who was mentioned. Longest
+  /// names first (so `@Alice` beats `@Al`); only matches at a word boundary, and
+  /// after whitespace/start so an email like `a@b` isn't caught.
+  String _resolveMentionsInText(String text, ChannelSession session) {
+    final byName = <String, String>{};
+    for (final h in _membersOf(session)) {
+      byName[_displayName(Uint8List.fromList(hex.decode(h)))] = h;
+    }
+    final names = byName.keys.toList()
+      ..sort((a, b) => b.length.compareTo(a.length));
+    var out = text;
+    for (final name in names) {
+      if (name.isEmpty) continue;
+      out = out.replaceAllMapped(
+        RegExp('(?<!\\S)@${RegExp.escape(name)}(?![\\w])'),
+        (_) => '<@${byName[name]}>',
+      );
+    }
+    return out;
+  }
+
+  /// Opens a member picker; the chosen member's `@name` is inserted at the
+  /// cursor (resolved to a mention token on send).
+  Future<void> _insertMention(ChannelSession session) async {
+    final members = _membersOf(session).toList();
+    if (members.isEmpty) {
+      _setError('no one to mention here yet');
+      return;
+    }
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Mention someone'),
+            ),
+            for (final h in members)
+              ListTile(
+                leading: _avatar(Uint8List.fromList(hex.decode(h))),
+                title: Text(_displayName(Uint8List.fromList(hex.decode(h)))),
+                onTap: () => Navigator.pop(ctx, h),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null) return;
+    final name = _displayName(Uint8List.fromList(hex.decode(chosen)));
+    final value = _input.value;
+    final sel = value.selection;
+    final at = sel.isValid ? sel.start : value.text.length;
+    final insert = '@$name ';
+    _input.value = TextEditingValue(
+      text: value.text.replaceRange(at, sel.isValid ? sel.end : at, insert),
+      selection: TextSelection.collapsed(offset: at + insert.length),
+    );
+    _composerFocus.requestFocus();
+  }
+
   /// Prompts for a local petname for [author] and stores it.
   Future<void> _renameContact(Uint8List author) async {
     final key = hex.encode(author);
@@ -5619,7 +5703,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       TextContent(:final text) =>
         _isSingleEmoji(text)
             ? Text(text, style: const TextStyle(fontSize: 48))
-            : MarkdownText(text),
+            : MarkdownText(
+                text,
+                mentionLabel: _mentionLabel,
+                onMentionTap: (h) =>
+                    unawaited(_peerActions(Uint8List.fromList(hex.decode(h)))),
+              ),
       GifContent(:final blob) => _imageBlobView(session, blob, messageId),
       StickerContent(:final blob) => _imageBlobView(session, blob, messageId),
       SoundContent(:final blob, :final name, :final emoji) => _soundView(
@@ -6244,9 +6333,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         if (session.isDeleted(m.idHex)) return false;
                         final content = _effectiveContent(session, m);
                         if (content is TextContent) {
-                          return content.text.toLowerCase().contains(
-                            query.toLowerCase(),
-                          );
+                          // Match against resolved @names, not raw <@hex>.
+                          return stripMentions(
+                            content.text,
+                            _mentionLabel,
+                          ).toLowerCase().contains(query.toLowerCase());
                         }
                         return false;
                       })
@@ -6281,11 +6372,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             itemBuilder: (ctx, i) {
                               final msg = results[i];
                               // Effective content — the filter matched the
-                              // post-edit text, so show that, not the original.
-                              final text =
-                                  (_effectiveContent(session, msg)
-                                          as TextContent)
-                                      .text;
+                              // post-edit text, so show that, not the original;
+                              // mention tokens resolved to readable @names.
+                              final text = stripMentions(
+                                (_effectiveContent(session, msg) as TextContent)
+                                    .text,
+                                _mentionLabel,
+                              );
                               return ListTile(
                                 dense: true,
                                 leading: _avatar(msg.author, radius: 12),
@@ -6382,9 +6475,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (session.isDeleted(msg.idHex)) return 'Message deleted';
     final content = _effectiveContent(session, msg);
     if (content is TextContent) {
-      return content.text.length > maxLength
-          ? '${content.text.substring(0, maxLength)}…'
-          : content.text;
+      final shown = stripMentions(content.text, _mentionLabel);
+      return shown.length > maxLength
+          ? '${shown.substring(0, maxLength)}…'
+          : shown;
     }
     if (content is GifContent) return 'GIF';
     if (content is StickerContent) return 'Sticker';
@@ -6872,6 +6966,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   tooltip: 'Attach file',
                   focusNode: FocusNode(skipTraversal: true),
                 ),
+                if (!session.isDm)
+                  IconButton(
+                    onPressed: () => unawaited(_insertMention(session)),
+                    icon: const Icon(Icons.alternate_email),
+                    tooltip: 'Mention',
+                    focusNode: FocusNode(skipTraversal: true),
+                  ),
                 Expanded(
                   child: _composerOnFire
                       ? _FlameBox(
