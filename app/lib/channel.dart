@@ -707,16 +707,17 @@ class ChannelManager {
     final device = meshIdentity;
     final bundleFn = peerBundleLookup;
     final ownKeysFn = ownDeviceKeys;
-    if (device == null || bundleFn == null || ownKeysFn == null) {
+    if (device == null) {
+      // No device key at all — pure legacy mode.
       return DmChannelCipher(identity, peerPubkey);
     }
     final peerHex = hex.encode(peerPubkey);
     return MultiDeviceDmCipher(
       selfDevice: device,
-      selfRoot: identity,
+      selfRoot: identity.canSign ? identity : null,
       peerRootKey: peerPubkey,
-      peerBundleLookup: () => bundleFn(peerHex),
-      ownDeviceKeys: ownKeysFn,
+      peerBundleLookup: () => bundleFn?.call(peerHex),
+      ownDeviceKeys: ownKeysFn ?? () => [device.publicKey],
     );
   }
 

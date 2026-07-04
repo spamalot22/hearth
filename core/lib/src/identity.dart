@@ -21,12 +21,20 @@ Future<Uint8List> sha256Digest(List<int> bytes) async {
 /// The secret seed is persisted by the app through a [KeyStore]; `core` never
 /// touches platform storage directly, so it stays Flutter-free.
 class Identity {
-  final SimpleKeyPair _keyPair;
+  final SimpleKeyPair? _keyPair;
 
   /// The 32-byte Ed25519 public key — this identity's canonical id.
   final Uint8List publicKey;
 
   Identity._(this._keyPair, this.publicKey);
+
+  /// Creates a pubkey-only identity (no signing capability). Used when the root
+  /// seed is offline — you know *who* you are (pubkey from cert) but can't sign
+  /// as root. Calling [sign] or [x25519SharedSecret] throws [StateError].
+  Identity.fromPublicKey(this.publicKey) : _keyPair = null;
+
+  /// Whether this identity holds the private key (can sign).
+  bool get canSign => _keyPair != null;
 
   /// Creates a brand-new random identity.
   static Future<Identity> generate() async {
@@ -53,12 +61,17 @@ class Identity {
   }
 
   /// The 32-byte seed to persist via a [KeyStore]. Treat as a secret.
-  Future<Uint8List> extractSeed() async =>
-      Uint8List.fromList(await _keyPair.extractPrivateKeyBytes());
+  Future<Uint8List> extractSeed() async {
+    final kp = _keyPair;
+    if (kp == null) throw StateError('pubkey-only identity has no seed');
+    return Uint8List.fromList(await kp.extractPrivateKeyBytes());
+  }
 
   /// Ed25519 signature (64 bytes) over [message].
   Future<Uint8List> sign(List<int> message) async {
-    final sig = await _ed25519.sign(message, keyPair: _keyPair);
+    final kp = _keyPair;
+    if (kp == null) throw StateError('pubkey-only identity cannot sign');
+    final sig = await _ed25519.sign(message, keyPair: kp);
     return Uint8List.fromList(sig.bytes);
   }
 
@@ -89,7 +102,9 @@ class Identity {
   /// Derives this identity's X25519 keypair from the Ed25519 seed — the standard
   /// `sk_to_curve25519`: SHA-512 of the seed, first 32 bytes, clamped.
   Future<SimpleKeyPair> _deriveX25519() async {
-    final seed = await _keyPair.extractPrivateKeyBytes();
+    final kp = _keyPair;
+    if (kp == null) throw StateError('pubkey-only identity has no X25519 key');
+    final seed = await kp.extractPrivateKeyBytes();
     final h = await _sha512.hash(seed);
     final priv = Uint8List.fromList(h.bytes.sublist(0, 32));
     priv[0] &= 0xf8;

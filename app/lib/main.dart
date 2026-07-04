@@ -474,12 +474,40 @@ class _BootstrapState extends State<_Bootstrap> {
   late final Future<(Identity, DeviceKeys)> _boot = _load();
 
   Future<(Identity, DeviceKeys)> _load() async {
-    final root = await Identity.loadOrCreate(widget.keyStore);
-    // The device subkey gets its own secure-storage slot (or an ephemeral
-    // in-memory store under tests / a non-secure root store).
     final deviceStore = widget.keyStore is SecureKeyStore
         ? SecureKeyStore(seedKey: 'hearth.device.seed')
         : InMemoryKeyStore();
+
+    // Try loading the root seed (Phase A compat / fresh install that hasn't
+    // migrated). If it exists, boot with full root signing.
+    final rootSeed = await widget.keyStore.readSeed();
+    if (rootSeed != null) {
+      final root = await Identity.fromSeed(rootSeed);
+      final device = await DeviceKeys.loadOrCreate(root, deviceStore);
+      return (root, device);
+    }
+
+    // No root seed persisted — check if we have a device key + cert (enrolled
+    // device in offline-root mode).
+    final devSeed = await deviceStore.readSeed();
+    if (devSeed != null) {
+      final device = await Identity.fromSeed(devSeed);
+      // Load the cert from the device store to get the root pubkey.
+      final ds = await DeviceStore.open();
+      final cert = ds.certs
+          .where((c) => c.deviceKeyHex == device.publicKeyHex)
+          .firstOrNull;
+      if (cert != null) {
+        final rootPub = Identity.fromPublicKey(cert.rootKey);
+        return (rootPub, DeviceKeys(device, cert));
+      }
+    }
+
+    // Nothing at all — first boot. Generate a new root identity, show the
+    // recovery phrase, enroll this device, then persist only the device key.
+    // For now, fall through to the legacy path (generate + persist root).
+    // The enrollment UI will handle discarding the root seed post-enrollment.
+    final root = await Identity.loadOrCreate(widget.keyStore);
     final device = await DeviceKeys.loadOrCreate(root, deviceStore);
     return (root, device);
   }
@@ -1455,6 +1483,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _publishDeviceBundle() async {
     final store = _deviceStore;
     if (store == null) return;
+    // Can't publish a bundle without the root signing key.
+    if (!widget.identity.canSign) return;
     final revoked = store.revokedDeviceKeys;
     final activeKeys = store.certs
         .where((c) => !revoked.contains(c.deviceKeyHex))
@@ -2696,9 +2726,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 }
               },
               itemBuilder: (_) => [
-                if (isThis)
+                if (isThis && widget.identity.canSign)
                   const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                if (!isThis)
+                if (!isThis && widget.identity.canSign)
                   PopupMenuItem(
                     value: 'revoke',
                     child: Text('Revoke',
