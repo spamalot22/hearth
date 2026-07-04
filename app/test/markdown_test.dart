@@ -158,6 +158,46 @@ void main() {
       expect(mention.mention, hexA);
     });
 
+    group('resolveMentions', () {
+      final members = {'Alice': hexA, 'Al': hexB};
+
+      test('rewrites @name to a token, longest-name-first', () {
+        expect(resolveMentions('hi @Alice', members), 'hi <@$hexA>');
+        // @Al must not eat the front of @Alice.
+        expect(
+          resolveMentions('hi @Alice and @Al', members),
+          'hi <@$hexA> and <@$hexB>',
+        );
+      });
+
+      test('boundaries: start, punctuation, and non-abutting', () {
+        expect(resolveMentions('@Alice!', members), '<@$hexA>!');
+        expect(resolveMentions('(@Alice)', members), '(<@$hexA>)');
+      });
+
+      test('does not match inside a word or an email', () {
+        expect(resolveMentions('foo@Alice', members), 'foo@Alice');
+        expect(resolveMentions('@Alicexyz', members), '@Alicexyz');
+      });
+
+      test('Unicode boundary: a shorter name does not match a longer word', () {
+        final m = {'Бор': hexA};
+        expect(resolveMentions('@Бориса', m), '@Бориса');
+        expect(resolveMentions('@Бор', m), '<@$hexA>');
+      });
+
+      test('leaves @names inside code untouched', () {
+        expect(
+          resolveMentions('use `@Alice` here', members),
+          'use `@Alice` here',
+        );
+        expect(
+          resolveMentions('```\n@Alice\n``` then @Al', members),
+          '```\n@Alice\n``` then <@$hexB>',
+        );
+      });
+    });
+
     testWidgets('MarkdownText renders a mention via its label', (tester) async {
       await tester.pumpWidget(
         MaterialApp(

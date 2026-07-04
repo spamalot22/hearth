@@ -4460,28 +4460,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// Rewrites any `@name` in [text] that matches a member of [session] into a
-  /// pubkey-anchored `<@hex>` token, so each recipient renders it as *their* own
-  /// name for that person and the notifier can tell who was mentioned. Longest
-  /// names first (so `@Alice` beats `@Al`); only matches at a word boundary, and
-  /// after whitespace/start so an email like `a@b` isn't caught.
-  String _resolveMentionsInText(String text, ChannelSession session) {
-    final byName = <String, String>{};
-    for (final h in _membersOf(session)) {
-      byName[_displayName(Uint8List.fromList(hex.decode(h)))] = h;
-    }
-    final names = byName.keys.toList()
-      ..sort((a, b) => b.length.compareTo(a.length));
-    var out = text;
-    for (final name in names) {
-      if (name.isEmpty) continue;
-      out = out.replaceAllMapped(
-        RegExp('(?<!\\S)@${RegExp.escape(name)}(?![\\w])'),
-        (_) => '<@${byName[name]}>',
-      );
-    }
-    return out;
-  }
+  /// Rewrites any `@name` matching a member of [session] into a `<@hex>` token
+  /// (see [resolveMentions] for the boundary + code rules).
+  String _resolveMentionsInText(String text, ChannelSession session) =>
+      resolveMentions(text, {
+        for (final h in _membersOf(session))
+          _displayName(Uint8List.fromList(hex.decode(h))): h,
+      });
 
   /// Opens a member picker; the chosen member's `@name` is inserted at the
   /// cursor (resolved to a mention token on send).
@@ -4516,7 +4501,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final value = _input.value;
     final sel = value.selection;
     final at = sel.isValid ? sel.start : value.text.length;
-    final insert = '@$name ';
+    // A leading space when the mention would otherwise abut a preceding word —
+    // without it, `thanks@Bob` fails the boundary check and never resolves.
+    final needsSpace = at > 0 && !RegExp(r'\s').hasMatch(value.text[at - 1]);
+    final insert = '${needsSpace ? ' ' : ''}@$name ';
     _input.value = TextEditingValue(
       text: value.text.replaceRange(at, sel.isValid ? sel.end : at, insert),
       selection: TextSelection.collapsed(offset: at + insert.length),

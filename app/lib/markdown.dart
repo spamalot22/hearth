@@ -58,6 +58,42 @@ bool mentionsPubkey(String text, String selfHex) =>
 String stripMentions(String text, String Function(String hex) label) =>
     text.replaceAllMapped(_mentionToken, (m) => label(m.group(1)!));
 
+final _mdCode = RegExp(r'```[\s\S]*?```|`[^`\n]+`');
+
+/// Rewrites any `@name` in [text] matching [nameToHex] into a pubkey-anchored
+/// `<@hex>` token. Longest names first (so `@Alice` beats `@Al`); Unicode-letter
+/// boundaries both sides (so `foo@Bob` / `@Бориса` don't match a member); code
+/// spans and fenced blocks are left untouched (an `@name` in code stays literal,
+/// matching how the renderer shows it).
+String resolveMentions(String text, Map<String, String> nameToHex) {
+  final names = nameToHex.keys.where((n) => n.isNotEmpty).toList()
+    ..sort((a, b) => b.length.compareTo(a.length));
+  String resolve(String s) {
+    var out = s;
+    for (final name in names) {
+      out = out.replaceAllMapped(
+        RegExp(
+          '(?<![\\p{L}\\p{N}_@])@${RegExp.escape(name)}(?![\\p{L}\\p{N}_])',
+          unicode: true,
+        ),
+        (_) => '<@${nameToHex[name]}>',
+      );
+    }
+    return out;
+  }
+
+  final buf = StringBuffer();
+  var last = 0;
+  for (final m in _mdCode.allMatches(text)) {
+    buf
+      ..write(resolve(text.substring(last, m.start)))
+      ..write(m.group(0));
+    last = m.end;
+  }
+  buf.write(resolve(text.substring(last)));
+  return buf.toString();
+}
+
 sealed class MdBlock {
   const MdBlock();
 }
