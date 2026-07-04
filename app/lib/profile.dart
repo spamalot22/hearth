@@ -69,6 +69,28 @@ class DmRegistry {
   Future<void> remove(String peerPubkeyHex) => _box.delete(peerPubkeyHex);
 }
 
+/// Pubkeys of people who've reached you via your contact card but whom you
+/// haven't accepted yet — inbound *message requests*. Their DM is opened so you
+/// can see what they sent, but quarantined (not a normal DM, no reply) until you
+/// accept. Persisted so a request survives a restart. Mirrors [DmRegistry].
+class RequestStore {
+  RequestStore._(this._box);
+
+  final Box<String> _box;
+
+  static Future<RequestStore> open() async {
+    await Hive.initFlutter();
+    final box = await Hive.openBox<String>('hearth.requests');
+    return RequestStore._(box);
+  }
+
+  List<String> all() => _box.keys.cast<String>().toList();
+
+  Future<void> save(String peerPubkeyHex) => _box.put(peerPubkeyHex, '1');
+
+  Future<void> remove(String peerPubkeyHex) => _box.delete(peerPubkeyHex);
+}
+
 /// One outbound first-contact attempt: the [ownerPubkeyHex] you're reaching and
 /// the [rendezvousId] from their card, plus when you accepted it.
 class PendingContact {
