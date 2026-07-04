@@ -471,9 +471,9 @@ class _Bootstrap extends StatefulWidget {
 }
 
 class _BootstrapState extends State<_Bootstrap> {
-  late final Future<(Identity, DeviceKeys)> _boot = _load();
+  late final Future<(Identity, DeviceKeys)?> _boot = _load();
 
-  Future<(Identity, DeviceKeys)> _load() async {
+  Future<(Identity, DeviceKeys)?> _load() async {
     final deviceStore = widget.keyStore is SecureKeyStore
         ? SecureKeyStore(seedKey: 'hearth.device.seed')
         : InMemoryKeyStore();
@@ -503,18 +503,19 @@ class _BootstrapState extends State<_Bootstrap> {
       }
     }
 
-    // Nothing at all — first boot. Generate a new root identity, show the
-    // recovery phrase, enroll this device, then persist only the device key.
-    // For now, fall through to the legacy path (generate + persist root).
-    // The enrollment UI will handle discarding the root seed post-enrollment.
-    final root = await Identity.loadOrCreate(widget.keyStore);
-    final device = await DeviceKeys.loadOrCreate(root, deviceStore);
-    return (root, device);
+    // Nothing at all — first boot. Return null to trigger the enrollment UI.
+    // Exception: in tests (InMemoryKeyStore), auto-generate for convenience.
+    if (widget.keyStore is! SecureKeyStore) {
+      final root = await Identity.loadOrCreate(widget.keyStore);
+      final device = await DeviceKeys.loadOrCreate(root, deviceStore);
+      return (root, device);
+    }
+    return null;
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<(Identity, DeviceKeys)>(
+    return FutureBuilder<(Identity, DeviceKeys)?>(
       future: _boot,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
@@ -529,7 +530,16 @@ class _BootstrapState extends State<_Bootstrap> {
             ),
           );
         }
-        final (root, device) = snapshot.data!;
+        final data = snapshot.data;
+        if (data == null) {
+          return _EnrollmentScreen(
+            keyStore: widget.keyStore,
+            relayUrl: widget.relayUrl,
+            autoPoll: widget.autoPoll,
+            testApi: widget.testApi,
+          );
+        }
+        final (root, device) = data;
         return ChatScreen(
           identity: root,
           deviceKeys: device,
@@ -540,6 +550,237 @@ class _BootstrapState extends State<_Bootstrap> {
           themeMode: widget.themeMode,
         );
       },
+    );
+  }
+}
+
+/// First-boot enrollment: create a new identity or enroll an existing one.
+/// After enrollment, persists only the device key + cert (root is discarded).
+class _EnrollmentScreen extends StatefulWidget {
+  const _EnrollmentScreen({
+    required this.keyStore,
+    this.relayUrl,
+    this.autoPoll = true,
+    this.testApi,
+  });
+  final KeyStore keyStore;
+  final Uri? relayUrl;
+  final bool autoPoll;
+  final HearthTestApi? testApi;
+
+  @override
+  State<_EnrollmentScreen> createState() => _EnrollmentScreenState();
+}
+
+class _EnrollmentScreenState extends State<_EnrollmentScreen> {
+  String? _error;
+  bool _working = false;
+  final _phraseController = TextEditingController();
+
+  @override
+  void dispose() {
+    _phraseController.dispose();
+    super.dispose();
+  }
+
+  /// Create a brand-new identity: generate root, show phrase, enroll device,
+  /// discard root seed.
+  Future<void> _createNew() async {
+    setState(() => _working = true);
+    try {
+      final root = await Identity.generate();
+      final seed = await root.extractSeed();
+      final phrase = await seedToMnemonic(seed);
+
+      if (!mounted) return;
+      // Show the recovery phrase to the user.
+      final confirmed = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Your recovery phrase'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Write this down and store it safely. It is the only way to '
+                'enroll new devices or recover your identity.',
+              ),
+              const SizedBox(height: 16),
+              SelectableText(
+                phrase,
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 14,
+                  height: 1.6,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('I\'ve saved it'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+
+      await _enroll(root);
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  /// Enroll an existing identity: enter recovery phrase, derive root, enroll.
+  Future<void> _enrollExisting() async {
+    final phrase = _phraseController.text.trim();
+    if (phrase.isEmpty) {
+      setState(() => _error = 'Enter your 24-word recovery phrase');
+      return;
+    }
+    setState(() {
+      _working = true;
+      _error = null;
+    });
+    try {
+      final seed = await mnemonicToSeed(phrase);
+      if (seed == null || seed.length != 32) {
+        setState(() => _error = 'Invalid phrase (need 24 words)');
+        return;
+      }
+      final root = await Identity.fromSeed(seed);
+      await _enroll(root);
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
+  /// Signs device cert + bundle with [root], persists device key, discards root.
+  Future<void> _enroll(Identity root) async {
+    // Generate a fresh device key.
+    final deviceStore = widget.keyStore is SecureKeyStore
+        ? SecureKeyStore(seedKey: 'hearth.device.seed')
+        : InMemoryKeyStore();
+    final device = await Identity.loadOrCreate(deviceStore);
+
+    // Sign the device cert.
+    final cert = await DeviceCert.issue(
+      root: root,
+      deviceKey: device.publicKey,
+      name: DeviceKeys.defaultDeviceName(),
+    );
+
+    // Sign the device bundle (just this device initially).
+    final bundle = await DeviceBundle.publish(
+      root: root,
+      devices: [device.publicKey],
+    );
+
+    // Persist cert + bundle to the device store.
+    final ds = await DeviceStore.open();
+    await ds.addCert(cert);
+    await ds.setBundle(bundle);
+
+    // Delete root seed from secure storage (it was never written, but if the
+    // user previously had a legacy install, clear it now).
+    await widget.keyStore.deleteSeed();
+
+    // Reboot the app into the enrolled state.
+    if (!mounted) return;
+    unawaited(Navigator.of(context).pushAndRemoveUntil<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => HearthApp(
+          keyStore: widget.keyStore,
+          relayUrl: widget.relayUrl,
+          autoPoll: widget.autoPoll,
+          testApi: widget.testApi,
+        ),
+      ),
+      (_) => false,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 400),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text(
+                    '🔥',
+                    style: TextStyle(fontSize: 64),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Hearth',
+                    style: Theme.of(context).textTheme.headlineMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Decentralised, encrypted chat',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 48),
+                  FilledButton.icon(
+                    onPressed: _working ? null : _createNew,
+                    icon: const Icon(Icons.add),
+                    label: const Text('Create new identity'),
+                  ),
+                  const SizedBox(height: 24),
+                  const Divider(),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Or enroll this device with an existing identity:',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _phraseController,
+                    maxLines: 3,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      hintText: 'Enter your 24-word recovery phrase',
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.tonalIcon(
+                    onPressed: _working ? null : _enrollExisting,
+                    icon: const Icon(Icons.login),
+                    label: const Text('Enroll this device'),
+                  ),
+                  if (_error != null) ...[
+                    const SizedBox(height: 16),
+                    Text(
+                      _error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+                  if (_working) ...[
+                    const SizedBox(height: 16),
+                    const CircularProgressIndicator(),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
