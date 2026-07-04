@@ -30,6 +30,12 @@ export interface WireMessage {
   payload: string;
   sig: string;
   id: string;
+  // Multi-device: when present, `sig` is by this device subkey (not the author
+  // root), and `cert` proves the device is authorised. The relay only checks the
+  // signature against the presenting key (anti-garbage); the full cert +
+  // revocation trust decision is the receiving client's job.
+  device?: string;
+  cert?: unknown;
 }
 
 /**
@@ -68,8 +74,11 @@ export function verifySignature(
 }
 
 /**
- * Fully validates a wire message: recomputes the canonical id from its fields
- * (rejecting a mismatched/forged id) and checks the author's signature.
+ * Validates a wire message for the relay: recomputes the canonical id (rejecting
+ * a forged id) and checks the signature against the presenting key — the device
+ * subkey when the message is device-signed, else the author root. This is
+ * anti-garbage only; the receiving client verifies the full root→device cert
+ * chain and revocation (see core's `Message.verify` + the device registry).
  */
 export async function verifyWire(w: WireMessage): Promise<boolean> {
   const fields: MessageFields = {
@@ -82,7 +91,8 @@ export async function verifyWire(w: WireMessage): Promise<boolean> {
   };
   const content = signedBytes(fields);
   if (!bytesEqual(computeId(content), b64urlToBytes(w.id))) return false;
-  return verifySignature(content, b64urlToBytes(w.sig), fields.author);
+  const signer = w.device ? b64urlToBytes(w.device) : fields.author;
+  return verifySignature(content, b64urlToBytes(w.sig), signer);
 }
 
 export function b64urlToBytes(s: string): Uint8Array {

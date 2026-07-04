@@ -44,6 +44,9 @@ class DeviceCert {
   /// The root's Ed25519 signature over [_signedBytes].
   final Uint8List signature;
 
+  // Map keys emitted in canonical (length-then-bytewise) order — t, name, root,
+  // device, issued — so the signed bytes match `@ipld/dag-cbor` (which sorts
+  // keys) if a cert is ever verified cross-language, same as Message.signedBytes.
   static Uint8List _signedBytes(
     Uint8List rootKey,
     Uint8List deviceKey,
@@ -54,12 +57,12 @@ class DeviceCert {
             ..mapHeader(5)
             ..text('t')
             ..text('hearth/device-cert/v1')
+            ..text('name')
+            ..text(name)
             ..text('root')
             ..bytes(rootKey)
             ..text('device')
             ..bytes(deviceKey)
-            ..text('name')
-            ..text(name)
             ..text('issued')
             ..uint(issuedMs))
           .takeBytes();

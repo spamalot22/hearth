@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:convert/convert.dart';
 
 import 'codec.dart';
+import 'device.dart';
 import 'identity.dart';
 
 /// Schema version of the signed content. Bump if the signed fields change.
@@ -38,11 +39,21 @@ class Message {
   /// Opaque content. UTF-8 text for now; encrypted bytes later.
   final Uint8List payload;
 
-  /// 64-byte Ed25519 signature over [signedBytes].
+  /// 64-byte Ed25519 signature over [signedBytes] — by [device] when set, else
+  /// by [author] directly.
   final Uint8List signature;
 
   /// `multihash(sha256(signedBytes))` — 34 bytes.
   final Uint8List id;
+
+  /// The **device subkey** that signed this message, or null when [author]
+  /// (the root identity) signed directly. Multi-device: a message is *authored*
+  /// by the root but *signed* by one of its devices.
+  final Uint8List? device;
+
+  /// The [DeviceCert] proving [device] is authorised by [author]. Non-null iff
+  /// [device] is non-null.
+  final DeviceCert? cert;
 
   Message._({
     required this.version,
@@ -53,6 +64,8 @@ class Message {
     required this.payload,
     required this.signature,
     required this.id,
+    this.device,
+    this.cert,
   });
 
   /// The canonical bytes that are signed and hashed — **excludes** [signature]
@@ -84,15 +97,30 @@ class Message {
     return w.takeBytes();
   }
 
-  /// Builds, signs, and content-addresses a new message authored by [author].
+  /// Builds, signs, and content-addresses a new message authored by [author]
+  /// (the root identity — its pubkey is the author id).
+  ///
+  /// By default [author] signs directly. For multi-device, pass [signingDevice]
+  /// (a device subkey) and its [deviceCert]: the message is still *authored* by
+  /// [author] but *signed* by the device, and carries the cert so peers can
+  /// verify the root→device→message chain. `device`/`cert` are envelope fields,
+  /// not part of [signedBytes], so the content id is identical either way.
   static Future<Message> create({
     required Identity author,
     required String channel,
     required Uint8List payload,
     List<Uint8List> prev = const [],
     int? timestampMs,
+    Identity? signingDevice,
+    DeviceCert? deviceCert,
   }) async {
+    assert(
+      signingDevice == null || deviceCert != null,
+      'device-signed messages must carry the device cert',
+    );
     final ts = timestampMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    final signer = signingDevice ?? author;
+    final device = signingDevice?.publicKey;
     final fields = Message._(
       version: kHearthMessageVersion,
       author: author.publicKey,
@@ -104,7 +132,7 @@ class Message {
       id: Uint8List(0),
     );
     final content = fields.signedBytes();
-    final signature = await author.sign(content);
+    final signature = await signer.sign(content);
     final id = await _idFor(content);
     return Message._(
       version: kHearthMessageVersion,
@@ -115,19 +143,41 @@ class Message {
       payload: payload,
       signature: signature,
       id: id,
+      device: device,
+      cert: deviceCert,
     );
   }
 
-  /// True iff [id] matches the content hash **and** [signature] is a valid
-  /// Ed25519 signature by [author] over [signedBytes].
+  /// True iff [id] matches the content hash and the signature chain is valid:
+  /// either [author] signed directly (classic), or a [device] signed it and a
+  /// valid [cert] proves that device is authorised by [author].
+  ///
+  /// Does **not** check device revocation — that's per-user state the sync/app
+  /// layer enforces (drop messages from a device you've revoked).
   Future<bool> verify() async {
     final content = signedBytes();
     final expectedId = await _idFor(content);
     if (!_constTimeEquals(expectedId, id)) return false;
+    final dev = device;
+    if (dev == null) {
+      // Classic: the root identity signed directly.
+      return Identity.verifySignature(
+        content,
+        signature: signature,
+        publicKey: author,
+      );
+    }
+    // Device-signed: the cert must bind this device to this author, and the
+    // device must have signed the content.
+    final c = cert;
+    if (c == null) return false;
+    if (!_constTimeEquals(c.rootKey, author)) return false;
+    if (!_constTimeEquals(c.deviceKey, dev)) return false;
+    if (!await c.verify()) return false;
     return Identity.verifySignature(
       content,
       signature: signature,
-      publicKey: author,
+      publicKey: dev,
     );
   }
 
@@ -154,6 +204,8 @@ class Message {
     'payload': base64Url.encode(payload),
     'sig': base64Url.encode(signature),
     'id': base64Url.encode(id),
+    if (device != null) 'device': base64Url.encode(device!),
+    if (cert != null) 'cert': cert!.toJson(),
   };
 
   static Message fromJson(Map<String, Object?> j) => Message._(
@@ -168,6 +220,12 @@ class Message {
     payload: base64Url.decode(j['payload']! as String),
     signature: base64Url.decode(j['sig']! as String),
     id: base64Url.decode(j['id']! as String),
+    device: j['device'] == null
+        ? null
+        : base64Url.decode(j['device']! as String),
+    cert: j['cert'] == null
+        ? null
+        : DeviceCert.fromJson((j['cert']! as Map).cast<String, Object?>()),
   );
 }
 

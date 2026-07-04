@@ -116,4 +116,100 @@ void main() {
       }
     });
   });
+
+  group('device-signed messages', () {
+    Future<(Identity, Identity, DeviceCert)> setup() async {
+      final root = await Identity.generate();
+      final device = await Identity.generate();
+      final cert = await DeviceCert.issue(
+        root: root,
+        deviceKey: device.publicKey,
+        name: 'phone',
+      );
+      return (root, device, cert);
+    }
+
+    test(
+      'a device-signed message verifies and is authored by the root',
+      () async {
+        final (root, device, cert) = await setup();
+        final m = await Message.create(
+          author: root,
+          channel: 'c',
+          payload: _utf8('hi'),
+          signingDevice: device,
+          deviceCert: cert,
+        );
+        expect(await m.verify(), isTrue);
+        expect(m.author, root.publicKey, reason: 'author id stays the root');
+        expect(m.device, device.publicKey, reason: 'signed by the device');
+        // The content id is identical to a root-self-signed message (device/cert
+        // are envelope fields, not signed content).
+        final self = await Message.create(
+          author: root,
+          channel: 'c',
+          payload: _utf8('hi'),
+          timestampMs: m.timestampMs,
+        );
+        expect(m.id, self.id);
+      },
+    );
+
+    test('round-trips the device + cert through json', () async {
+      final (root, device, cert) = await setup();
+      final m = await Message.create(
+        author: root,
+        channel: 'c',
+        payload: _utf8('yo'),
+        signingDevice: device,
+        deviceCert: cert,
+      );
+      final back = Message.fromJson(m.toJson());
+      expect(back.device, device.publicKey);
+      expect(await back.verify(), isTrue);
+    });
+
+    test('a cert for a different root is rejected', () async {
+      final (_, device, _) = await setup();
+      final root = await Identity.generate();
+      final otherRoot = await Identity.generate();
+      // Cert issued by otherRoot, but the message claims author=root.
+      final badCert = await DeviceCert.issue(
+        root: otherRoot,
+        deviceKey: device.publicKey,
+        name: 'phone',
+      );
+      final m = await Message.create(
+        author: root,
+        channel: 'c',
+        payload: _utf8('hi'),
+        signingDevice: device,
+        deviceCert: badCert,
+      );
+      expect(await m.verify(), isFalse);
+    });
+
+    test(
+      'a message signed by a device the cert does not name is rejected',
+      () async {
+        final (root, _, _) = await setup();
+        final realDevice = await Identity.generate();
+        final otherDevice = await Identity.generate();
+        final cert = await DeviceCert.issue(
+          root: root,
+          deviceKey: realDevice.publicKey,
+          name: 'phone',
+        );
+        // Sign with otherDevice but present realDevice's cert.
+        final m = await Message.create(
+          author: root,
+          channel: 'c',
+          payload: _utf8('hi'),
+          signingDevice: otherDevice,
+          deviceCert: cert,
+        );
+        expect(await m.verify(), isFalse);
+      },
+    );
+  });
 }
