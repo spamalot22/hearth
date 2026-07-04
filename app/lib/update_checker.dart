@@ -52,6 +52,35 @@ class RelayUnreachable extends UpdateState {
   const RelayUnreachable();
 }
 
+/// Verifies a peer- or relay-provided manifest's Ed25519 signature against
+/// [publicKeyHex], over the **canonical** signing bytes ([manifestSigningBytes]).
+/// Returns its fields as [UpdateInfo] when valid, else null (missing fields,
+/// bad shape, or forged/garbled signature).
+///
+/// This is the single verification both the relay check ([checkForUpdate]) and
+/// the peer-to-peer path (`ChannelManager._handleVersionControl`) call, so the
+/// two can never drift onto different signing formats again — the drift that
+/// silently broke P2P propagation when only the relay path was migrated.
+Future<UpdateInfo?> verifyManifest(
+  Map<String, dynamic> manifest,
+  String publicKeyHex,
+) async {
+  final version = manifest['version'] as String?;
+  final seq = manifest['seq'] as int?;
+  final sig = manifest['sig'] as String?;
+  final assets = manifest['assets'] as Map<String, dynamic>?;
+  if (version == null || seq == null || sig == null || assets == null) {
+    return null;
+  }
+  final valid = await Identity.verifySignature(
+    manifestSigningBytes(version, seq, assets),
+    signature: _hexDecode(sig),
+    publicKey: _hexDecode(publicKeyHex),
+  );
+  if (!valid) return null;
+  return UpdateInfo(version: version, seq: seq, assets: assets);
+}
+
 /// Checks the relay for a signed update manifest.
 ///
 /// Returns [UpdateInfo] if a valid, newer release is available; null if
@@ -71,36 +100,20 @@ Future<UpdateState> checkForUpdate(Uri relayUrl, {http.Client? client}) async {
     // counts as "down". A reachable relay with no manifest (404) is up to date.
     if (res.statusCode != 200) return const UpToDate();
     final body = jsonDecode(res.body) as Map<String, dynamic>;
-    final version = body['version'] as String?;
-    final seq = body['seq'] as int?;
-    final sig = body['sig'] as String?;
-    final assets = body['assets'] as Map<String, dynamic>?;
-    if (version == null || seq == null || sig == null || assets == null) {
-      return const UpToDate();
-    }
-
-    // Verify the signature over the canonical fixed-field form (see the signer
-    // in backend/src/manifest.ts) — robust to JSON key order / whitespace.
-    final valid = await Identity.verifySignature(
-      manifestSigningBytes(version, seq, assets),
-      signature: _hexDecode(sig),
-      publicKey: _hexDecode(releasePublicKeyHex),
-    );
-    if (!valid) return const UpToDate(); // forged/garbled — ignore
+    final info = await verifyManifest(body, releasePublicKeyHex);
+    if (info == null) return const UpToDate(); // missing fields / forged
 
     // Downgrade protection: reject seq ≤ our last-seen seq.
     final lastSeq = await _getLastSeq();
-    if (seq <= lastSeq) return const UpToDate();
+    if (info.seq <= lastSeq) return const UpToDate();
 
     // Already on this version — persist its seq as the downgrade floor.
-    if (version == appVersion) {
-      await _setLastSeq(seq);
+    if (info.version == appVersion) {
+      await _setLastSeq(info.seq);
       return const UpToDate();
     }
 
-    return UpdateAvailable(
-      UpdateInfo(version: version, seq: seq, assets: assets),
-    );
+    return UpdateAvailable(info);
   } on TimeoutException {
     return const RelayUnreachable();
   } on http.ClientException {

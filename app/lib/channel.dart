@@ -450,36 +450,29 @@ class ChannelManager {
   }
 
   /// Handles a peer-provided version manifest. Verifies the signature
-  /// independently — the peer is just a courier, not a trust source.
+  /// independently — the peer is just a courier, not a trust source — through
+  /// the *same* [verifyManifest] the relay-check path uses, so the two can't
+  /// drift onto different signing formats.
   Future<void> _handleVersionControl(Map<String, Object?> manifest) async {
     if (releasePublicKeyHex.isEmpty || appVersion == 'dev') return;
-    final version = manifest['version'] as String?;
-    final seq = manifest['seq'] as int?;
-    final sig = manifest['sig'] as String?;
-    if (version == null || seq == null || sig == null) return;
-    if (version == appVersion) return; // already up to date
+    if (manifest['version'] == appVersion) return; // already up to date
 
-    // Verify signature against the hardcoded release key.
-    final payload = Map<String, Object?>.from(manifest)..remove('sig');
-    final payloadBytes = utf8.encode(jsonEncode(payload));
-    final valid = await Identity.verifySignature(
-      payloadBytes,
-      signature: _hexDecode(sig),
-      publicKey: _hexDecode(releasePublicKeyHex),
+    final info = await verifyManifest(
+      manifest.cast<String, dynamic>(),
+      releasePublicKeyHex,
     );
-    if (!valid) return; // forged manifest — ignore
+    if (info == null) return; // missing fields / forged
 
     // Downgrade protection: reject seq ≤ our persisted floor.
     final lastSeq = await getLastUpdateSeq();
-    if (seq <= lastSeq) return;
+    if (info.seq <= lastSeq) return;
 
     // Also propagate the manifest to our meshes so we relay it onward.
     for (final session in _sessions.values) {
       session._mesh?.versionManifest = manifest;
     }
 
-    final assets = manifest['assets'] as Map<String, dynamic>? ?? {};
-    onForceUpdate?.call(UpdateInfo(version: version, seq: seq, assets: assets));
+    onForceUpdate?.call(info);
   }
 
   void _handleTyping(String channelId, String peerHex, bool typing) {
@@ -590,12 +583,4 @@ class ChannelManager {
       session.reconnect();
     }
   }
-}
-
-List<int> _hexDecode(String h) {
-  final out = <int>[];
-  for (var i = 0; i < h.length; i += 2) {
-    out.add(int.parse(h.substring(i, i + 2), radix: 16));
-  }
-  return out;
 }
