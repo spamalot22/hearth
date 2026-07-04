@@ -16,9 +16,10 @@ void main() {
 
     await tester.pumpAndSettle();
 
-    // Identity is shown, and its seed was persisted to the store.
+    // Identity fingerprint is shown (the root pubkey derived from the device cert).
     expect(find.byKey(const Key('identity-fingerprint')), findsOneWidget);
-    expect(await store.readSeed(), isNotNull);
+    // Root seed is NOT persisted (offline-root model — only device key persisted).
+    expect(await store.readSeed(), isNull);
   });
 
   testWidgets('reuses the persisted identity across launches', (tester) async {
@@ -26,11 +27,12 @@ void main() {
 
     await tester.pumpWidget(HearthApp(keyStore: store, autoPoll: false));
     await tester.pumpAndSettle();
-    final firstSeed = await store.readSeed();
+    final fp1 = tester.widget<Text>(find.byKey(const Key('identity-fingerprint')));
 
-    // Re-mount with the same store: should load the seed, not regenerate.
+    // Re-mount with the same store: identity should be stable (same device key).
     await tester.pumpWidget(HearthApp(keyStore: store, autoPoll: false));
     await tester.pumpAndSettle();
-    expect(await store.readSeed(), firstSeed);
+    final fp2 = tester.widget<Text>(find.byKey(const Key('identity-fingerprint')));
+    expect(fp2.data, fp1.data);
   });
 }

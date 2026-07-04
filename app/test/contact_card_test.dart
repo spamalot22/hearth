@@ -3,7 +3,9 @@
 // accepting a card drives the real DM-bootstrap wiring (add contact + openDm)
 // through the app widget tree — the live rendezvous is gated off in tests, so
 // this covers everything up to the point a relay would take over.
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/channel.dart';
 import 'package:hearth/contact_card.dart';
@@ -167,22 +169,41 @@ void main() {
   });
 
   testWidgets('accepting your own card is refused', (tester) async {
-    final store = InMemoryKeyStore();
-    final me = await Identity.loadOrCreate(store);
     final api = HearthTestApi();
+    final store = InMemoryKeyStore();
     await tester.pumpWidget(
       HearthApp(keyStore: store, autoPoll: false, testApi: api),
     );
     await _settle(tester);
 
+    // Create a channel to expose the active session (which reveals the identity).
+    await tester.tap(find.widgetWithText(FilledButton, 'Create a channel'));
+    await _settle(tester);
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      'test',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+    await _settle(tester);
+
+    // Get the identity from a sent message's author.
+    await tester.enterText(find.byType(TextField).last, 'hi');
+    await tester.tap(find.byIcon(Icons.send));
+    await _settle(tester);
+    final session = api.activeChannel()!;
+    final myHex = hex.encode(session.repository.ordered().last.author);
+
     final ownCard = ContactCard(
-      pubkey: me.publicKeyHex,
+      pubkey: myHex,
       rendezvous: ContactCard.newRendezvousId(),
     ).encode();
     await api.acceptCard(ownCard);
     await _settle(tester);
 
-    // No DM to yourself.
+    // Still on the group channel, no DM opened to yourself.
     expect(api.activeChannel()?.isDm ?? false, isFalse);
     await _finish(tester);
   });

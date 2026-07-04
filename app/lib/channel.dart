@@ -35,36 +35,12 @@ class GroupChannelCipher implements ChannelCipher {
       GroupCipher.decrypt(boxed, key: _key);
 }
 
-class DmChannelCipher implements ChannelCipher {
-  DmChannelCipher(this._self, this._peer);
-
-  final Identity _self;
-  final List<int> _peer;
-
-  @override
-  Future<Uint8List> encrypt(List<int> plaintext) =>
-      PairBox.encrypt(plaintext, self: _self, peerEd25519PublicKey: _peer);
-
-  @override
-  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) =>
-      PairBox.decrypt(boxed, self: _self, peerEd25519PublicKey: _peer);
-}
-
-/// Phase B DM cipher: encrypts per-device when a bundle is available, with
-/// transparent PairBox fallback for legacy (pre-bundle) peers. Decrypts by
-/// inspecting the version byte — MultiDeviceBox messages start with 0x01,
-/// PairBox messages start with a random nonce (never 0x01 at position 0 with
-/// a valid 12-byte nonce prefix).
-///
-/// Actually, we can't rely on the first byte alone to distinguish — PairBox
-/// ciphertext starts with a 12-byte nonce which *could* have any value. Instead,
-/// we try MultiDeviceBox first (cheap version-byte check), and if it fails,
-/// fall back to PairBox.
+/// Per-device DM cipher. Encrypts to each of the peer's active device keys
+/// (via `MultiDeviceBox`) and includes our own device keys for self-read.
+/// Requires both peers to have published a device bundle.
 class MultiDeviceDmCipher implements ChannelCipher {
   MultiDeviceDmCipher({
     required this.selfDevice,
-    this.selfRoot,
-    required this.peerRootKey,
     required this.peerBundleLookup,
     required this.ownDeviceKeys,
   });
@@ -72,15 +48,8 @@ class MultiDeviceDmCipher implements ChannelCipher {
   /// This device's identity (for ECDH in MultiDeviceBox).
   final Identity selfDevice;
 
-  /// The root identity (for PairBox fallback). Null in offline-root mode —
-  /// legacy PairBox messages become unreadable (shown as 🔒).
-  final Identity? selfRoot;
-
-  /// The DM partner's root Ed25519 public key.
-  final List<int> peerRootKey;
-
-  /// Looks up the peer's current device bundle (may return null if they haven't
-  /// published one yet — in which case we fall back to PairBox).
+  /// Looks up the peer's current device bundle. If null, the peer hasn't
+  /// published one yet and DMs can't be encrypted to them.
   final DeviceBundle? Function() peerBundleLookup;
 
   /// Our own active device keys (so we can encrypt to ourselves for self-read
@@ -91,24 +60,14 @@ class MultiDeviceDmCipher implements ChannelCipher {
   Future<Uint8List> encrypt(List<int> plaintext) async {
     final peerBundle = peerBundleLookup();
     if (peerBundle == null) {
-      // No bundle — fall back to PairBox (legacy peer). If root is offline,
-      // we can't encrypt to this peer at all.
-      final root = selfRoot;
-      if (root == null) {
-        throw StateError(
-            'cannot encrypt DM: peer has no device bundle and root is offline');
-      }
-      return PairBox.encrypt(plaintext,
-          self: root, peerEd25519PublicKey: peerRootKey);
+      throw StateError(
+          'cannot encrypt DM: peer has no device bundle (they must update)');
     }
-    // Encrypt to all peer devices + our own devices (so all our devices can
-    // read messages we sent).
+    // Encrypt to all peer devices + our own devices.
     final recipientKeys = <Uint8List>[
       ...peerBundle.devices,
       ...ownDeviceKeys(),
     ];
-    // Deduplicate (in case our device is also in the peer bundle — shouldn't
-    // happen but defensive).
     final seen = <String>{};
     final deduped = <Uint8List>[];
     for (final k in recipientKeys) {
@@ -123,62 +82,46 @@ class MultiDeviceDmCipher implements ChannelCipher {
 
   @override
   Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) async {
-    // Try MultiDeviceBox first (version byte check is cheap).
-    if (boxed.isNotEmpty && boxed[0] == 1) {
+    // Use sender device key directly when available (O(1)).
+    if (senderDevice != null) {
       try {
-        // If we have the sender's device key from the message envelope, use it
-        // directly (O(1) — no iteration). Otherwise fall back to trying all
-        // known devices.
-        if (senderDevice != null) {
-          try {
-            return await MultiDeviceBox.decrypt(
-              boxed,
-              recipientDevice: selfDevice,
-              senderDeviceEd: senderDevice,
-            );
-          } catch (_) {
-            // sender device didn't work — maybe stale bundle, try others
-          }
-        }
-        // Fallback: iterate peer bundle devices (sender device unknown or stale).
-        final peerBundle = peerBundleLookup();
-        if (peerBundle != null) {
-          for (final dev in peerBundle.devices) {
-            try {
-              return await MultiDeviceBox.decrypt(
-                boxed,
-                recipientDevice: selfDevice,
-                senderDeviceEd: dev,
-              );
-            } catch (_) {
-              continue;
-            }
-          }
-        }
-        // Also try our own devices (self-sent message from another device).
-        for (final ownKey in ownDeviceKeys()) {
-          try {
-            return await MultiDeviceBox.decrypt(
-              boxed,
-              recipientDevice: selfDevice,
-              senderDeviceEd: ownKey,
-            );
-          } catch (_) {
-            continue;
-          }
-        }
+        return await MultiDeviceBox.decrypt(
+          boxed,
+          recipientDevice: selfDevice,
+          senderDeviceEd: senderDevice,
+        );
       } catch (_) {
-        // Not actually a MultiDeviceBox — fall through to PairBox.
+        // Stale sender device — try others below.
       }
     }
-    // Fallback: PairBox (legacy message or MultiDeviceBox failed).
-    final root = selfRoot;
-    if (root == null) {
-      throw const FormatException(
-          'cannot decrypt: legacy PairBox message and root is offline');
+    // Fallback: iterate peer bundle devices.
+    final peerBundle = peerBundleLookup();
+    if (peerBundle != null) {
+      for (final dev in peerBundle.devices) {
+        try {
+          return await MultiDeviceBox.decrypt(
+            boxed,
+            recipientDevice: selfDevice,
+            senderDeviceEd: dev,
+          );
+        } catch (_) {
+          continue;
+        }
+      }
     }
-    return PairBox.decrypt(boxed,
-        self: root, peerEd25519PublicKey: peerRootKey);
+    // Try our own devices (self-sent message from another device).
+    for (final ownKey in ownDeviceKeys()) {
+      try {
+        return await MultiDeviceBox.decrypt(
+          boxed,
+          recipientDevice: selfDevice,
+          senderDeviceEd: ownKey,
+        );
+      } catch (_) {
+        continue;
+      }
+    }
+    throw const FormatException('cannot decrypt DM (no matching device key)');
   }
 }
 
@@ -704,18 +647,12 @@ class ChannelManager {
   /// when we have a meshIdentity (device key) and the lookup functions; falls
   /// back to the legacy PairBox-only cipher otherwise.
   ChannelCipher _dmCipher(List<int> peerPubkey) {
-    final device = meshIdentity;
+    final device = meshIdentity ?? identity;
     final bundleFn = peerBundleLookup;
     final ownKeysFn = ownDeviceKeys;
-    if (device == null) {
-      // No device key at all — pure legacy mode.
-      return DmChannelCipher(identity, peerPubkey);
-    }
     final peerHex = hex.encode(peerPubkey);
     return MultiDeviceDmCipher(
       selfDevice: device,
-      selfRoot: identity.canSign ? identity : null,
-      peerRootKey: peerPubkey,
       peerBundleLookup: () => bundleFn?.call(peerHex),
       ownDeviceKeys: ownKeysFn ?? () => [device.publicKey],
     );

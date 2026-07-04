@@ -480,21 +480,10 @@ class _BootstrapState extends State<_Bootstrap> {
         ? SecureKeyStore(seedKey: 'hearth.device.seed')
         : InMemoryKeyStore();
 
-    // Try loading the root seed (Phase A compat / fresh install that hasn't
-    // migrated). If it exists, boot with full root signing.
-    final rootSeed = await widget.keyStore.readSeed();
-    if (rootSeed != null) {
-      final root = await Identity.fromSeed(rootSeed);
-      final device = await DeviceKeys.loadOrCreate(root, deviceStore);
-      return (root, device);
-    }
-
-    // No root seed persisted — check if we have a device key + cert (enrolled
-    // device in offline-root mode).
+    // Check if we have a device key + cert (enrolled device).
     final devSeed = await deviceStore.readSeed();
     if (devSeed != null) {
       final device = await Identity.fromSeed(devSeed);
-      // Load the cert from the device store to get the root pubkey.
       DeviceStore? ds;
       try {
         ds = await DeviceStore.open();
@@ -511,18 +500,22 @@ class _BootstrapState extends State<_Bootstrap> {
           return (rootPub, DeviceKeys(device, cert));
         }
       }
-      // Device seed exists but no matching cert — orphan state. Delete the
-      // orphan device seed so enrollment starts clean.
+      // Device seed exists but no matching cert — orphan state. Clean up.
       await deviceStore.deleteSeed();
     }
 
-    // Nothing at all — first boot. Return null to trigger the enrollment UI.
-    // Exception: in tests (InMemoryKeyStore), auto-generate for convenience.
+    // No enrolled device — first boot. In tests, auto-generate a full identity.
     if (widget.keyStore is! SecureKeyStore) {
-      final root = await Identity.loadOrCreate(widget.keyStore);
-      final device = await DeviceKeys.loadOrCreate(root, deviceStore);
-      return (root, device);
+      final root = await Identity.generate();
+      final device = await Identity.loadOrCreate(deviceStore);
+      final cert = await DeviceCert.issue(
+        root: root,
+        deviceKey: device.publicKey,
+        name: 'Test device',
+      );
+      return (root, DeviceKeys(device, cert));
     }
+    // Real device — show enrollment UI.
     return null;
   }
 
@@ -1096,8 +1089,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _deviceStore = await DeviceStore.open();
       await _deviceStore!.addCert(widget.deviceKeys.cert);
       // Publish our device bundle (active device set) so peers can encrypt
-      // DMs per-device. Re-published each boot in case devices were added/revoked.
-      await _publishDeviceBundle();
     }
     if (widget.autoPoll) await initRecentGifs();
     if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
@@ -1549,7 +1540,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if ((_myName != null || _myAvatar != null) &&
           _announced.add(active.channelId)) {
         await _announceName(active);
-        await _maybePublishBundle(active);
       }
     }
     if (mounted) {
@@ -1758,42 +1748,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Persists a DM once it has real (non-bookkeeping) history, so it restores on
   /// the next launch. A DM with only a profile announce and no conversation is
   /// left unsaved — nothing to restore. Only call with a decrypted session (the
-  /// Publishes our device bundle (the set of active device keys) into every
-  /// open channel. Called on boot and after device changes (add/revoke).
-  Future<void> _publishDeviceBundle() async {
-    final store = _deviceStore;
-    if (store == null) return;
-    // Can't publish a bundle without the root signing key.
-    if (!widget.identity.canSign) return;
-    final revoked = store.revokedDeviceKeys;
-    final activeKeys = store.certs
-        .where((c) => !revoked.contains(c.deviceKeyHex))
-        .map((c) => c.deviceKey)
-        .toList();
-    if (activeKeys.isEmpty) return;
-    final bundle = await DeviceBundle.publish(
-      root: widget.identity,
-      devices: activeKeys,
-    );
-    // Store our own bundle so it's available for self-lookup.
-    await store.setBundle(bundle);
-    // Gossip the bundle into all open channels (it will be learned by peers
-    // via _indexBundles on their next refresh).
-    _pendingBundle = DeviceBundleContent(bundle.toJson());
-  }
-
-  /// A pending bundle to publish into each channel on next activity.
-  DeviceBundleContent? _pendingBundle;
-
-  /// Publishes the pending device bundle into [session] if not already sent.
-  Future<void> _maybePublishBundle(ChannelSession session) async {
-    final bundle = _pendingBundle;
-    if (bundle == null) return;
-    final payload = await session.encodePayload(bundle);
-    final message = await _createMessage(session, payload);
-    await session.publish(message);
-  }
-
   /// Persists device certs seen from messages that match our root identity
   /// (i.e. our other devices). Lightweight — only processes new ones.
   void _learnDeviceCerts(ChannelSession session) {
@@ -2264,184 +2218,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   // --- identity backup ---
 
-  /// Shows your recovery code (the seed) to back up. Anyone with it *is* you, so
-  /// it's display-only with a warning.
-  Future<void> _backupIdentity() async {
-    final seed = await widget.identity.extractSeed();
-    final phrase = await seedToMnemonic(seed);
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Back up your identity'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Write these 24 words down in order and keep them somewhere '
-                'safe. Anyone who has them can become you — never share them. '
-                'They are the only way to restore your identity if you lose '
-                'this device.',
-              ),
-              const SizedBox(height: 16),
-              Center(
-                child: QrImageView(
-                  data: phrase,
-                  size: 240, // the 24-word phrase is denser than the old code
-                  backgroundColor: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text('Recovery phrase:', style: TextStyle(fontSize: 12)),
-              const SizedBox(height: 4),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: SelectableText(
-                  phrase,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 14,
-                    height: 1.6,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-          FilledButton.icon(
-            onPressed: () {
-              _copyAndClear(phrase);
-              Navigator.pop(context);
-            },
-            icon: const Icon(Icons.copy),
-            label: const Text('Copy'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Restores an identity from a recovery code, replacing this device's.
-  Future<void> _restoreIdentity() async {
-    final isMobile =
-        Theme.of(context).platform == TargetPlatform.android ||
-        Theme.of(context).platform == TargetPlatform.iOS;
-    String? code;
-    if (isMobile) {
-      // Mobile: offer scan or paste.
-      code = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Restore identity'),
-          content: const Text(
-            'Scan a QR code from another device, or paste your 24-word '
-            'recovery phrase.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            TextButton.icon(
-              onPressed: () async {
-                final result = await Navigator.push<String>(
-                  ctx,
-                  MaterialPageRoute<String>(
-                    builder: (_) => const _QrScanPage(),
-                  ),
-                );
-                if (ctx.mounted) Navigator.pop(ctx, result);
-              },
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Scan QR'),
-            ),
-            TextButton.icon(
-              onPressed: () async {
-                Navigator.pop(ctx, ''); // sentinel: show text prompt
-              },
-              icon: const Icon(Icons.paste),
-              label: const Text('Paste'),
-            ),
-          ],
-        ),
-      );
-      // If "Paste" was chosen (empty sentinel), show text prompt. Cancel = null = abort.
-      if (code != null && code.isEmpty && mounted) {
-        code = await _promptText(
-          title: 'Restore identity',
-          hint: 'paste your 24-word recovery phrase',
-          action: 'Restore',
-        );
-      }
-    } else {
-      code = await _promptText(
-        title: 'Restore identity',
-        hint: 'paste your 24-word recovery phrase',
-        action: 'Restore',
-      );
-    }
-    if (code == null || code.trim().isEmpty) return;
-    // Decode the 24-word recovery phrase. A scanned QR encodes the same phrase,
-    // so this handles both. Null if a word is unknown or the checksum fails.
-    // Require a 32-byte seed: a shorter but valid BIP39 phrase (e.g. a 12-word
-    // wallet phrase) would otherwise be written and then brick the next launch,
-    // since Ed25519 key derivation needs exactly 32 bytes.
-    final seed = await mnemonicToSeed(code.trim());
-    if (seed == null || seed.length != 32) {
-      if (mounted) _setError('invalid recovery phrase (need a 24-word phrase)');
-      return;
-    }
-    if (!mounted) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Replace this identity?'),
-        content: const Text(
-          'This device will switch to the restored identity. Your current one '
-          'is lost unless you backed it up.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Restore'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    await widget.keyStore.writeSeed(seed);
-    if (!mounted) return;
-    await showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Identity restored'),
-        content: const Text('Restart Hearth to use the restored identity.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-  }
-
   /// Pings the relay's `/health` to show whether it's actually reachable and
   /// responding (so you can tell if a friend would be able to connect).
   Future<void> _checkRelay() async {
@@ -2541,7 +2317,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       context: context,
       builder: (context) => Dialog(
         child: DefaultTabController(
-          length: kIsWeb ? 4 : 5,
+          length: kIsWeb ? 5 : 6,
           child: SizedBox(
             width: 400,
             height: 480,
@@ -2899,39 +2675,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (widget.identity.canSign)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.key_outlined),
-              title: const Text('Back up identity'),
-              subtitle: const Text('Reveal your recovery phrase'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_backupIdentity());
-              },
-            )
-          else
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.key_off_outlined),
-              title: Text('Back up identity'),
-              subtitle: Text(
-                'Root key is offline — use your recovery phrase from the '
-                'device that created your identity.',
-              ),
-              enabled: false,
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.fingerprint),
+            title: Text('hearth#${widget.identity.fingerprint}'),
+            subtitle: Text(
+              widget.identity.publicKeyHex,
+              style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
             ),
-          if (widget.identity.canSign)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.restore),
-              title: const Text('Restore identity'),
-              subtitle: const Text('Restore from a recovery phrase'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_restoreIdentity());
-              },
+          ),
+          const ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.info_outline),
+            title: Text('Recovery phrase'),
+            subtitle: Text(
+              'Your root key lives only in your 24-word recovery phrase. '
+              'To add a new device or revoke one, enter the phrase in '
+              'Settings → Devices.',
             ),
+          ),
         ],
       ),
     );
@@ -3009,103 +2771,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       subtitle: Text('Enrolled $dateStr • ${cert.deviceKeyHex.substring(0, 8)}…'),
       trailing: isRevoked
           ? null
-          : PopupMenuButton<String>(
-              onSelected: (action) {
-                switch (action) {
-                  case 'rename':
-                    if (isThis) _renameThisDevice();
-                  case 'revoke':
-                    if (!isThis) _revokeDevice(cert);
-                }
-              },
-              itemBuilder: (_) => [
-                if (isThis && widget.identity.canSign)
-                  const PopupMenuItem(value: 'rename', child: Text('Rename')),
-                if (!isThis && widget.identity.canSign)
-                  PopupMenuItem(
-                    value: 'revoke',
-                    child: Text('Revoke',
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error)),
-                  ),
-              ],
-            ),
+          : null, // rename/revoke require entering recovery phrase (TODO)
     );
-  }
-
-  Future<void> _renameThisDevice() async {
-    if (!widget.identity.canSign) return; // requires root signing
-    final controller = TextEditingController(text: widget.deviceKeys.cert.name);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Rename device'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Device name'),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-              child: const Text('Save')),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (name == null || name.isEmpty || name == widget.deviceKeys.cert.name) {
-      return;
-    }
-    // Re-issue cert with the new name.
-    final newCert = await DeviceCert.issue(
-      root: widget.identity,
-      deviceKey: widget.deviceKeys.device.publicKey,
-      name: name,
-    );
-    await _deviceStore?.updateCert(newCert);
-    // Update the in-memory device keys so new messages carry the new name.
-    widget.deviceKeys.cert = newCert;
-    if (mounted) setState(() {});
-  }
-
-  Future<void> _revokeDevice(DeviceCert cert) async {
-    if (!widget.identity.canSign) return; // requires root signing
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Revoke device?'),
-        content: Text(
-          'Revoke "${cert.name}"? It will no longer be able to send messages '
-          'as you. This cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              style: FilledButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.error),
-              child: const Text('Revoke')),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    final revocation = await DeviceRevocation.issue(
-      root: widget.identity,
-      deviceKey: cert.deviceKey,
-    );
-    await _deviceStore?.addRevocation(revocation);
-    // Gossip the revocation to all channels so other peers learn it.
-    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
-      session.broadcast(DeviceRevocationControl(revocation: revocation));
-    }
-    // Republish our device bundle without the revoked device.
-    await _publishDeviceBundle();
-    if (mounted) setState(() {});
   }
 
   Widget _networkTab() {
