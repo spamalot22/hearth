@@ -1197,11 +1197,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Only accept revocations for our own root (other people's revocations
     // don't matter for Phase A — we'll enforce them in Phase B).
     if (hex.encode(rev.rootKey) != widget.identity.publicKeyHex) return;
-    unawaited(rev.verify().then((valid) {
-      if (!valid) return;
-      unawaited(store.addRevocation(rev));
-      if (mounted) setState(() {});
-    }));
+    unawaited(() async {
+      try {
+        if (!await rev.verify()) return;
+        await store.addRevocation(rev);
+        if (mounted) setState(() {});
+      } catch (_) {
+        // Persistence failure — revocation will be re-learned on next sync.
+      }
+    }());
   }
 
   /// Decrypts the active channel's new messages, indexes any media into your
@@ -5442,7 +5446,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final messages = session.repository.ordered().where((m) {
       final c = session.contentOf(m);
       // Soundboard clips render in the voice panel, not the timeline.
-      return !c.isBookkeeping && c is! SoundContent;
+      if (c.isBookkeeping || c is SoundContent) return false;
+      // Hide messages from revoked devices (already stored, filter at display).
+      if (m.device != null) {
+        final devHex = hex.encode(m.device!);
+        if (_deviceStore?.isRevoked(devHex) ?? false) return false;
+      }
+      return true;
     }).toList();
     return messages.isEmpty
         ? const Center(child: Text('No messages yet — say something.'))

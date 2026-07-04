@@ -114,10 +114,9 @@ class Message {
     Identity? signingDevice,
     DeviceCert? deviceCert,
   }) async {
-    assert(
-      signingDevice == null || deviceCert != null,
-      'device-signed messages must carry the device cert',
-    );
+    if (signingDevice != null && deviceCert == null) {
+      throw ArgumentError('device-signed messages must carry the device cert');
+    }
     final ts = timestampMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
     final signer = signingDevice ?? author;
     final device = signingDevice?.publicKey;

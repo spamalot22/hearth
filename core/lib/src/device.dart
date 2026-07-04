@@ -74,6 +74,13 @@ class DeviceCert {
     required String name,
     int? issuedMs,
   }) async {
+    if (deviceKey.length != 32) {
+      throw ArgumentError.value(
+          deviceKey.length, 'deviceKey', 'must be 32 bytes (Ed25519 pubkey)');
+    }
+    if (name.isEmpty) {
+      throw ArgumentError.value(name, 'name', 'must not be empty');
+    }
     final ts = issuedMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
     final sig = await root.sign(
       _signedBytes(root.publicKey, deviceKey, name, ts),
@@ -154,6 +161,10 @@ class DeviceRevocation {
     required Uint8List deviceKey,
     int? revokedMs,
   }) async {
+    if (deviceKey.length != 32) {
+      throw ArgumentError.value(
+          deviceKey.length, 'deviceKey', 'must be 32 bytes (Ed25519 pubkey)');
+    }
     final ts = revokedMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
     final sig = await root.sign(_signedBytes(root.publicKey, deviceKey, ts));
     return DeviceRevocation(

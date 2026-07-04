@@ -181,9 +181,10 @@ class ChannelSession {
           } else if (control is TypingControl) {
             onTyping?.call(fromHex, control.typing);
           } else if (control is InferenceRequest ||
-              control is InferenceResponse) {
-            onInference?.call(fromHex, channelId, control);
-          } else if (control is VoicePresenceControl) {
+              control is InferenceResponse ||
+              control is VoicePresenceControl ||
+              control is DeviceRevocationControl ||
+              control is ReadWatermarkControl) {
             onInference?.call(fromHex, channelId, control);
           }
         },
