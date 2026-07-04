@@ -117,6 +117,32 @@ void main() {
     await _finish(tester);
   });
 
+  testWidgets('a blocked peer cannot re-create a request', (tester) async {
+    final api = await _boot(tester);
+    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
+    await api.simulateIncomingContact(peer.publicKeyHex);
+    await _settle(tester);
+
+    // Block them from the request sheet.
+    await _openDrawer(tester);
+    await tester.tap(find.widgetWithText(ListTile, 'wants to message you'));
+    await _settle(tester);
+    await tester.tap(find.widgetWithText(ListTile, 'Block'));
+    await _settle(tester);
+
+    // They reconnect to the rendezvous — it must be silently dropped.
+    await api.simulateIncomingContact(peer.publicKeyHex);
+    await _settle(tester);
+    await _openDrawer(tester);
+    expect(
+      find.text('wants to message you'),
+      findsNothing,
+      reason: 'a blocked pubkey must not resurface as a request',
+    );
+    expect(api.activeChannel()?.isDm ?? false, isFalse);
+    await _finish(tester);
+  });
+
   testWidgets('declining forgets the request and opens nothing', (
     tester,
   ) async {

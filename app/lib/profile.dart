@@ -35,12 +35,20 @@ class ProfileStore {
   /// every contact card and that you listen on for first contact. Generated
   /// once and persisted (one per identity); rotating it means minting a new one
   /// and re-sharing your card, which invalidates old cards without touching any
-  /// existing DM.
-  String get rendezvousId {
-    final existing = _box.get('rendezvous');
-    if (existing != null && existing.isNotEmpty) return existing;
+  /// existing DM. Null until [ensureRendezvousId] has minted it.
+  String? get rendezvousId {
+    final value = _box.get('rendezvous');
+    return (value == null || value.isEmpty) ? null : value;
+  }
+
+  /// Returns the rendezvous id, minting and **durably persisting** it on first
+  /// use. Await this once at startup before any card is shared, so an early
+  /// crash can't orphan a shared card by generating a different id next launch.
+  Future<String> ensureRendezvousId() async {
+    final existing = rendezvousId;
+    if (existing != null) return existing;
     final fresh = ContactCard.newRendezvousId();
-    _box.put('rendezvous', fresh);
+    await _box.put('rendezvous', fresh);
     return fresh;
   }
 }

@@ -395,6 +395,9 @@ class ChannelManager {
   final void Function(String peerHex)? onDmConnected;
 
   final Map<String, ChannelSession> _sessions = {};
+  // DM ids currently being opened — guards the await window in [openDm] so two
+  // concurrent opens for the same peer don't both build a session (leaking one).
+  final Set<String> _opening = {};
   String? _activeId;
 
   /// Peers currently typing, per channel: channelId -> set of peerHex.
@@ -512,25 +515,31 @@ class ChannelManager {
   /// Opens (or focuses) the encrypted DM with [peerPubkey].
   Future<void> openDm(List<int> peerPubkey) async {
     final id = await dmChannelId(identity.publicKeyHex, hex.encode(peerPubkey));
-    if (!_sessions.containsKey(id)) {
-      _sessions[id] = await ChannelSession.open(
-        channelId: id,
-        identity: identity,
-        relayUrl: relayUrl,
-        fallbackUrls: fallbackUrls,
-        live: live,
-        onUpdate: () => _onSessionUpdate(id),
-        cipher: DmChannelCipher(identity, peerPubkey),
-        peerPubkey: peerPubkey,
-        blobStore: blobStore,
-        candidateCache: candidateCache,
-        onPeerConnected: _broadcastContactsOnline,
-        onPeerConnectedHex: onDmConnected,
-        onContactsOnline: _handleContactsOnline,
-        onVersionControl: _handleVersionControl,
-        onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
-        onInference: onInference,
-      );
+    // Reserve synchronously so a concurrent open for the same peer bails here
+    // rather than building a second (leaked) session across the await below.
+    if (!_sessions.containsKey(id) && _opening.add(id)) {
+      try {
+        _sessions[id] = await ChannelSession.open(
+          channelId: id,
+          identity: identity,
+          relayUrl: relayUrl,
+          fallbackUrls: fallbackUrls,
+          live: live,
+          onUpdate: () => _onSessionUpdate(id),
+          cipher: DmChannelCipher(identity, peerPubkey),
+          peerPubkey: peerPubkey,
+          blobStore: blobStore,
+          candidateCache: candidateCache,
+          onPeerConnected: _broadcastContactsOnline,
+          onPeerConnectedHex: onDmConnected,
+          onContactsOnline: _handleContactsOnline,
+          onVersionControl: _handleVersionControl,
+          onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
+          onInference: onInference,
+        );
+      } finally {
+        _opening.remove(id);
+      }
     }
     _activeId = id;
     onUpdate();

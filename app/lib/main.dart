@@ -840,18 +840,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     // Restore established DMs (peers you've actually messaged) so they keep
     // receiving without a tap — the DM analogue of the group loop above.
-    // openDm activates each; restore the post-group active so startup lands
-    // where it did before (the last group, or the first DM if there are none).
-    final restoreActive = channels.activeId;
-    for (final peerHex in dms?.all() ?? const <String>[]) {
-      try {
-        await channels.openDm(hex.decode(peerHex));
-      } catch (_) {}
-    }
-    if (restoreActive != null) channels.activate(restoreActive);
+    await _restoreDms(channels, dms);
     // Restore pending connection requests (pubkeys only — no DM is opened for a
-    // request, so nothing can be received until you accept).
-    _requests.addAll(reqStore?.all() ?? const <String>[]);
+    // request, so nothing can be received until you accept). Drop any that are
+    // now blocked so a blocked pubkey can't linger in the requests list.
+    _requests.addAll(
+      (reqStore?.all() ?? const <String>[]).where((h) => !_blocked.contains(h)),
+    );
     if (!mounted) {
       await channels.close();
       return;
@@ -902,30 +897,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // open loop above ran before _channels was set, so they were no-ops.
     unawaited(_refresh());
     // Listen on my contact-card rendezvous so anyone I handed a card to can
-    // reach me for first contact (see rendezvous.dart / contact_card.dart).
+    // reach me for first contact (see rendezvous.dart / contact_card.dart), and
+    // resume outbound first-contacts that hadn't connected yet.
     if (widget.autoPoll && profile != null) {
-      _rendezvous = RendezvousListener.start(
-        relayUrl: _relayUrl,
-        fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
-        rendezvousId: profile.rendezvousId,
-        identity: widget.identity,
-        ignore: {widget.identity.publicKeyHex},
-        onContact: _onRendezvousContact,
-      );
+      await profile.ensureRendezvousId(); // durably minted before any card
+      _startRendezvous();
     }
-    // Resume outbound first-contacts that hadn't connected yet — keep announcing
-    // on each owner's rendezvous (and re-open the DM) so a card scanned while
-    // they were offline connects whenever you're both next online.
-    if (widget.autoPoll) {
-      final keepActive = channels.activeId;
-      for (final p in await pending?.live() ?? const <PendingContact>[]) {
-        try {
-          await channels.openDm(hex.decode(p.ownerPubkeyHex));
-        } catch (_) {}
-        _startPendingRendezvous(p.ownerPubkeyHex, p.rendezvousId);
-      }
-      if (keepActive != null) channels.activate(keepActive);
-    }
+    await _resumePendingContacts();
     // Background fetch: poll relay for notifications when app is backgrounded.
     unawaited(initBackgroundFetch());
     // Ask for the Android 13+ notification grant now the UI is up.
@@ -1424,6 +1402,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// contact is trusted, so their DM opens straight away.
   Future<void> _onRendezvousContact(String peerHex) async {
     if (peerHex == widget.identity.publicKeyHex) return;
+    // A blocked pubkey is silently dropped — no request, no DM — like every
+    // other receive path (notifications, message render, voice).
+    if (_blocked.contains(peerHex)) return;
     final channels = _channels;
     if (channels == null) return;
     if (_contacts?.nameFor(peerHex) != null) {
@@ -1454,7 +1435,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     if (name == null) return; // cancelled — stays a request
     await _contacts?.setName(peerHex, name);
-    setState(() => _requests.remove(peerHex));
+    _requests.remove(peerHex);
     unawaited(_reqStore?.remove(peerHex));
     unawaited(_dms?.save(peerHex)); // established — restore on launch
     _persistedDms.add(peerHex);
@@ -1465,10 +1446,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Declines a connection request. Nothing was ever opened or stored, so this
   /// just forgets the pubkey; [block] additionally drops any re-request.
   Future<void> _declineRequest(String peerHex, {bool block = false}) async {
-    setState(() => _requests.remove(peerHex));
+    _requests.remove(peerHex);
     unawaited(_reqStore?.remove(peerHex));
     if (block) {
-      setState(() => _blocked.add(peerHex));
+      _blocked.add(peerHex);
       await _settings?.blockUser(peerHex);
     }
     if (mounted) setState(() {});
@@ -1596,6 +1577,57 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(listener.close());
     unawaited(_pending?.remove(peerHex));
     if (_persistedDms.add(peerHex)) unawaited(_dms?.save(peerHex));
+  }
+
+  /// (Re)starts the standing contact-card rendezvous listener on the *current*
+  /// relay, closing any previous one — so a relay switch doesn't strand it on
+  /// the old relay. No-op until [ProfileStore.ensureRendezvousId] has minted it.
+  void _startRendezvous() {
+    if (!widget.autoPoll) return;
+    final rv = _profile?.rendezvousId;
+    if (rv == null) return;
+    unawaited(_rendezvous?.close());
+    _rendezvous = RendezvousListener.start(
+      relayUrl: _relayUrl,
+      fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
+      rendezvousId: rv,
+      identity: widget.identity,
+      ignore: {widget.identity.publicKeyHex},
+      onContact: _onRendezvousContact,
+    );
+  }
+
+  /// Re-opens established DMs on [channels] without disturbing the active
+  /// channel. Used at startup and after a relay switch.
+  Future<void> _restoreDms(
+    ChannelManager channels,
+    DmRegistry? registry,
+  ) async {
+    final keepActive = channels.activeId;
+    for (final peerHex in registry?.all() ?? const <String>[]) {
+      try {
+        await channels.openDm(hex.decode(peerHex));
+      } catch (_) {}
+    }
+    if (keepActive != null) channels.activate(keepActive);
+  }
+
+  /// Resumes outbound first-contacts that haven't connected yet — re-open the DM
+  /// and re-announce on each owner's rendezvous on the *current* relay, so a
+  /// relay switch re-homes them and a card scanned while the owner was offline
+  /// still connects whenever you're both next online.
+  Future<void> _resumePendingContacts() async {
+    if (!widget.autoPoll) return;
+    final channels = _channels;
+    if (channels == null) return;
+    final keepActive = channels.activeId;
+    for (final p in await _pending?.live() ?? const <PendingContact>[]) {
+      try {
+        await channels.openDm(hex.decode(p.ownerPubkeyHex));
+      } catch (_) {}
+      _startPendingRendezvous(p.ownerPubkeyHex, p.rendezvousId);
+    }
+    if (keepActive != null) channels.activate(keepActive);
   }
 
   /// Members (by id) who've posted in [session], excluding you.
@@ -2694,7 +2726,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);
     }
+    await _restoreDms(channels, _dms);
     if (mounted) setState(() => _channels = channels);
+    // Re-home first-contact machinery onto the new relay (the old rendezvous +
+    // pending listeners were pinned to the previous relay).
+    _startRendezvous();
+    await _resumePendingContacts();
   }
 
   @override
@@ -3496,9 +3533,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _shareMyContact() async {
     final profile = _profile;
     if (profile == null) return;
+    // Durably mint the rendezvous id before it leaves the device in a card.
+    final rv = await profile.ensureRendezvousId();
+    if (!mounted) return;
     final card = ContactCard(
       pubkey: widget.identity.publicKeyHex,
-      rendezvous: profile.rendezvousId,
+      rendezvous: rv,
       name: _myName,
       relayUrl: _relayUrl.toString(),
     ).encode();
