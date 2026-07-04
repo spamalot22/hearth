@@ -50,6 +50,114 @@ class DmChannelCipher implements ChannelCipher {
       PairBox.decrypt(boxed, self: _self, peerEd25519PublicKey: _peer);
 }
 
+/// Phase B DM cipher: encrypts per-device when a bundle is available, with
+/// transparent PairBox fallback for legacy (pre-bundle) peers. Decrypts by
+/// inspecting the version byte — MultiDeviceBox messages start with 0x01,
+/// PairBox messages start with a random nonce (never 0x01 at position 0 with
+/// a valid 12-byte nonce prefix).
+///
+/// Actually, we can't rely on the first byte alone to distinguish — PairBox
+/// ciphertext starts with a 12-byte nonce which *could* have any value. Instead,
+/// we try MultiDeviceBox first (cheap version-byte check), and if it fails,
+/// fall back to PairBox.
+class MultiDeviceDmCipher implements ChannelCipher {
+  MultiDeviceDmCipher({
+    required this.selfDevice,
+    required this.selfRoot,
+    required this.peerRootKey,
+    required this.peerBundleLookup,
+    required this.ownDeviceKeys,
+  });
+
+  /// This device's identity (for ECDH in MultiDeviceBox).
+  final Identity selfDevice;
+
+  /// The root identity (for PairBox fallback).
+  final Identity selfRoot;
+
+  /// The DM partner's root Ed25519 public key.
+  final List<int> peerRootKey;
+
+  /// Looks up the peer's current device bundle (may return null if they haven't
+  /// published one yet — in which case we fall back to PairBox).
+  final DeviceBundle? Function() peerBundleLookup;
+
+  /// Our own active device keys (so we can encrypt to ourselves for self-read
+  /// on other devices).
+  final List<Uint8List> Function() ownDeviceKeys;
+
+  @override
+  Future<Uint8List> encrypt(List<int> plaintext) async {
+    final peerBundle = peerBundleLookup();
+    if (peerBundle == null) {
+      // No bundle — fall back to PairBox (legacy peer).
+      return PairBox.encrypt(plaintext,
+          self: selfRoot, peerEd25519PublicKey: peerRootKey);
+    }
+    // Encrypt to all peer devices + our own devices (so all our devices can
+    // read messages we sent).
+    final recipientKeys = <Uint8List>[
+      ...peerBundle.devices,
+      ...ownDeviceKeys(),
+    ];
+    // Deduplicate (in case our device is also in the peer bundle — shouldn't
+    // happen but defensive).
+    final seen = <String>{};
+    final deduped = <Uint8List>[];
+    for (final k in recipientKeys) {
+      if (seen.add(hex.encode(k))) deduped.add(k);
+    }
+    return MultiDeviceBox.encrypt(
+      plaintext,
+      senderDevice: selfDevice,
+      recipientDeviceKeys: deduped,
+    );
+  }
+
+  @override
+  Future<Uint8List> decrypt(Uint8List boxed) async {
+    // Try MultiDeviceBox first (version byte check is cheap).
+    if (boxed.isNotEmpty && boxed[0] == 1) {
+      try {
+        // We need the sender's device key. In a MultiDeviceBox message, the
+        // sender signed with their device — we can try decrypting with each
+        // known device from the peer's bundle as the "senderDeviceEd".
+        final peerBundle = peerBundleLookup();
+        if (peerBundle != null) {
+          for (final senderDevice in peerBundle.devices) {
+            try {
+              return await MultiDeviceBox.decrypt(
+                boxed,
+                recipientDevice: selfDevice,
+                senderDeviceEd: senderDevice,
+              );
+            } catch (_) {
+              continue; // wrong sender device — try next
+            }
+          }
+        }
+        // Also try our own devices (self-sent message from another device).
+        for (final ownKey in ownDeviceKeys()) {
+          try {
+            return await MultiDeviceBox.decrypt(
+              boxed,
+              recipientDevice: selfDevice,
+              senderDeviceEd: ownKey,
+            );
+          } catch (_) {
+            continue;
+          }
+        }
+      } catch (_) {
+        // Not actually a MultiDeviceBox — fall through to PairBox.
+      }
+    }
+    // Fallback: PairBox (legacy message or MultiDeviceBox failed).
+    return PairBox.decrypt(boxed,
+        self: selfRoot, peerEd25519PublicKey: peerRootKey);
+  }
+}
+
 /// Deterministic id for the DM channel between two identities (a hash of the
 /// sorted pubkeys), so both sides derive the same one.
 Future<String> dmChannelId(String aHex, String bHex) async {
@@ -392,6 +500,8 @@ class ChannelManager {
     this.onDmConnected,
     this.isBlocked,
     this.isDeviceRevoked,
+    this.peerBundleLookup,
+    this.ownDeviceKeys,
   });
 
   final Identity identity;
@@ -431,6 +541,12 @@ class ChannelManager {
   /// Whether a device key (hex) has been revoked. Passed to each channel's
   /// [SyncEngine] so messages from revoked devices are dropped on receipt.
   final bool Function(String deviceKeyHex)? isDeviceRevoked;
+
+  /// Looks up a peer's device bundle by root hex. Used by MultiDeviceDmCipher.
+  final DeviceBundle? Function(String rootHex)? peerBundleLookup;
+
+  /// Returns this identity's active device keys (for self-encryption in DMs).
+  final List<Uint8List> Function()? ownDeviceKeys;
 
   final Map<String, ChannelSession> _sessions = {};
   // DM ids currently being opened — guards the await window in [openDm] so two
@@ -559,6 +675,26 @@ class ChannelManager {
     onUpdate();
   }
 
+  /// Builds the appropriate DM cipher for [peerPubkey]. Uses MultiDeviceDmCipher
+  /// when we have a meshIdentity (device key) and the lookup functions; falls
+  /// back to the legacy PairBox-only cipher otherwise.
+  ChannelCipher _dmCipher(List<int> peerPubkey) {
+    final device = meshIdentity;
+    final bundleFn = peerBundleLookup;
+    final ownKeysFn = ownDeviceKeys;
+    if (device == null || bundleFn == null || ownKeysFn == null) {
+      return DmChannelCipher(identity, peerPubkey);
+    }
+    final peerHex = hex.encode(peerPubkey);
+    return MultiDeviceDmCipher(
+      selfDevice: device,
+      selfRoot: identity,
+      peerRootKey: peerPubkey,
+      peerBundleLookup: () => bundleFn(peerHex),
+      ownDeviceKeys: ownKeysFn,
+    );
+  }
+
   /// Opens (or focuses) the encrypted DM with [peerPubkey]. A blocked peer is
   /// refused, so no DM session — hence no ingestion — exists for them.
   Future<void> openDm(List<int> peerPubkey) async {
@@ -576,7 +712,7 @@ class ChannelManager {
           fallbackUrls: fallbackUrls,
           live: live,
           onUpdate: () => _onSessionUpdate(id),
-          cipher: DmChannelCipher(identity, peerPubkey),
+          cipher: _dmCipher(peerPubkey),
           peerPubkey: peerPubkey,
           blobStore: blobStore,
           isDeviceRevoked: isDeviceRevoked,

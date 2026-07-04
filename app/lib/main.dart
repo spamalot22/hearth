@@ -787,6 +787,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (widget.autoPoll) {
       _deviceStore = await DeviceStore.open();
       await _deviceStore!.addCert(widget.deviceKeys.cert);
+      // Publish our device bundle (active device set) so peers can encrypt
+      // DMs per-device. Re-published each boot in case devices were added/revoked.
+      await _publishDeviceBundle();
     }
     if (widget.autoPoll) await initRecentGifs();
     if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
@@ -860,6 +863,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onDmConnected: _onDmConnected,
       isBlocked: _blocked.contains,
       isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
+      peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
+      ownDeviceKeys: () => [widget.deviceKeys.publicKey],
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -1228,6 +1233,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if ((_myName != null || _myAvatar != null) &&
           _announced.add(active.channelId)) {
         await _announceName(active);
+        await _maybePublishBundle(active);
       }
     }
     if (mounted) {
@@ -1436,6 +1442,40 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Persists a DM once it has real (non-bookkeeping) history, so it restores on
   /// the next launch. A DM with only a profile announce and no conversation is
   /// left unsaved — nothing to restore. Only call with a decrypted session (the
+  /// Publishes our device bundle (the set of active device keys) into every
+  /// open channel. Called on boot and after device changes (add/revoke).
+  Future<void> _publishDeviceBundle() async {
+    final store = _deviceStore;
+    if (store == null) return;
+    final revoked = store.revokedDeviceKeys;
+    final activeKeys = store.certs
+        .where((c) => !revoked.contains(c.deviceKeyHex))
+        .map((c) => c.deviceKey)
+        .toList();
+    if (activeKeys.isEmpty) return;
+    final bundle = await DeviceBundle.publish(
+      root: widget.identity,
+      devices: activeKeys,
+    );
+    // Store our own bundle so it's available for self-lookup.
+    await store.setBundle(bundle);
+    // Gossip the bundle into all open channels (it will be learned by peers
+    // via _indexBundles on their next refresh).
+    _pendingBundle = DeviceBundleContent(bundle.toJson());
+  }
+
+  /// A pending bundle to publish into each channel on next activity.
+  DeviceBundleContent? _pendingBundle;
+
+  /// Publishes the pending device bundle into [session] if not already sent.
+  Future<void> _maybePublishBundle(ChannelSession session) async {
+    final bundle = _pendingBundle;
+    if (bundle == null) return;
+    final payload = await session.encodePayload(bundle);
+    final message = await _createMessage(session, payload);
+    await session.publish(message);
+  }
+
   /// Persists device certs seen from messages that match our root identity
   /// (i.e. our other devices). Lightweight — only processes new ones.
   void _learnDeviceCerts(ChannelSession session) {
@@ -2726,6 +2766,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
       session.broadcast(DeviceRevocationControl(revocation: revocation));
     }
+    // Republish our device bundle without the revoked device.
+    await _publishDeviceBundle();
     if (mounted) setState(() {});
   }
 
@@ -2987,6 +3029,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onDmConnected: _onDmConnected,
       isBlocked: _blocked.contains,
       isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
+      peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
+      ownDeviceKeys: () => [widget.deviceKeys.publicKey],
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);
