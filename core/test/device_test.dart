@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:typed_data';
 
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:test/test.dart';
 
@@ -73,6 +74,29 @@ void main() {
       expect(back.name, 'tablet');
       expect(back.issuedMs, 1730000000000);
       expect(await back.verify(), isTrue);
+    });
+
+    test('signature matches the locked cross-language vector', () async {
+      // CROSS-LANGUAGE CANARY. The TS relay (backend/src/message.test.ts)
+      // reproduces this cert's canonical bytes via @ipld/dag-cbor and verifies
+      // this exact signature. If this hex changes, the device-cert wire format
+      // changed and the relay can no longer verify device-signed messages —
+      // treat with the same care as the message interop vector.
+      final root = await Identity.fromSeed(Uint8List(32)..fillRange(0, 32, 1));
+      final device = await Identity.fromSeed(
+        Uint8List(32)..fillRange(0, 32, 2),
+      );
+      final cert = await DeviceCert.issue(
+        root: root,
+        deviceKey: device.publicKey,
+        name: 'phone',
+        issuedMs: 1718900000000,
+      );
+      expect(
+        hex.encode(cert.signature),
+        'a700fd21ea8edf0bae433ef77bc933110d7f1e0db8318ab40737e9d196c3d561'
+        '2cee3dec655b51c9b360047ab1683a26c46481a984dde808755a29a24569d00b',
+      );
     });
 
     test('name is bound by the signature (no field-injection)', () async {

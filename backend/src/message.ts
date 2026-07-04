@@ -31,11 +31,58 @@ export interface WireMessage {
   sig: string;
   id: string;
   // Multi-device: when present, `sig` is by this device subkey (not the author
-  // root), and `cert` proves the device is authorised. The relay only checks the
-  // signature against the presenting key (anti-garbage); the full cert +
-  // revocation trust decision is the receiving client's job.
+  // root), and `cert` is the root's authorisation of that device. The relay
+  // verifies the cert chain (so `author` stays authenticated); the receiving
+  // client additionally enforces revocation.
   device?: string;
-  cert?: unknown;
+  cert?: WireDeviceCert;
+}
+
+/** A device cert on the wire (matches core's `DeviceCert.toJson`). */
+export interface WireDeviceCert {
+  root: string;
+  device: string;
+  name: string;
+  issued: number;
+  sig: string;
+}
+
+/**
+ * Canonical signed bytes of a device cert — must be byte-for-byte identical to
+ * core's `DeviceCert._signedBytes` (canonical CBOR, keys t,name,root,device,
+ * issued). @ipld/dag-cbor sorts keys canonically, matching the hand-rolled Dart
+ * encoder, same as {@link signedBytes} for messages.
+ */
+function deviceCertSignedBytes(
+  root: Uint8Array,
+  device: Uint8Array,
+  name: string,
+  issued: number,
+): Uint8Array {
+  return dagCborEncode({
+    t: 'hearth/device-cert/v1',
+    name,
+    root,
+    device,
+    issued,
+  });
+}
+
+/**
+ * Verifies a device cert binds [device] to [author] (== cert.root) and is
+ * signed by that root. Returns false on any mismatch or bad signature.
+ */
+export async function verifyDeviceCert(
+  cert: WireDeviceCert,
+  author: Uint8Array,
+  device: Uint8Array,
+): Promise<boolean> {
+  const root = b64urlToBytes(cert.root);
+  const certDevice = b64urlToBytes(cert.device);
+  if (!bytesEqual(root, author)) return false;
+  if (!bytesEqual(certDevice, device)) return false;
+  const bytes = deviceCertSignedBytes(root, certDevice, cert.name, cert.issued);
+  return ed.verifyAsync(b64urlToBytes(cert.sig), bytes, root);
 }
 
 /**
@@ -75,10 +122,10 @@ export function verifySignature(
 
 /**
  * Validates a wire message for the relay: recomputes the canonical id (rejecting
- * a forged id) and checks the signature against the presenting key — the device
- * subkey when the message is device-signed, else the author root. This is
- * anti-garbage only; the receiving client verifies the full root→device cert
- * chain and revocation (see core's `Message.verify` + the device registry).
+ * a forged id) and checks the signature chain. For a device-signed message the
+ * cert must bind the device to `author` and the device must have signed the
+ * content — so `author` stays authenticated (rate-limiting keys on it). The
+ * client additionally enforces device revocation.
  */
 export async function verifyWire(w: WireMessage): Promise<boolean> {
   const fields: MessageFields = {
@@ -91,8 +138,13 @@ export async function verifyWire(w: WireMessage): Promise<boolean> {
   };
   const content = signedBytes(fields);
   if (!bytesEqual(computeId(content), b64urlToBytes(w.id))) return false;
-  const signer = w.device ? b64urlToBytes(w.device) : fields.author;
-  return verifySignature(content, b64urlToBytes(w.sig), signer);
+  if (w.device) {
+    const device = b64urlToBytes(w.device);
+    if (!w.cert) return false; // device-signed but no authorisation
+    if (!(await verifyDeviceCert(w.cert, fields.author, device))) return false;
+    return verifySignature(content, b64urlToBytes(w.sig), device);
+  }
+  return verifySignature(content, b64urlToBytes(w.sig), fields.author);
 }
 
 export function b64urlToBytes(s: string): Uint8Array {
