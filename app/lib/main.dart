@@ -3611,8 +3611,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       // Persist + gossip to peers; the updates stream re-renders it.
       await session.publish(message);
-    } catch (_) {
-      if (mounted) _setError('send failed');
+    } catch (e) {
+      if (mounted) {
+        final msg = e is StateError
+            ? 'This person hasn\'t published their device keys yet'
+            : 'send failed';
+        _setError(msg);
+      }
     } finally {
       if (mounted) {
         setState(() => _sending = false);
