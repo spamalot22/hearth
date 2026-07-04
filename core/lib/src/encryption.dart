@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:convert';
+import 'dart:math' as dart_math;
 import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
@@ -207,4 +208,173 @@ class GroupCipher {
     );
     return Uint8List.fromList(clear);
   }
+}
+
+/// Per-device DM encryption (Phase B). Encrypts a DM plaintext once, then wraps
+/// the content key to each of the recipient's active device X25519 keys. Only
+/// devices that receive a key-wrap can decrypt.
+///
+/// Wire format:
+/// ```
+/// version(1) ‖ numDevices(1) ‖ [devicePubX(32) ‖ wrappedKey(48)]* ‖ nonce(12) ‖ mac(16) ‖ ciphertext
+/// ```
+/// The content key is a fresh random 32-byte key encrypted with ChaCha20-Poly1305.
+/// Each device's wrap uses ECDH(sender_device, recipient_device) as the key.
+/// The nonce for wrapping is derived from sender+recipient device keys (deterministic,
+/// since the content key is random and never reused).
+class MultiDeviceBox {
+  static const int _version = 1;
+
+  /// Encrypts [plaintext] so that each device in [recipientDeviceKeys] (raw
+  /// Ed25519 pubkeys, 32 bytes each) can decrypt it. [senderDevice] is the
+  /// sender's device identity (for the ECDH with each recipient device).
+  static Future<Uint8List> encrypt(
+    List<int> plaintext, {
+    required Identity senderDevice,
+    required List<Uint8List> recipientDeviceKeys,
+  }) async {
+    if (recipientDeviceKeys.isEmpty) {
+      throw ArgumentError('must have at least one recipient device');
+    }
+    // 1. Generate a random content key and encrypt the plaintext.
+    final contentKey = SecretKey(List.generate(32, (_) => _secureRandom()));
+    final contentBox = await _aead.encrypt(plaintext, secretKey: contentKey);
+    final contentKeyBytes = await contentKey.extractBytes();
+
+    // 2. Wrap the content key to each recipient device.
+    final wraps = <Uint8List>[];
+    for (final deviceEd in recipientDeviceKeys) {
+      final deviceX = ed25519PublicToX25519(deviceEd);
+      final shared = await senderDevice.x25519SharedSecret(deviceX);
+      final senderX = await senderDevice.x25519PublicKey();
+      final wrapKey = await _deriveWrapKey(shared, senderX, deviceX);
+      final wrapped = await _aead.encrypt(contentKeyBytes, secretKey: wrapKey);
+      wraps.add(Uint8List.fromList([
+        ...deviceEd,
+        ...wrapped.nonce,
+        ...wrapped.mac.bytes,
+        ...wrapped.cipherText,
+      ]));
+    }
+
+    // 3. Assemble: version ‖ count ‖ wraps ‖ content nonce ‖ content mac ‖ ciphertext
+    return Uint8List.fromList([
+      _version,
+      recipientDeviceKeys.length,
+      for (final w in wraps) ...w,
+      ...contentBox.nonce,
+      ...contentBox.mac.bytes,
+      ...contentBox.cipherText,
+    ]);
+  }
+
+  /// Decrypts a [boxed] MultiDeviceBox using [recipientDevice]'s key and the
+  /// sender's device key [senderDeviceEd] (known from the message envelope).
+  static Future<Uint8List> decrypt(
+    Uint8List boxed, {
+    required Identity recipientDevice,
+    required Uint8List senderDeviceEd,
+  }) async {
+    if (boxed.isEmpty || boxed[0] != _version) {
+      throw const FormatException('unsupported MultiDeviceBox version');
+    }
+    final numDevices = boxed[1];
+    const wrapSize = 32 + 12 + 16 + 32; // devicePub + nonce + mac + wrappedKey
+    final wrapsEnd = 2 + numDevices * wrapSize;
+    if (boxed.length < wrapsEnd + 28) {
+      throw const FormatException('MultiDeviceBox too short');
+    }
+
+    // Find our device's wrap.
+    final myKey = recipientDevice.publicKey;
+    Uint8List? contentKeyBytes;
+    for (var i = 0; i < numDevices; i++) {
+      final offset = 2 + i * wrapSize;
+      final devicePub = boxed.sublist(offset, offset + 32);
+      if (!_bytesEqual(devicePub, myKey)) continue;
+      // This wrap is ours — unwrap the content key.
+      final wrapNonce = boxed.sublist(offset + 32, offset + 44);
+      final wrapMac = boxed.sublist(offset + 44, offset + 60);
+      final wrappedKey = boxed.sublist(offset + 60, offset + 92);
+
+      final senderX = ed25519PublicToX25519(senderDeviceEd);
+      final shared = await recipientDevice.x25519SharedSecret(senderX);
+      final recipientX = await recipientDevice.x25519PublicKey();
+      final wrapKey = await _deriveWrapKey(shared, senderX, recipientX);
+      contentKeyBytes = Uint8List.fromList(await _aead.decrypt(
+        SecretBox(wrappedKey, nonce: wrapNonce, mac: Mac(wrapMac)),
+        secretKey: wrapKey,
+      ));
+      break;
+    }
+    if (contentKeyBytes == null) {
+      throw const FormatException('no wrap found for this device');
+    }
+
+    // Decrypt the content.
+    final nonce = boxed.sublist(wrapsEnd, wrapsEnd + 12);
+    final mac = boxed.sublist(wrapsEnd + 12, wrapsEnd + 28);
+    final cipherText = boxed.sublist(wrapsEnd + 28);
+    final clear = await _aead.decrypt(
+      SecretBox(cipherText, nonce: nonce, mac: Mac(mac)),
+      secretKey: SecretKey(contentKeyBytes),
+    );
+    return Uint8List.fromList(clear);
+  }
+
+  static Future<SecretKey> _deriveWrapKey(
+    List<int> shared,
+    List<int> senderX,
+    List<int> recipientX,
+  ) async {
+    final hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+    return hkdf.deriveKey(
+      secretKey: SecretKey(shared),
+      nonce: [...senderX, ...recipientX],
+      info: utf8.encode('hearth/multidevicebox/v1'),
+    );
+  }
+
+  static bool _bytesEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+  }
+}
+
+int _secureRandom() {
+  // Dart's Random.secure() backed by OS CSPRNG.
+  return _rng.nextInt(256);
+}
+
+final _rng = _SecureRng();
+
+class _SecureRng {
+  final _r = List.generate(256, (_) => 0);
+  int _pos = 256;
+
+  int nextInt(int max) {
+    if (_pos >= 256) {
+      // Refill from OS.
+      final gen = SecureRandom(256);
+      for (var i = 0; i < 256; i++) {
+        _r[i] = gen.bytes[i];
+      }
+      _pos = 0;
+    }
+    return _r[_pos++] % max;
+  }
+}
+
+class SecureRandom {
+  SecureRandom(int length) : bytes = Uint8List(length) {
+    final r = dart_math.Random.secure();
+    for (var i = 0; i < length; i++) {
+      bytes[i] = r.nextInt(256);
+    }
+  }
+  final Uint8List bytes;
 }
