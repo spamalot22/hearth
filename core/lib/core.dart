@@ -8,6 +8,7 @@ library;
 export 'src/blob.dart'
     show BlobStore, InMemoryBlobStore, blobHash, maxBlobBytes;
 export 'src/dag.dart' show MessageStore;
+export 'src/device.dart' show DeviceCert, DeviceRevocation;
 export 'src/encryption.dart'
     show GroupCipher, PairBox, SealedBox, ed25519PublicToX25519;
 export 'src/frame.dart'
