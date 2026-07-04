@@ -207,11 +207,12 @@ class ChannelSession {
       courier,
     );
 
-    // Feed relay-couriered messages into the sync engine (deduplication is
-    // handled by the repository — add() returns false for known ids).
+    // Feed relay-couriered messages into the sync engine — via receive() so
+    // they're signature-verified (we don't trust the relay), same as P2P GIVEs.
+    // Dedup is handled by the repository (add() returns false for known ids).
     if (courier != null) {
       session._courierSub = courier.incoming.listen((message) {
-        unawaited(engine.publish(message));
+        unawaited(engine.receive(message));
       });
     }
 

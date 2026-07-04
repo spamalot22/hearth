@@ -203,4 +203,55 @@ void main() {
       expect(await bBlobs.has(claimed), isFalse);
     });
   });
+
+  group('receive (untrusted courier ingestion)', () {
+    test('stores a valid message', () async {
+      final r = _repo();
+      final m = await Message.create(
+        author: await Identity.generate(),
+        channel: 'general',
+        payload: _b('hi'),
+      );
+      await SyncEngine(r, 'general').receive(m);
+      expect(r.length, 1);
+    });
+
+    test('drops a tampered message (unlike publish)', () async {
+      final r = _repo();
+      final author = await Identity.generate();
+      final m = await Message.create(
+        author: author,
+        channel: 'general',
+        payload: _b('hi'),
+      );
+      final forged = Message.fromJson({
+        ...m.toJson(),
+        'payload': base64Url.encode(_b('evil')),
+      });
+      await SyncEngine(r, 'general').receive(forged);
+      expect(r.length, 0, reason: 'receive verifies before storing');
+    });
+
+    test('drops a device-signed message with an invalid cert', () async {
+      final r = _repo();
+      final root = await Identity.generate();
+      final device = await Identity.generate();
+      final wrongRoot = await Identity.generate();
+      // Cert issued by the wrong root — the chain does not verify.
+      final badCert = await DeviceCert.issue(
+        root: wrongRoot,
+        deviceKey: device.publicKey,
+        name: 'x',
+      );
+      final m = await Message.create(
+        author: root,
+        channel: 'general',
+        payload: _b('hi'),
+        signingDevice: device,
+        deviceCert: badCert,
+      );
+      await SyncEngine(r, 'general').receive(m);
+      expect(r.length, 0);
+    });
+  });
 }

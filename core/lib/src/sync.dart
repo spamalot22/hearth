@@ -60,8 +60,18 @@ class SyncEngine {
     await session.close();
   }
 
-  /// Persists a locally-authored [message] and gossips it to every peer.
+  /// Persists a locally-authored [message] and gossips it to every peer. For
+  /// *local* messages only — they're trusted, so no signature check.
   Future<void> publish(Message message) async {
+    if (await repository.add(message)) _onNewMessage(message, null);
+  }
+
+  /// Ingests a message from an **untrusted** source (the relay courier) — it
+  /// [Message.verify]s before storing, exactly like the P2P path
+  /// ([SyncSession] verifies every GIVE), so we never trust the relay to have
+  /// checked it. On success it's stored and gossiped onward like any message.
+  Future<void> receive(Message message) async {
+    if (!await message.verify()) return; // forged / invalid device-cert chain
     if (await repository.add(message)) _onNewMessage(message, null);
   }
 
