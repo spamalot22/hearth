@@ -13,12 +13,16 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 /// origin-scoped browser storage, so it's weaker than on native and only as safe
 /// as the browser/origin. Prefer a native build for a long-lived identity.
 class SecureKeyStore implements KeyStore {
-  static const String _seedKey = 'hearth.identity.seed';
+  /// Which secret this store holds — the root identity seed by default, or the
+  /// device subkey seed (`'hearth.device.seed'`) for the per-device key.
+  final String _seedKey;
 
   final FlutterSecureStorage _storage;
 
-  SecureKeyStore({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
+  SecureKeyStore({
+    FlutterSecureStorage? storage,
+    this._seedKey = 'hearth.identity.seed',
+  }) : _storage = storage ?? const FlutterSecureStorage();
 
   @override
   Future<void> writeSeed(Uint8List seed) =>

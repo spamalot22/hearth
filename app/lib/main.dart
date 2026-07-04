@@ -33,6 +33,7 @@ import 'channel.dart';
 import 'contact_card.dart';
 import 'contacts.dart';
 import 'content.dart';
+import 'device_keys.dart';
 import 'emoji_picker.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
@@ -469,14 +470,23 @@ class _Bootstrap extends StatefulWidget {
 }
 
 class _BootstrapState extends State<_Bootstrap> {
-  late final Future<Identity> _identity = Identity.loadOrCreate(
-    widget.keyStore,
-  );
+  late final Future<(Identity, DeviceKeys)> _boot = _load();
+
+  Future<(Identity, DeviceKeys)> _load() async {
+    final root = await Identity.loadOrCreate(widget.keyStore);
+    // The device subkey gets its own secure-storage slot (or an ephemeral
+    // in-memory store under tests / a non-secure root store).
+    final deviceStore = widget.keyStore is SecureKeyStore
+        ? SecureKeyStore(seedKey: 'hearth.device.seed')
+        : InMemoryKeyStore();
+    final device = await DeviceKeys.loadOrCreate(root, deviceStore);
+    return (root, device);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<Identity>(
-      future: _identity,
+    return FutureBuilder<(Identity, DeviceKeys)>(
+      future: _boot,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Scaffold(
@@ -490,8 +500,10 @@ class _BootstrapState extends State<_Bootstrap> {
             ),
           );
         }
+        final (root, device) = snapshot.data!;
         return ChatScreen(
-          identity: snapshot.data!,
+          identity: root,
+          deviceKeys: device,
           relayUrl: widget.relayUrl,
           keyStore: widget.keyStore,
           autoPoll: widget.autoPoll,
@@ -506,6 +518,7 @@ class _BootstrapState extends State<_Bootstrap> {
 class ChatScreen extends StatefulWidget {
   const ChatScreen({
     required this.identity,
+    required this.deviceKeys,
     required this.relayUrl,
     required this.keyStore,
     this.autoPoll = true,
@@ -514,7 +527,12 @@ class ChatScreen extends StatefulWidget {
     super.key,
   });
 
+  /// The root identity — the user's id (message authorship, DM keys, contacts).
   final Identity identity;
+
+  /// This device's subkey + cert. Messages are authored by [identity] but
+  /// signed by this device.
+  final DeviceKeys deviceKeys;
   final Uri relayUrl;
   final KeyStore keyStore;
   final bool autoPoll;
@@ -1290,13 +1308,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _announceName(ChannelSession session) async {
     final name = _myName;
     if (name == null && _myAvatar == null) return;
-    final message = await Message.create(
-      author: widget.identity,
-      channel: session.channelId,
-      payload: await session.encodePayload(
+    final message = await _createMessage(
+      session,
+      await session.encodePayload(
         ProfileContent(name ?? '', avatar: _myAvatar),
       ),
-      prev: session.repository.heads(),
     );
     await session.publish(message);
   }
@@ -3271,6 +3287,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   /// Builds, persists, and gossips [content] in the active channel.
+  /// Builds a message for [session]: authored by the root identity, but signed
+  /// by this device (carrying its cert), so peers verify the root→device chain.
+  Future<Message> _createMessage(ChannelSession session, Uint8List payload) =>
+      Message.create(
+        author: widget.identity,
+        channel: session.channelId,
+        payload: payload,
+        prev: session.repository.heads(),
+        signingDevice: widget.deviceKeys.device,
+        deviceCert: widget.deviceKeys.cert,
+      );
+
   Future<void> _publish(Content content) async {
     final session = _channels?.active;
     if (_sending || session == null) return;
@@ -3281,11 +3309,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     setState(() => _sending = true);
     try {
-      final message = await Message.create(
-        author: widget.identity,
-        channel: session.channelId,
-        payload: await session.encodePayload(content),
-        prev: session.repository.heads(),
+      final message = await _createMessage(
+        session,
+        await session.encodePayload(content),
       );
       // Persist + gossip to peers; the updates stream re-renders it.
       await session.publish(message);
@@ -3309,11 +3335,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Publishes to a specific session (used when the target may differ from active).
   Future<void> _publishTo(ChannelSession session, Content content) async {
     try {
-      final message = await Message.create(
-        author: widget.identity,
-        channel: session.channelId,
-        payload: await session.encodePayload(content),
-        prev: session.repository.heads(),
+      final message = await _createMessage(
+        session,
+        await session.encodePayload(content),
       );
       await session.publish(message);
     } catch (_) {
