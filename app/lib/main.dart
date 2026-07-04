@@ -34,6 +34,7 @@ import 'contact_card.dart';
 import 'contacts.dart';
 import 'content.dart';
 import 'device_keys.dart';
+import 'device_store.dart';
 import 'emoji_picker.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
@@ -612,6 +613,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ProfileStore? _profile;
   SettingsStore? _settings;
   UnreadStore? _unread;
+  DeviceStore? _deviceStore;
   late Uri _relayUrl = widget.relayUrl;
   bool? _relayUp; // null = not checked yet
   bool _checkingRelay = false;
@@ -782,6 +784,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _mutedChannels.addAll(settings.channelIdsWithPref('muted'));
     }
     _unread = widget.autoPoll ? await UnreadStore.open() : null;
+    if (widget.autoPoll) {
+      _deviceStore = await DeviceStore.open();
+      await _deviceStore!.addCert(widget.deviceKeys.cert);
+    }
     if (widget.autoPoll) await initRecentGifs();
     if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
       _bot = await InferenceBot.tryCreate(modelId: settings?.activeModel);
@@ -853,6 +859,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onInference: _handleMeshControl,
       onDmConnected: _onDmConnected,
       isBlocked: _blocked.contains,
+      isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -1178,7 +1185,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (completer != null && !completer.isCompleted) {
         completer.complete(control.text);
       }
+    } else if (control is DeviceRevocationControl) {
+      _handleDeviceRevocation(control.revocation);
     }
+  }
+
+  /// Verifies and persists a received device revocation.
+  void _handleDeviceRevocation(DeviceRevocation rev) {
+    final store = _deviceStore;
+    if (store == null) return;
+    // Only accept revocations for our own root (other people's revocations
+    // don't matter for Phase A — we'll enforce them in Phase B).
+    if (hex.encode(rev.rootKey) != widget.identity.publicKeyHex) return;
+    unawaited(rev.verify().then((valid) {
+      if (!valid) return;
+      unawaited(store.addRevocation(rev));
+      if (mounted) setState(() {});
+    }));
   }
 
   /// Decrypts the active channel's new messages, indexes any media into your
@@ -1187,6 +1210,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final active = _channels?.active;
     await active?.refreshContent();
     if (active != null) {
+      _learnDeviceCerts(active);
       _maybePersistDm(active);
       await _indexLibrary(active);
       _indexProfiles(active);
@@ -1405,6 +1429,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Persists a DM once it has real (non-bookkeeping) history, so it restores on
   /// the next launch. A DM with only a profile announce and no conversation is
   /// left unsaved — nothing to restore. Only call with a decrypted session (the
+  /// Persists device certs seen from messages that match our root identity
+  /// (i.e. our other devices). Lightweight — only processes new ones.
+  void _learnDeviceCerts(ChannelSession session) {
+    final store = _deviceStore;
+    if (store == null) return;
+    final myRoot = widget.identity.publicKeyHex;
+    for (final entry in session.seenCerts.entries) {
+      // Only learn certs for our own root identity.
+      if (session.deviceRoots[entry.key] != myRoot) continue;
+      if (store.isRevoked(entry.key)) continue;
+      unawaited(store.addCert(entry.value));
+    }
+  }
+
   /// active one, or a background one after its content is parsed).
   void _maybePersistDm(ChannelSession session) {
     final peer = session.peerPubkey;
@@ -2138,6 +2176,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   tabs: [
                     Tab(text: 'Audio'),
                     Tab(text: 'Identity'),
+                    Tab(text: 'Devices'),
                     Tab(text: 'Network'),
                     Tab(text: 'Privacy'),
                     if (!kIsWeb) Tab(text: 'AI'),
@@ -2148,6 +2187,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     children: [
                       _audioTab(),
                       _identityTab(),
+                      _devicesTab(),
                       _networkTab(),
                       _privacyTab(),
                       if (!kIsWeb) _aiTab(),
@@ -2492,6 +2532,173 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  Widget _devicesTab() {
+    final store = _deviceStore;
+    if (store == null) {
+      return const Center(child: Text('Device store not available'));
+    }
+    final certs = store.certs;
+    final revoked = store.revokedDeviceKeys;
+    final thisDeviceHex = widget.deviceKeys.publicKeyHex;
+    // Sort: this device first, then by issued date descending.
+    certs.sort((a, b) {
+      if (a.deviceKeyHex == thisDeviceHex) return -1;
+      if (b.deviceKeyHex == thisDeviceHex) return 1;
+      return b.issuedMs.compareTo(a.issuedMs);
+    });
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        for (final cert in certs)
+          _deviceTile(cert, isThis: cert.deviceKeyHex == thisDeviceHex,
+              isRevoked: revoked.contains(cert.deviceKeyHex)),
+        if (certs.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(32),
+            child: Text('No devices enrolled yet.',
+                textAlign: TextAlign.center),
+          ),
+      ],
+    );
+  }
+
+  Widget _deviceTile(DeviceCert cert,
+      {required bool isThis, required bool isRevoked}) {
+    final issued = DateTime.fromMillisecondsSinceEpoch(cert.issuedMs);
+    final dateStr =
+        '${issued.year}-${issued.month.toString().padLeft(2, '0')}-${issued.day.toString().padLeft(2, '0')}';
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        isThis ? Icons.phone_android : Icons.devices_other,
+        color: isRevoked
+            ? Theme.of(context).colorScheme.error
+            : isThis
+                ? Theme.of(context).colorScheme.primary
+                : null,
+      ),
+      title: Row(
+        children: [
+          Flexible(child: Text(cert.name, overflow: TextOverflow.ellipsis)),
+          if (isThis)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Chip(
+                label: const Text('This device'),
+                labelStyle: const TextStyle(fontSize: 11),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          if (isRevoked)
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: Chip(
+                label: const Text('Revoked'),
+                labelStyle: const TextStyle(fontSize: 11),
+                backgroundColor: Theme.of(context).colorScheme.errorContainer,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+        ],
+      ),
+      subtitle: Text('Enrolled $dateStr • ${cert.deviceKeyHex.substring(0, 8)}…'),
+      trailing: isRevoked
+          ? null
+          : PopupMenuButton<String>(
+              onSelected: (action) {
+                switch (action) {
+                  case 'rename':
+                    if (isThis) _renameThisDevice();
+                  case 'revoke':
+                    if (!isThis) _revokeDevice(cert);
+                }
+              },
+              itemBuilder: (_) => [
+                if (isThis)
+                  const PopupMenuItem(value: 'rename', child: Text('Rename')),
+                if (!isThis)
+                  PopupMenuItem(
+                    value: 'revoke',
+                    child: Text('Revoke',
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error)),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _renameThisDevice() async {
+    final controller = TextEditingController(text: widget.deviceKeys.cert.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename device'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Device name'),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || name == widget.deviceKeys.cert.name) {
+      return;
+    }
+    // Re-issue cert with the new name.
+    final newCert = await DeviceCert.issue(
+      root: widget.identity,
+      deviceKey: widget.deviceKeys.device.publicKey,
+      name: name,
+    );
+    await _deviceStore?.updateCert(newCert);
+    // Update the in-memory device keys so new messages carry the new name.
+    widget.deviceKeys.cert = newCert;
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _revokeDevice(DeviceCert cert) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Revoke device?'),
+        content: Text(
+          'Revoke "${cert.name}"? It will no longer be able to send messages '
+          'as you. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error),
+              child: const Text('Revoke')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final revocation = await DeviceRevocation.issue(
+      root: widget.identity,
+      deviceKey: cert.deviceKey,
+    );
+    await _deviceStore?.addRevocation(revocation);
+    // Gossip the revocation to all channels so other peers learn it.
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      session.broadcast(DeviceRevocationControl(revocation: revocation));
+    }
+    if (mounted) setState(() {});
+  }
+
   Widget _networkTab() {
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -2749,6 +2956,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onInference: _handleMeshControl,
       onDmConnected: _onDmConnected,
       isBlocked: _blocked.contains,
+      isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);

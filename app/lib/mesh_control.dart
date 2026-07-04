@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:convert';
 
+import 'package:core/core.dart';
+
 /// Messages the mesh sends peer-to-peer over the data channel *alongside* the
 /// gossip `SyncFrame`s, to wean connectivity off the relay: once you hold one live
 /// link you can learn of other peers and relay signalling through it, so the relay
@@ -70,6 +72,9 @@ sealed class MeshControl {
         'read' => ReadWatermarkControl(
           channelId: json['ch'] as String? ?? '',
           messageId: json['msg'] as String? ?? '',
+        ),
+        'device_revoke' => DeviceRevocationControl(
+          revocation: DeviceRevocation.fromJson(json.cast<String, Object?>()),
         ),
         _ => null,
       };
@@ -296,6 +301,20 @@ class ReadWatermarkControl extends MeshControl {
     't': 'read',
     'ch': channelId,
     'msg': messageId,
+  };
+}
+
+/// Gossips a device revocation to peers — the signed statement that a device
+/// subkey is no longer trusted. Receiving peers should persist it and reject
+/// future messages from that device.
+class DeviceRevocationControl extends MeshControl {
+  DeviceRevocationControl({required this.revocation});
+  final DeviceRevocation revocation;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'device_revoke',
+    ...revocation.toJson(),
   };
 }
 

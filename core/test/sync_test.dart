@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:test/test.dart';
 
@@ -252,6 +253,31 @@ void main() {
       );
       await SyncEngine(r, 'general').receive(m);
       expect(r.length, 0);
+    });
+
+    test('a revoked device messages are rejected via isDeviceRevoked',
+        () async {
+      final r = _repo();
+      final root = await Identity.generate();
+      final device = await Identity.generate();
+      final cert = await DeviceCert.issue(
+        root: root,
+        deviceKey: device.publicKey,
+        name: 'phone',
+      );
+      final m = await Message.create(
+        author: root,
+        channel: 'general',
+        payload: _b('should be dropped'),
+        signingDevice: device,
+        deviceCert: cert,
+      );
+      // The device is revoked — the callback says so.
+      final revokedSet = {hex.encode(device.publicKey)};
+      final engine = SyncEngine(r, 'general',
+          isDeviceRevoked: revokedSet.contains);
+      await engine.receive(m);
+      expect(r.length, 0, reason: 'revoked device message should be dropped');
     });
   });
 }

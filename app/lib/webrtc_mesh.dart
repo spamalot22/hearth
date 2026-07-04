@@ -458,6 +458,8 @@ class WebRtcMesh {
         break; // Handled by the external onControl callback (voice layer).
       case ReadWatermarkControl():
         break; // Handled by the external onControl callback (app layer).
+      case DeviceRevocationControl():
+        break; // Handled by the external onControl callback (app layer).
     }
   }
 

@@ -13,7 +13,7 @@ class DeviceKeys {
   DeviceKeys(this.device, this.cert);
 
   final Identity device;
-  final DeviceCert cert;
+  DeviceCert cert;
 
   Uint8List get publicKey => device.publicKey;
   String get publicKeyHex => device.publicKeyHex;

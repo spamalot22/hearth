@@ -95,6 +95,8 @@ class ChannelSession {
   final Set<String> _requested = {};
   // Device pubkey hex → root pubkey hex, populated from device-signed messages.
   final Map<String, String> _deviceRoots = {};
+  // Certs seen from messages (for populating the device store).
+  final Map<String, DeviceCert> _seenCerts = {};
   // Revision index, rebuilt by refreshContent: the winning (topologically last)
   // valid edit per target id, and the set of validly tombstoned ids. "Valid"
   // means the edit/delete author matches the target's author — an edit from
@@ -111,6 +113,9 @@ class ChannelSession {
 
   /// Device pubkey hex → root pubkey hex, learned from device-signed messages.
   Map<String, String> get deviceRoots => _deviceRoots;
+
+  /// Certs seen from device-signed messages (keyed by device hex).
+  Map<String, DeviceCert> get seenCerts => _seenCerts;
 
   /// The underlying WebRTC mesh (for peer count / connectivity status).
   WebRtcMesh? get mesh => _mesh;
@@ -129,6 +134,7 @@ class ChannelSession {
     required void Function() onUpdate,
     required ChannelCipher cipher,
     required BlobStore? blobStore,
+    bool Function(String deviceKeyHex)? isDeviceRevoked,
     CandidateCache? candidateCache,
     List<int>? peerPubkey,
     void Function()? onPeerConnected,
@@ -144,7 +150,8 @@ class ChannelSession {
         : InMemoryMessageStorage();
     final repository = MessageRepository(storage);
     await repository.load();
-    final engine = SyncEngine(repository, channelId, blobStore: blobStore);
+    final engine = SyncEngine(repository, channelId,
+        blobStore: blobStore, isDeviceRevoked: isDeviceRevoked);
     final updatesSub = engine.updates.listen((_) => onUpdate());
     // A fetched blob arriving just triggers a refresh; refreshContent loads it
     // from the store.
@@ -267,7 +274,9 @@ class ChannelSession {
     for (final message in repository.ordered()) {
       // Build device→root mapping from device-signed messages.
       if (message.device != null && message.cert != null) {
-        _deviceRoots[hex.encode(message.device!)] = hex.encode(message.author);
+        final devHex = hex.encode(message.device!);
+        _deviceRoots[devHex] = hex.encode(message.author);
+        _seenCerts[devHex] = message.cert!;
       }
       if (!_content.containsKey(message.idHex)) {
         try {
@@ -381,6 +390,7 @@ class ChannelManager {
     this.onInference,
     this.onDmConnected,
     this.isBlocked,
+    this.isDeviceRevoked,
   });
 
   final Identity identity;
@@ -416,6 +426,10 @@ class ChannelManager {
   /// Whether a peer (hex) is blocked. When set, [openDm] refuses blocked peers,
   /// so a blocked DM never opens (and thus never receives/stores messages).
   final bool Function(String peerHex)? isBlocked;
+
+  /// Whether a device key (hex) has been revoked. Passed to each channel's
+  /// [SyncEngine] so messages from revoked devices are dropped on receipt.
+  final bool Function(String deviceKeyHex)? isDeviceRevoked;
 
   final Map<String, ChannelSession> _sessions = {};
   // DM ids currently being opened — guards the await window in [openDm] so two
@@ -531,6 +545,7 @@ class ChannelManager {
         onUpdate: () => _onSessionUpdate(id),
         cipher: GroupChannelCipher(key),
         blobStore: blobStore,
+        isDeviceRevoked: isDeviceRevoked,
         candidateCache: candidateCache,
         onPeerConnected: _broadcastContactsOnline,
         onContactsOnline: _handleContactsOnline,
@@ -563,6 +578,7 @@ class ChannelManager {
           cipher: DmChannelCipher(identity, peerPubkey),
           peerPubkey: peerPubkey,
           blobStore: blobStore,
+          isDeviceRevoked: isDeviceRevoked,
           candidateCache: candidateCache,
           onPeerConnected: _broadcastContactsOnline,
           // For DMs we know the peer's root identity; fire with that (not the

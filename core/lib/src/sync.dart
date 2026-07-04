@@ -16,7 +16,7 @@ import 'repository.dart';
 /// This is the seam between the app and the mesh: the UI [publish]es and listens
 /// to [updates]; the transport hands connected peers to [addPeer].
 class SyncEngine {
-  SyncEngine(this.repository, this.channel, {this.blobStore});
+  SyncEngine(this.repository, this.channel, {this.blobStore, this.isDeviceRevoked});
 
   final MessageRepository repository;
 
@@ -26,6 +26,10 @@ class SyncEngine {
 
   /// Optional content-addressed store for media blobs fetched from peers.
   final BlobStore? blobStore;
+
+  /// Optional callback: returns true if the device key (hex) has been revoked.
+  /// When set, messages signed by a revoked device are silently dropped.
+  final bool Function(String deviceKeyHex)? isDeviceRevoked;
 
   final Set<SyncSession> _sessions = {};
   final StreamController<void> _updates = StreamController<void>.broadcast();
@@ -48,6 +52,7 @@ class SyncEngine {
       onAdded: _onNewMessage,
       blobStore: blobStore,
       onBlob: _onBlob,
+      isDeviceRevoked: isDeviceRevoked,
     );
     _sessions.add(session);
     session.start();
@@ -72,6 +77,9 @@ class SyncEngine {
   /// checked it. On success it's stored and gossiped onward like any message.
   Future<void> receive(Message message) async {
     if (!await message.verify()) return; // forged / invalid device-cert chain
+    if (message.device != null && isDeviceRevoked != null) {
+      if (isDeviceRevoked!(hex.encode(message.device!))) return;
+    }
     if (await repository.add(message)) _onNewMessage(message, null);
   }
 
@@ -126,6 +134,7 @@ class SyncSession {
     required this.onAdded,
     this.blobStore,
     this.onBlob,
+    this.isDeviceRevoked,
   }) {
     _sub = _link.frames.listen(_enqueue);
   }
@@ -135,6 +144,7 @@ class SyncSession {
   final FrameChannel _link;
   final BlobStore? blobStore;
   final void Function(String hash)? onBlob;
+  final bool Function(String deviceKeyHex)? isDeviceRevoked;
 
   /// Called after this session stores a *new* message, so the engine can spread
   /// it to other peers.
@@ -189,6 +199,10 @@ class SyncSession {
   Future<void> _receive(Message message) async {
     if (message.channel != channel) return; // not our channel
     if (!await message.verify()) return; // forged or tampered
+    // Reject messages from revoked devices.
+    if (message.device != null && isDeviceRevoked != null) {
+      if (isDeviceRevoked!(hex.encode(message.device!))) return;
+    }
     _wanted.remove(message.idHex);
     if (await repository.add(message)) {
       onAdded(message, this); // new → the engine spreads it onward
