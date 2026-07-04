@@ -888,19 +888,22 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   DM connects (`onDmConnected` → also records the DM so it restores) or after a
   7-day backstop expiry. So first contact now lands "whenever you're both next
   online", not "both online in the same window". Stays purely outbound (people
-  you chose to reach), never an inbound stranger inbox. **Inbound is gated by a
-  message request:** someone reaching your card who *isn't already a contact*
-  lands as a **request** (`RequestStore`, persisted) — their DM opens so you can
-  read what they sent, but it's quarantined out of your normal DMs with the
-  composer replaced by **Accept / Decline / Block**. Accept runs the usual
-  add-a-petname prompt (prefilled with their self-asserted name) and promotes it
-  to a real DM; Decline forgets it; Block drops re-requests. So a publicly-posted
-  card can't drop a stranger into your conversations — worst case is a request
-  you decline. **Known limits:** a declined request's message history isn't wiped
-  from disk (a re-request re-shows it — cheap follow-up); live two-client
-  rendezvous is unverified without a real relay. Decisions taken with the user:
-  one rendezvous per identity (not per card), restore only DMs with established
-  history, inbound first contact requires explicit accept.
+  you chose to reach), never an inbound stranger inbox. **Inbound is a
+  content-free connection request:** someone reaching your card who *isn't
+  already a contact* is recorded as a request (`RequestStore`, persisted) — but
+  **no DM is opened**, so they cannot deliver or store a single message on your
+  device until you accept. A stranger can announce "I'd like to talk", nothing
+  more; the request shows their identity (`hearth#fingerprint`) with **Accept /
+  Decline / Block**. Accept runs the usual add-a-petname prompt and only then
+  opens the DM (messages start flowing); Decline/Block just forget the pubkey —
+  there is never any received content to purge. The joiner's composer is gated
+  ("Waiting for X to accept your request") until the DM connects, so a
+  well-behaved client can't even queue a message pre-accept. A known contact (or
+  a DM you started) is unaffected — the gate is only for inbound first contact.
+  **Known limit:** live two-client rendezvous is unverified without a real relay.
+  Decisions taken with the user: one rendezvous per identity (not per card),
+  restore only DMs with established history, inbound first contact delivers **no
+  message content** until explicitly accepted.
 - **2026-07-02** — **Messaging batch: edit/delete, markdown, voice messages,
   avatars.** (1) **Edit & delete** fit the append-only DAG: an edit/tombstone is
   a new envelope (`EditContent`/`DeleteContent`) referencing its target;

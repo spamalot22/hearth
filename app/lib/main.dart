@@ -848,15 +848,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         await channels.openDm(hex.decode(peerHex));
       } catch (_) {}
     }
-    // Restore quarantined message requests (opened so their history shows, but
-    // kept out of the normal DM list until accepted).
-    for (final peerHex in reqStore?.all() ?? const <String>[]) {
-      try {
-        await channels.openDm(hex.decode(peerHex));
-        _requests.add(peerHex);
-      } catch (_) {}
-    }
     if (restoreActive != null) channels.activate(restoreActive);
+    // Restore pending connection requests (pubkeys only — no DM is opened for a
+    // request, so nothing can be received until you accept).
+    _requests.addAll(reqStore?.all() ?? const <String>[]);
     if (!mounted) {
       await channels.close();
       return;
@@ -1412,8 +1407,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final peer = session.peerPubkey;
     if (!session.isDm || peer == null) return;
     final peerHex = hex.encode(peer);
-    // An unaccepted request isn't an established DM — don't persist it.
-    if (_requests.contains(peerHex)) return;
     if (_persistedDms.contains(peerHex)) return;
     final hasHistory = session.repository.ordered().any(
       (m) => !session.contentOf(m).isBookkeeping,
@@ -1424,42 +1417,34 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   /// Owner side of first contact: someone holding my card connected to my
-  /// rendezvous, and signed signalling proved they're [peerHex]. Open the DM so
-  /// we can receive what they send — but if they're not already a contact,
-  /// quarantine it as a **message request** (not a normal active DM) until I
-  /// accept, rather than dropping a stranger straight into my conversations.
+  /// rendezvous, and signed signalling proved they're [peerHex]. This is a
+  /// **connection request only** — I do *not* open a DM (the content channel),
+  /// so they cannot deliver or store any message on my device until I accept.
+  /// A stranger can announce "I'd like to talk", nothing more. An existing
+  /// contact is trusted, so their DM opens straight away.
   Future<void> _onRendezvousContact(String peerHex) async {
     if (peerHex == widget.identity.publicKeyHex) return;
     final channels = _channels;
     if (channels == null) return;
-    final known = _contacts?.nameFor(peerHex) != null;
-    final prevActive = channels.activeId;
-    try {
-      await channels.openDm(hex.decode(peerHex));
-    } catch (_) {
-      return;
-    }
-    if (!known && !_requests.contains(peerHex)) {
-      _requests.add(peerHex);
+    if (_contacts?.nameFor(peerHex) != null) {
+      try {
+        await channels.openDm(hex.decode(peerHex));
+      } catch (_) {}
+    } else if (_requests.add(peerHex)) {
       unawaited(_reqStore?.save(peerHex));
-      // A request must not steal the foreground — restore the prior channel.
-      if (prevActive != null) channels.activate(prevActive);
     }
     if (mounted) setState(() {});
   }
 
-  /// True if [session] is a DM quarantined as an unaccepted request.
-  bool _isRequest(ChannelSession session) =>
-      session.isDm &&
-      session.peerPubkey != null &&
-      _requests.contains(hex.encode(session.peerPubkey!));
-
-  /// Accepts a message request: the usual add-a-petname prompt (prefilled with
-  /// their self-asserted name), then promotes the DM to a normal conversation.
-  Future<void> _acceptRequest(ChannelSession session) async {
-    final peer = session.peerPubkey;
-    if (peer == null) return;
-    final peerHex = hex.encode(peer);
+  /// Accepts a connection request: the usual add-a-petname prompt, then opens
+  /// the DM — only now can messages flow. Nothing was received before this.
+  Future<void> _acceptRequest(String peerHex) async {
+    final List<int> peer;
+    try {
+      peer = hex.decode(peerHex);
+    } catch (_) {
+      return;
+    }
     final author = Uint8List.fromList(peer);
     final name = await _promptText(
       title: 'Add hearth#${_fingerprint(author)}?',
@@ -1471,29 +1456,67 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     await _contacts?.setName(peerHex, name);
     setState(() => _requests.remove(peerHex));
     unawaited(_reqStore?.remove(peerHex));
-    unawaited(_dms?.save(peerHex)); // now an established DM — restore on launch
+    unawaited(_dms?.save(peerHex)); // established — restore on launch
     _persistedDms.add(peerHex);
-    _channels?.activate(session.channelId);
+    await _channels?.openDm(peer);
     if (mounted) setState(() {});
   }
 
-  /// Declines a request: forget the DM (drop its history) and, if [block] is
-  /// set, block the pubkey so a re-request is silently dropped.
-  Future<void> _declineRequest(
-    ChannelSession session, {
-    bool block = false,
-  }) async {
-    final peer = session.peerPubkey;
-    if (peer == null) return;
-    final peerHex = hex.encode(peer);
+  /// Declines a connection request. Nothing was ever opened or stored, so this
+  /// just forgets the pubkey; [block] additionally drops any re-request.
+  Future<void> _declineRequest(String peerHex, {bool block = false}) async {
     setState(() => _requests.remove(peerHex));
     unawaited(_reqStore?.remove(peerHex));
     if (block) {
       setState(() => _blocked.add(peerHex));
       await _settings?.blockUser(peerHex);
     }
-    await _channels?.leave(session.channelId);
     if (mounted) setState(() {});
+  }
+
+  /// Accept / Decline / Block a pending connection request.
+  Future<void> _requestActions(String peerHex) async {
+    final author = Uint8List.fromList(hex.decode(peerHex));
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text('${_displayName(author)} wants to message you'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.check_circle_outline),
+              title: const Text('Accept'),
+              onTap: () => Navigator.pop(ctx, 'accept'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.cancel_outlined),
+              title: const Text('Decline'),
+              onTap: () => Navigator.pop(ctx, 'decline'),
+            ),
+            ListTile(
+              leading: Icon(
+                Icons.block,
+                color: Theme.of(ctx).colorScheme.error,
+              ),
+              title: const Text('Block'),
+              onTap: () => Navigator.pop(ctx, 'block'),
+            ),
+          ],
+        ),
+      ),
+    );
+    switch (action) {
+      case 'accept':
+        await _acceptRequest(peerHex);
+      case 'decline':
+        await _declineRequest(peerHex);
+      case 'block':
+        await _declineRequest(peerHex, block: true);
+    }
   }
 
   /// Joiner side: accept a scanned/pasted contact card. Adds the owner as a
@@ -4758,56 +4781,47 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           ),
         ),
         _typingIndicator(session),
-        if (_isRequest(session))
-          _requestBar(context, session)
+        if (_awaitingAccept(session))
+          _awaitingAcceptBar(context, session)
         else
           _composer(context, session),
       ],
     );
   }
 
-  /// Replaces the composer for an unaccepted request: you can read what they
-  /// sent but can't reply until you Accept (which adds them as a contact),
-  /// Decline (forget), or Block.
-  Widget _requestBar(BuildContext context, ChannelSession session) {
+  /// Joiner side: true while an outbound first-contact DM hasn't connected yet
+  /// (the owner hasn't accepted). You can't send into it until they do.
+  bool _awaitingAccept(ChannelSession session) =>
+      session.isDm &&
+      session.peerPubkey != null &&
+      _pendingContact.containsKey(hex.encode(session.peerPubkey!));
+
+  /// Replaces the composer while waiting for the owner to accept your request —
+  /// you can't message them until they do (they've received nothing yet).
+  Widget _awaitingAcceptBar(BuildContext context, ChannelSession session) {
     final scheme = Theme.of(context).colorScheme;
     return Container(
+      width: double.infinity,
       decoration: BoxDecoration(
         color: scheme.surfaceContainerLow,
         border: Border(
           top: BorderSide(color: scheme.outlineVariant, width: 0.5),
         ),
       ),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text(
-            '${_displayName(Uint8List.fromList(session.peerPubkey!))} '
-            'wants to message you',
-            style: Theme.of(context).textTheme.bodySmall,
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              TextButton(
-                onPressed: () =>
-                    unawaited(_declineRequest(session, block: true)),
-                style: TextButton.styleFrom(foregroundColor: scheme.error),
-                child: const Text('Block'),
-              ),
-              const Spacer(),
-              TextButton(
-                onPressed: () => unawaited(_declineRequest(session)),
-                child: const Text('Decline'),
-              ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: () => unawaited(_acceptRequest(session)),
-                child: const Text('Accept'),
-              ),
-            ],
+          Icon(Icons.hourglass_empty, size: 16, color: scheme.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              'Waiting for '
+              '${_displayName(Uint8List.fromList(session.peerPubkey!))} '
+              'to accept your request',
+              style: TextStyle(color: scheme.onSurfaceVariant),
+              textAlign: TextAlign.center,
+            ),
           ),
         ],
       ),
@@ -5261,8 +5275,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final channels = _channels;
     final sessions = channels?.sessions.toList() ?? const <ChannelSession>[];
     final groups = sessions.where((s) => !s.isDm);
-    final dms = sessions.where((s) => s.isDm && !_isRequest(s));
-    final requests = sessions.where(_isRequest).toList();
+    final dms = sessions.where((s) => s.isDm);
+    final requests = _requests.toList();
     return Drawer(
       child: SafeArea(
         child: Column(
@@ -5306,19 +5320,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ),
                   if (requests.isNotEmpty) ...[
                     _drawerHeader('Message requests'),
-                    for (final s in requests)
+                    for (final peerHex in requests)
                       ListTile(
-                        leading: Icon(
-                          Icons.mark_email_unread_outlined,
-                          color: _channelAccent(s),
+                        leading: const Icon(Icons.mark_email_unread_outlined),
+                        title: Text(
+                          _displayName(Uint8List.fromList(hex.decode(peerHex))),
                         ),
-                        title: Text(_channelTitle(s)),
                         subtitle: const Text('wants to message you'),
-                        selected: s.channelId == channels?.activeId,
                         onTap: () {
-                          channels?.activate(s.channelId);
-                          _replyTo = null;
                           Navigator.pop(context);
+                          unawaited(_requestActions(peerHex));
                         },
                       ),
                   ],
