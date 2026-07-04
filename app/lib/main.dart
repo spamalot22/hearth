@@ -864,7 +864,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       isBlocked: _blocked.contains,
       isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
       peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
-      ownDeviceKeys: () => [widget.deviceKeys.publicKey],
+      ownDeviceKeys: () {
+        final store = _deviceStore;
+        if (store == null) return [widget.deviceKeys.publicKey];
+        final revoked = store.revokedDeviceKeys;
+        return store.certs
+            .where((c) => !revoked.contains(c.deviceKeyHex))
+            .map((c) => c.deviceKey)
+            .toList();
+      },
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -1491,12 +1499,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   /// Verifies and persists device bundles from DeviceBundleContent messages.
+  final Set<String> _indexedBundleIds = {};
+
   void _indexBundles(ChannelSession session) {
     final store = _deviceStore;
     if (store == null) return;
     for (final message in session.repository.ordered()) {
+      if (_indexedBundleIds.contains(message.idHex)) continue;
       final content = session.contentOf(message);
       if (content is! DeviceBundleContent) continue;
+      _indexedBundleIds.add(message.idHex);
       if (content.bundleJson.isEmpty) continue;
       try {
         final bundle = DeviceBundle.fromJson(content.bundleJson);
@@ -3030,7 +3042,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       isBlocked: _blocked.contains,
       isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
       peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
-      ownDeviceKeys: () => [widget.deviceKeys.publicKey],
+      ownDeviceKeys: () {
+        final store = _deviceStore;
+        if (store == null) return [widget.deviceKeys.publicKey];
+        final revoked = store.revokedDeviceKeys;
+        return store.certs
+            .where((c) => !revoked.contains(c.deviceKeyHex))
+            .map((c) => c.deviceKey)
+            .toList();
+      },
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);

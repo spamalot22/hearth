@@ -216,9 +216,9 @@ class GroupCipher {
 ///
 /// Wire format:
 /// ```
-/// version(1) ‖ numDevices(1) ‖ [devicePubX(32) ‖ wrappedKey(48)]* ‖ nonce(12) ‖ mac(16) ‖ ciphertext
+/// version(1) ‖ numDevices(1) ‖ [devicePub(32) ‖ wrapNonce(12) ‖ wrapMac(16) ‖ wrappedKey(32)]* ‖ nonce(12) ‖ mac(16) ‖ ciphertext
 /// ```
-/// The content key is a fresh random 32-byte key encrypted with ChaCha20-Poly1305.
+/// Each per-device slot is 92 bytes. The content key is a fresh random 32-byte key encrypted with ChaCha20-Poly1305.
 /// Each device's wrap uses ECDH(sender_device, recipient_device) as the key.
 /// The nonce for wrapping is derived from sender+recipient device keys (deterministic,
 /// since the content key is random and never reused).
@@ -235,6 +235,9 @@ class MultiDeviceBox {
   }) async {
     if (recipientDeviceKeys.isEmpty) {
       throw ArgumentError('must have at least one recipient device');
+    }
+    if (recipientDeviceKeys.length > 255) {
+      throw ArgumentError('max 255 recipient devices (wire format limit)');
     }
     // 1. Generate a random content key and encrypt the plaintext.
     final contentKey = SecretKey(List.generate(32, (_) => _secureRandom()));

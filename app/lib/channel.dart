@@ -18,7 +18,7 @@ import 'webrtc_mesh.dart';
 /// pairwise key ([DmChannelCipher]).
 abstract class ChannelCipher {
   Future<Uint8List> encrypt(List<int> plaintext);
-  Future<Uint8List> decrypt(Uint8List boxed);
+  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice});
 }
 
 class GroupChannelCipher implements ChannelCipher {
@@ -31,7 +31,7 @@ class GroupChannelCipher implements ChannelCipher {
       GroupCipher.encrypt(plaintext, key: _key);
 
   @override
-  Future<Uint8List> decrypt(Uint8List boxed) =>
+  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) =>
       GroupCipher.decrypt(boxed, key: _key);
 }
 
@@ -46,7 +46,7 @@ class DmChannelCipher implements ChannelCipher {
       PairBox.encrypt(plaintext, self: _self, peerEd25519PublicKey: _peer);
 
   @override
-  Future<Uint8List> decrypt(Uint8List boxed) =>
+  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) =>
       PairBox.decrypt(boxed, self: _self, peerEd25519PublicKey: _peer);
 }
 
@@ -115,24 +115,36 @@ class MultiDeviceDmCipher implements ChannelCipher {
   }
 
   @override
-  Future<Uint8List> decrypt(Uint8List boxed) async {
+  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) async {
     // Try MultiDeviceBox first (version byte check is cheap).
     if (boxed.isNotEmpty && boxed[0] == 1) {
       try {
-        // We need the sender's device key. In a MultiDeviceBox message, the
-        // sender signed with their device — we can try decrypting with each
-        // known device from the peer's bundle as the "senderDeviceEd".
+        // If we have the sender's device key from the message envelope, use it
+        // directly (O(1) — no iteration). Otherwise fall back to trying all
+        // known devices.
+        if (senderDevice != null) {
+          try {
+            return await MultiDeviceBox.decrypt(
+              boxed,
+              recipientDevice: selfDevice,
+              senderDeviceEd: senderDevice,
+            );
+          } catch (_) {
+            // sender device didn't work — maybe stale bundle, try others
+          }
+        }
+        // Fallback: iterate peer bundle devices (sender device unknown or stale).
         final peerBundle = peerBundleLookup();
         if (peerBundle != null) {
-          for (final senderDevice in peerBundle.devices) {
+          for (final dev in peerBundle.devices) {
             try {
               return await MultiDeviceBox.decrypt(
                 boxed,
                 recipientDevice: selfDevice,
-                senderDeviceEd: senderDevice,
+                senderDeviceEd: dev,
               );
             } catch (_) {
-              continue; // wrong sender device — try next
+              continue;
             }
           }
         }
@@ -390,7 +402,8 @@ class ChannelSession {
       if (!_content.containsKey(message.idHex)) {
         try {
           _content[message.idHex] = parseContent(
-            await cipher.decrypt(message.payload),
+            await cipher.decrypt(message.payload,
+                senderDevice: message.device),
           );
         } catch (_) {
           _content[message.idHex] = const TextContent('🔒 unreadable');

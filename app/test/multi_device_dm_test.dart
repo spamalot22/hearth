@@ -77,7 +77,6 @@ void main() {
 
     test('decrypts legacy PairBox messages via fallback', () async {
       final aliceRoot = await Identity.generate();
-      final aliceDevice = await Identity.generate();
       final bobRoot = await Identity.generate();
       final bobDevice = await Identity.generate();
 
