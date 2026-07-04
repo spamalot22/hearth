@@ -197,3 +197,102 @@ class DeviceRevocation {
     signature: base64Url.decode(j['sig']! as String),
   );
 }
+
+/// A signed advertisement of a root identity's active device set. Published
+/// epidemically so that senders can encrypt DMs to each active device (Phase B).
+///
+/// The root signs the list, so a stolen device can't add itself back after
+/// revocation — only the root holder can publish a new bundle. Peers receiving a
+/// bundle verify the signature and timestamp ordering (reject older bundles that
+/// would re-add a revoked device).
+class DeviceBundle {
+  DeviceBundle({
+    required this.rootKey,
+    required this.devices,
+    required this.publishedMs,
+    required this.signature,
+  });
+
+  /// The root identity that published this bundle.
+  final Uint8List rootKey;
+
+  /// Active device Ed25519 public keys (32 bytes each).
+  final List<Uint8List> devices;
+
+  /// When this bundle was published (unix epoch ms). Peers only accept a bundle
+  /// with a timestamp ≥ the one they already hold (monotonic — prevents replay
+  /// of an older bundle that includes a since-revoked device).
+  final int publishedMs;
+
+  /// The root's Ed25519 signature over [_signedBytes].
+  final Uint8List signature;
+
+  static Uint8List _signedBytes(
+    Uint8List rootKey,
+    List<Uint8List> devices,
+    int publishedMs,
+  ) {
+    final w = CanonicalCbor()
+      ..mapHeader(4)
+      ..text('t')
+      ..text('hearth/device-bundle/v1')
+      ..text('root')
+      ..bytes(rootKey)
+      ..text('devices')
+      ..arrayHeader(devices.length);
+    for (final d in devices) {
+      w.bytes(d);
+    }
+    w
+      ..text('published')
+      ..uint(publishedMs);
+    return w.takeBytes();
+  }
+
+  /// Publishes a new bundle listing [devices] under [root].
+  static Future<DeviceBundle> publish({
+    required Identity root,
+    required List<Uint8List> devices,
+    int? publishedMs,
+  }) async {
+    for (final d in devices) {
+      if (d.length != 32) {
+        throw ArgumentError('each device key must be 32 bytes');
+      }
+    }
+    final ts = publishedMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    final sig = await root.sign(_signedBytes(root.publicKey, devices, ts));
+    return DeviceBundle(
+      rootKey: root.publicKey,
+      devices: List.unmodifiable(devices),
+      publishedMs: ts,
+      signature: sig,
+    );
+  }
+
+  /// True iff the signature is valid for these fields.
+  Future<bool> verify() => Identity.verifySignature(
+    _signedBytes(rootKey, devices, publishedMs),
+    signature: signature,
+    publicKey: rootKey,
+  );
+
+  String get rootKeyHex => hex.encode(rootKey);
+
+  Map<String, Object?> toJson() => {
+    'root': base64Url.encode(rootKey),
+    'devices': devices.map(base64Url.encode).toList(),
+    'published': publishedMs,
+    'sig': base64Url.encode(signature),
+  };
+
+  static DeviceBundle fromJson(Map<String, Object?> j) => DeviceBundle(
+    rootKey: base64Url.decode(j['root']! as String),
+    devices: (j['devices']! as List)
+        .cast<String>()
+        .map(base64Url.decode)
+        .toList(growable: false),
+    publishedMs: j['published']! as int,
+    signature: base64Url.decode(j['sig']! as String),
+  );
+}

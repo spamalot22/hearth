@@ -192,6 +192,21 @@ class ReactionContent extends Content {
   };
 }
 
+/// Advertises the sender's active device set as a signed bundle. Bookkeeping
+/// (hidden from timeline). Peers use this to encrypt DMs per-device.
+class DeviceBundleContent extends Content {
+  const DeviceBundleContent(this.bundleJson);
+
+  /// The raw JSON map of the DeviceBundle (root, devices, published, sig).
+  final Map<String, Object?> bundleJson;
+
+  @override
+  bool get isBookkeeping => true;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'device_bundle', 'bundle': bundleJson};
+}
+
 /// Parses a payload into [Content], falling back to plain text for unknown or
 /// legacy (pre-envelope) payloads.
 Content parseContent(List<int> payload) {
@@ -242,6 +257,10 @@ Content parseContent(List<int> payload) {
             decoded['blob'] as String? ?? '',
             decoded['name'] as String? ?? 'file',
             decoded['mime'] as String? ?? '',
+          );
+        case 'device_bundle':
+          return DeviceBundleContent(
+            (decoded['bundle'] as Map?)?.cast<String, Object?>() ?? const {},
           );
       }
     }

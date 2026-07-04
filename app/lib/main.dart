@@ -1218,6 +1218,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _maybePersistDm(active);
       await _indexLibrary(active);
       _indexProfiles(active);
+      _indexBundles(active);
       _detectNewMembers(active);
       _markRead(active);
       // Backfill any watermark timestamps that were unresolved when received.
@@ -1268,6 +1269,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           break;
         case VoiceContent():
           break; // one-off recording, not a re-usable library item
+        case DeviceBundleContent():
+          break;
       }
     }
   }
@@ -1444,6 +1447,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (session.deviceRoots[entry.key] != myRoot) continue;
       if (store.isRevoked(entry.key)) continue;
       unawaited(store.addCert(entry.value));
+    }
+  }
+
+  /// Verifies and persists device bundles from DeviceBundleContent messages.
+  void _indexBundles(ChannelSession session) {
+    final store = _deviceStore;
+    if (store == null) return;
+    for (final message in session.repository.ordered()) {
+      final content = session.contentOf(message);
+      if (content is! DeviceBundleContent) continue;
+      if (content.bundleJson.isEmpty) continue;
+      try {
+        final bundle = DeviceBundle.fromJson(content.bundleJson);
+        // Only accept bundles signed by the message author (can't advertise
+        // someone else's device set).
+        if (bundle.rootKeyHex != hex.encode(message.author)) continue;
+        // Monotonic check is inside setBundle.
+        unawaited(bundle.verify().then((valid) {
+          if (valid) unawaited(store.setBundle(bundle));
+        }));
+      } catch (_) {
+        // Malformed bundle — skip.
+      }
     }
   }
 
@@ -5978,6 +6004,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Edits/tombstones render as their target's state, never inline.
       EditContent() => const SizedBox.shrink(),
       DeleteContent() => const SizedBox.shrink(),
+      DeviceBundleContent() => const SizedBox.shrink(),
     };
   }
 

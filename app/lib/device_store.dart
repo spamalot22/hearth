@@ -17,6 +17,7 @@ class DeviceStore {
   DeviceStore._(this._box) {
     _loadCerts();
     _loadRevocations();
+    _loadBundles();
   }
 
   final Box<String> _box;
@@ -111,4 +112,47 @@ class DeviceStore {
 
   /// Whether a specific device has been revoked.
   bool isRevoked(String deviceKeyHex) => _revokedCache.contains(deviceKeyHex);
+
+  // --- Device bundles (per-peer) ---
+
+  static const _bundlesKey = 'bundles';
+
+  // rootKeyHex → DeviceBundle (the latest for each peer).
+  Map<String, DeviceBundle> _bundlesCache = {};
+
+  void _loadBundles() {
+    final raw = _box.get(_bundlesKey);
+    if (raw == null || raw.isEmpty) {
+      _bundlesCache = {};
+      return;
+    }
+    try {
+      final map = (jsonDecode(raw) as Map).cast<String, dynamic>();
+      _bundlesCache = map.map((k, v) =>
+          MapEntry(k, DeviceBundle.fromJson((v as Map).cast<String, Object?>())));
+    } catch (_) {
+      _bundlesCache = {};
+    }
+  }
+
+  /// The latest device bundle for [rootKeyHex], or null if none received.
+  DeviceBundle? bundleFor(String rootKeyHex) => _bundlesCache[rootKeyHex];
+
+  /// Stores a verified bundle. Only accepts if it's newer than the existing one
+  /// (monotonic timestamp — prevents replay of an older bundle).
+  Future<bool> setBundle(DeviceBundle bundle) async {
+    final rootHex = bundle.rootKeyHex;
+    final existing = _bundlesCache[rootHex];
+    if (existing != null && existing.publishedMs >= bundle.publishedMs) {
+      return false; // reject stale/replayed bundle
+    }
+    _bundlesCache[rootHex] = bundle;
+    await _persistBundles();
+    return true;
+  }
+
+  Future<void> _persistBundles() => _box.put(
+    _bundlesKey,
+    jsonEncode(_bundlesCache.map((k, v) => MapEntry(k, v.toJson()))),
+  );
 }
