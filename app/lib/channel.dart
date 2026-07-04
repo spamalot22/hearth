@@ -93,6 +93,8 @@ class ChannelSession {
   final Map<String, Content> _content = {};
   final Map<String, Uint8List> _blobs = {};
   final Set<String> _requested = {};
+  // Device pubkey hex → root pubkey hex, populated from device-signed messages.
+  final Map<String, String> _deviceRoots = {};
   // Revision index, rebuilt by refreshContent: the winning (topologically last)
   // valid edit per target id, and the set of validly tombstoned ids. "Valid"
   // means the edit/delete author matches the target's author — an edit from
@@ -107,6 +109,9 @@ class ChannelSession {
 
   bool get isDm => peerPubkey != null;
 
+  /// Device pubkey hex → root pubkey hex, learned from device-signed messages.
+  Map<String, String> get deviceRoots => _deviceRoots;
+
   /// The underlying WebRTC mesh (for peer count / connectivity status).
   WebRtcMesh? get mesh => _mesh;
 
@@ -117,6 +122,7 @@ class ChannelSession {
   static Future<ChannelSession> open({
     required String channelId,
     required Identity identity,
+    Identity? meshIdentity,
     required Uri relayUrl,
     List<Uri> fallbackUrls = const [],
     required bool live,
@@ -152,7 +158,7 @@ class ChannelSession {
         baseUrl: relayUrl,
         fallbackUrls: fallbackUrls,
         channel: channelId,
-        identity: identity,
+        identity: meshIdentity ?? identity,
         candidateCache: candidateCache,
         onPeerConnectedHex: onPeerConnectedHex,
         onPeerLeft: (_) {
@@ -259,6 +265,10 @@ class ChannelSession {
     _edits.clear();
     _deleted.clear();
     for (final message in repository.ordered()) {
+      // Build device→root mapping from device-signed messages.
+      if (message.device != null && message.cert != null) {
+        _deviceRoots[hex.encode(message.device!)] = hex.encode(message.author);
+      }
       if (!_content.containsKey(message.idHex)) {
         try {
           _content[message.idHex] = parseContent(
@@ -359,6 +369,7 @@ class ChannelSession {
 class ChannelManager {
   ChannelManager({
     required this.identity,
+    this.meshIdentity,
     required this.relayUrl,
     this.fallbackUrls = const [],
     required this.live,
@@ -373,6 +384,12 @@ class ChannelManager {
   });
 
   final Identity identity;
+
+  /// The device subkey used for mesh announce/signalling. When set, each device
+  /// appears as a distinct node in the P2P mesh (concurrent multi-device).
+  /// Falls back to [identity] (root) for pre-device-key compat.
+  final Identity? meshIdentity;
+
   final Uri relayUrl;
   List<Uri> fallbackUrls;
   final bool live;
@@ -408,6 +425,11 @@ class ChannelManager {
 
   /// Peers currently typing, per channel: channelId -> set of peerHex.
   final Map<String, Set<String>> typingPeers = {};
+
+  /// Maps device pubkey hex → root pubkey hex. Populated from received messages
+  /// that carry a device cert. Allows the UI to resolve a mesh peer's device key
+  /// back to their root identity (for display name lookup, presence, etc.).
+  final Map<String, String> deviceToRoot = {};
 
   Iterable<ChannelSession> get sessions => _sessions.values;
   String? get activeId => _activeId;
@@ -485,11 +507,13 @@ class ChannelManager {
   }
 
   void _handleTyping(String channelId, String peerHex, bool typing) {
+    // Resolve device key to root identity for UI attribution.
+    final resolved = deviceToRoot[peerHex] ?? peerHex;
     final set = typingPeers[channelId] ??= {};
     if (typing) {
-      set.add(peerHex);
+      set.add(resolved);
     } else {
-      set.remove(peerHex);
+      set.remove(resolved);
     }
     onUpdate();
   }
@@ -500,6 +524,7 @@ class ChannelManager {
       _sessions[id] = await ChannelSession.open(
         channelId: id,
         identity: identity,
+        meshIdentity: meshIdentity,
         relayUrl: relayUrl,
         fallbackUrls: fallbackUrls,
         live: live,
@@ -530,6 +555,7 @@ class ChannelManager {
         _sessions[id] = await ChannelSession.open(
           channelId: id,
           identity: identity,
+          meshIdentity: meshIdentity,
           relayUrl: relayUrl,
           fallbackUrls: fallbackUrls,
           live: live,
@@ -539,7 +565,11 @@ class ChannelManager {
           blobStore: blobStore,
           candidateCache: candidateCache,
           onPeerConnected: _broadcastContactsOnline,
-          onPeerConnectedHex: onDmConnected,
+          // For DMs we know the peer's root identity; fire with that (not the
+          // connecting device's mesh key) so DM persistence resolves correctly.
+          onPeerConnectedHex: onDmConnected != null
+              ? (_) => onDmConnected!(hex.encode(peerPubkey))
+              : null,
           onContactsOnline: _handleContactsOnline,
           onVersionControl: _handleVersionControl,
           onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
@@ -561,6 +591,9 @@ class ChannelManager {
   }
 
   void _onSessionUpdate(String channelId) {
+    // Merge device→root mappings from this session's messages.
+    final session = _sessions[channelId];
+    if (session != null) deviceToRoot.addAll(session.deviceRoots);
     onUpdate();
     if (channelId != _activeId) {
       onBackgroundMessage?.call(channelId);

@@ -839,6 +839,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final channels = ChannelManager(
       identity: widget.identity,
+      meshIdentity: widget.deviceKeys.device,
       relayUrl: _relayUrl,
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       live: widget.autoPoll,
@@ -2734,6 +2735,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     await _channels?.close();
     final channels = ChannelManager(
       identity: widget.identity,
+      meshIdentity: widget.deviceKeys.device,
       relayUrl: _relayUrl,
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       live: widget.autoPoll,
@@ -3683,6 +3685,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _voice = await VoiceSession.join(
         channelId: channelId,
         identity: widget.identity,
+        meshIdentity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
         onChange: _voiceChanged,
         enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,

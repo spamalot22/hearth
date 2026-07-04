@@ -71,6 +71,7 @@ class VoiceSession {
   static Future<VoiceSession> join({
     required String channelId,
     required Identity identity,
+    Identity? meshIdentity,
     required Uri relayUrl,
     required void Function() onChange,
     bool enhancedNoiseSuppression = false,
@@ -144,7 +145,7 @@ class VoiceSession {
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
       channel: 'voice:$channelId',
-      identity: identity,
+      identity: meshIdentity ?? identity,
       localStream: stream,
       candidateCache: candidateCache,
       onRemoteStream: (peerHex, remote) =>
