@@ -22,6 +22,11 @@ offline); it can verify that a message is authentic but can never read it.
 
 - **No accounts.** Your identity is an Ed25519 keypair generated on-device; your
   public key *is* your user id.
+- **Multi-device.** Phone and laptop run simultaneously under one identity.
+  Each device holds its own subkey (certified by the root); the root seed lives
+  only in a BIP39 recovery phrase (never persisted at runtime). DMs are encrypted
+  per-device — revoke a lost device and it's cryptographically locked out of
+  future messages. Manage devices from Settings → Devices (rename, revoke).
 - **End-to-end encrypted everywhere** — DMs, group channels, and voice. The relay
   never holds plaintext.
 - **Peer-to-peer.** Once two peers connect over WebRTC, messages flow directly
@@ -87,6 +92,14 @@ person a local petname. The secret seed is held in secure storage. There is no
 registration and no server-side account. An X25519 key for encryption is derived
 from the same Ed25519 key (birational conversion), so one identity covers both
 signing and key agreement.
+
+**Multi-device:** your root identity certifies per-device subkeys
+([`core/lib/src/device.dart`](core/lib/src/device.dart)). Each device holds only
+its subkey — messages are authored by the root but signed by the device (carrying
+a cert so peers verify the chain). The root seed lives only in a BIP39 recovery
+phrase; on enrollment it's derived transiently, signs the device cert + a
+`DeviceBundle` (advertises active devices), then is discarded. DMs are encrypted
+per-device via `MultiDeviceBox`; revoking a device excludes it from the key wrap.
 
 ### Messages — a signed, content-addressed DAG
 A message ([`message.dart`](core/lib/src/message.dart)) carries its author,
@@ -276,14 +289,20 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
   with, and (for media search) your search terms — proxying hides your IP from the
   GIF/sound provider, but the relay sees the query. Hiding *who a message is for*
   (sealed sender) is on the roadmap.
-- **Identity backup:** export/import a recovery code (the seed) backs up your key —
-  clearing storage without it still loses the identity. Multi-device is planned.
+- **Identity backup:** your identity is backed up as a 24-word BIP39 recovery
+  phrase. The root seed is never stored at runtime — it's derived transiently
+  from the phrase during device enrollment, then discarded. Lose all devices
+  *and* the phrase = identity gone (no server holds it).
+- **Per-device DM encryption:** DMs are encrypted to each of the recipient's
+  active device keys individually (`MultiDeviceBox`). Revoking a device excludes
+  it from the key wrap — it physically cannot decrypt future messages.
 
 ## Roadmap
 
-Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): multi-device
-identity, MLS-style group key management (forward secrecy + per-member revocation),
-channel ownership and kick, Windows tray mode, and typing indicators. The plan
+Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): MLS-style
+group key management (forward secrecy + per-member revocation), social recovery
+(Shamir's Secret Sharing for the recovery phrase), shorter recovery codes
+(12-word + biometric keychain sync), federation, and spam resistance. The plan
 also keeps a dated **decisions log** explaining *why* each choice was made.
 
 ## License

@@ -352,9 +352,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
         silently restoring the wrong key) or scans the QR. This is both "same key
         on another device" and the identity **backup/recovery** mechanism. Codec
         lives in `core` (`mnemonic.dart`, BIP39-vector-tested).
-      - [ ] **(b) per-device subkeys** certified by a root key — adds per-device
-        revocation. Not built: "multi-device" today means copying the same root
-        seed to each device.
+      - [x] **(b) per-device subkeys** certified by a root key — DONE. Full
+        concurrent multi-device + per-device DM encryption + device revocation +
+        offline-root enrollment ceremony. See 2026-07-04 decisions log.
 - [x] **Address cache + peer-exchange** — clients cache contacts'/members'
       last-known WebRTC candidates and gossip current ones over the mesh, so
       reconnects mostly skip the server (server = cold-start fallback only).
@@ -429,9 +429,12 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 
 ## 5. Open decisions (need a call before they bite)
 
-1. **Multi-device identity flow.** How does your phone + laptop share one
-   identity? (Root key certifies per-device subkeys.) Shapes the whole crypto
-   layer — decide before Phase 3.
+1. ~~**Multi-device identity flow.**~~ **RESOLVED (2026-07-04).** Root key
+   certifies per-device subkeys (Ed25519 cert chain). Each device holds only its
+   subkey at runtime; the root is derived transiently from the BIP39 phrase
+   during enrollment and then discarded. DMs encrypted per-device via
+   `MultiDeviceBox`; revoked devices cryptographically locked out. See Phase A+B
+   in the decisions log.
 2. **Spam resistance.** Keypairs are free to mint. Proof-of-work? Invite-only
    communities? Web-of-trust? Decide before any public discovery exists.
 3. **Permission conflicts.** Two admins act contradictorily while offline — who
@@ -946,3 +949,61 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   download id + hash are persisted, so `resumePendingUpdate()` on next launch
   finishes an interrupted one (verify + install, or re-attach if still running).
   Windows keeps the in-process flow. No new permissions (app-private storage).
+- **2026-07-04** — **@mentions with mention-aware notifications.** `<@pubkeyHex>`
+  tokens in message text resolve to the viewer's petname at render time (never
+  displays raw hex). A mention picker (triggered by `@` in the composer) lists
+  channel members. Notifications highlight messages that mention you.
+- **2026-07-04** — **Multi-device identity — Phase A (concurrent multi-device,
+  cosmetic revocation).** Shipped all five sub-phases:
+  - **(A1) Device certificates** — `DeviceCert` (root signs device subkeys) and
+    `DeviceRevocation` in `core/device.dart`. Canonical CBOR signed bytes, JSON
+    round-trip, cross-language interop vector locked with the TS relay.
+  - **(A2) Device-signed messages** — `Message.create()` accepts `signingDevice`
+    + `deviceCert`; messages are *authored* by the root but *signed* by the
+    device. `verify()` checks the cert chain: root→device→message. The relay
+    (`verifyWire`) also verifies the chain so `author` stays authenticated for
+    rate-limiting.
+  - **(A3) Device enrollment in the app** — `DeviceKeys.loadOrCreate()` generates
+    a stable per-device subkey (persisted in a separate SecureKeyStore slot) and
+    re-issues its cert each launch.
+  - **(A4) Mesh keyed by device identity** — `WebRtcMesh` announces and signals
+    using the device key (not the root). Two devices of the same person appear as
+    distinct peers — they connect to each other and coexist without glare or
+    mailbox collisions. A `deviceToRoot` map (populated from message certs)
+    resolves device mesh peers to root identities for display (typing, presence).
+  - **(A5) Device list UI + revocation** — Settings → Devices tab lists enrolled
+    devices (name, issued date, this-device marker, revoked badge). Rename
+    re-issues cert; revoke issues a signed `DeviceRevocation`, gossips it via
+    `DeviceRevocationControl` over the mesh, and peers verify + persist it.
+    Enforcement: `SyncEngine.receive()` and `SyncSession._receive()` drop
+    messages from revoked devices. Display-time filter hides already-stored
+    messages from since-revoked devices.
+  Phase A revocation is "cosmetic" — the stolen device still holds the root seed
+  and can re-enroll. Real crypto lockout is Phase B.
+- **2026-07-04** — **Multi-device identity — Phase B (per-device DM encryption,
+  cryptographic revocation).** Shipped five sub-phases:
+  - **(B1) MultiDeviceBox** — encrypts a DM plaintext with a random content key,
+    then wraps that key to each recipient device's X25519 key via ECDH. Only
+    devices that hold a wrap can decrypt. Wire: `version(1) ‖ count(1) ‖
+    [devicePub(32) ‖ wrapNonce(12) ‖ wrapMac(16) ‖ wrappedKey(32)]* ‖
+    contentNonce(12) ‖ contentMac(16) ‖ ciphertext`.
+  - **(B2) DeviceBundle** — a root-signed claim listing active device Ed25519
+    keys, published epidemically as `DeviceBundleContent` (bookkeeping message).
+    Peers verify the signature + monotonic timestamp (rejects replay of older
+    bundles that would re-add a revoked device). Stored per-peer in `DeviceStore`.
+  - **(B3) MultiDeviceDmCipher** — wired end-to-end. Encrypts DMs with
+    `MultiDeviceBox` when a peer's device bundle is available; falls back to
+    `PairBox` for legacy peers. Decrypt uses `message.device` as a sender hint
+    (O(1) ECDH). Own device bundle published on boot and after revocations.
+  - **(B4) Offline root prep** — `MultiDeviceDmCipher.selfRoot` is nullable.
+    When null: MultiDeviceBox works (device ECDH); PairBox messages show 🔒;
+    revoke/rename disabled (require root signing).
+  - **(B5) Offline root boot flow + enrollment ceremony** — The root seed is no
+    longer required at runtime. Boot checks: root seed (legacy) → device+cert
+    (offline-root) → enrollment UI. `Identity.fromPublicKey()` creates a
+    signing-disabled identity. First boot shows "Create new identity" (shows
+    phrase, signs cert+bundle, discards root) or "Enroll this device" (enter
+    phrase, derive root transiently, sign, discard). Stale Hive data wiped on
+    identity switch. Backup/restore/rename/revoke correctly guarded for canSign.
+  A revoked device is now **cryptographically locked out** of future DMs — it
+  receives no key wrap in future `MultiDeviceBox` messages.
