@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart'
     hide Message;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
@@ -27,6 +28,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'background_poll.dart';
+
 import 'blob_store_hive.dart';
 import 'candidate_cache.dart';
 import 'channel.dart';
@@ -493,14 +495,25 @@ class _BootstrapState extends State<_Bootstrap> {
     if (devSeed != null) {
       final device = await Identity.fromSeed(devSeed);
       // Load the cert from the device store to get the root pubkey.
-      final ds = await DeviceStore.open();
-      final cert = ds.certs
-          .where((c) => c.deviceKeyHex == device.publicKeyHex)
-          .firstOrNull;
-      if (cert != null) {
-        final rootPub = Identity.fromPublicKey(cert.rootKey);
-        return (rootPub, DeviceKeys(device, cert));
+      DeviceStore? ds;
+      try {
+        ds = await DeviceStore.open();
+      } catch (_) {
+        // Corrupted device store — wipe it and fall through to enrollment.
+        await Hive.deleteBoxFromDisk('hearth.devices');
       }
+      if (ds != null) {
+        final cert = ds.certs
+            .where((c) => c.deviceKeyHex == device.publicKeyHex)
+            .firstOrNull;
+        if (cert != null) {
+          final rootPub = Identity.fromPublicKey(cert.rootKey);
+          return (rootPub, DeviceKeys(device, cert));
+        }
+      }
+      // Device seed exists but no matching cert — orphan state. Delete the
+      // orphan device seed so enrollment starts clean.
+      await deviceStore.deleteSeed();
     }
 
     // Nothing at all — first boot. Return null to trigger the enrollment UI.
@@ -682,14 +695,40 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       devices: [device.publicKey],
     );
 
-    // Persist cert + bundle to the device store.
-    final ds = await DeviceStore.open();
-    await ds.addCert(cert);
-    await ds.setBundle(bundle);
+    // Wipe stale data and persist cert + bundle post-wipe (below).
 
     // Delete root seed from secure storage (it was never written, but if the
     // user previously had a legacy install, clear it now).
     await widget.keyStore.deleteSeed();
+
+    // Wipe any stale channel/message/contact data from a previous identity.
+    // This prevents privacy leaks and cipher mismatches when enrolling a new
+    // identity on a device that previously held a different one.
+    for (final boxName in [
+      'hearth.channels',
+      'hearth.dms',
+      'hearth.profile',
+      'hearth.requests',
+      'hearth.pending_contacts',
+      'hearth.settings',
+      'hearth.unread',
+    ]) {
+      try {
+        await Hive.deleteBoxFromDisk(boxName);
+      } catch (_) {}
+    }
+    // Also delete message/blob boxes (prefixed with channel IDs).
+    try {
+      await Hive.deleteFromDisk();
+    } catch (_) {
+      // Best-effort — on web, deleteFromDisk may not be supported.
+    }
+
+    // Re-open and persist just the cert/bundle for the fresh start.
+    await Hive.initFlutter();
+    final freshDs = await DeviceStore.open();
+    await freshDs.addCert(cert);
+    await freshDs.setBundle(bundle);
 
     // Reboot the app into the enrolled state.
     if (!mounted) return;
@@ -2860,26 +2899,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.key_outlined),
-            title: const Text('Back up identity'),
-            subtitle: const Text('Reveal your recovery phrase'),
-            onTap: () {
-              Navigator.pop(context);
-              unawaited(_backupIdentity());
-            },
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.restore),
-            title: const Text('Restore identity'),
-            subtitle: const Text('Restore from a recovery phrase'),
-            onTap: () {
-              Navigator.pop(context);
-              unawaited(_restoreIdentity());
-            },
-          ),
+          if (widget.identity.canSign)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.key_outlined),
+              title: const Text('Back up identity'),
+              subtitle: const Text('Reveal your recovery phrase'),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_backupIdentity());
+              },
+            )
+          else
+            const ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.key_off_outlined),
+              title: Text('Back up identity'),
+              subtitle: Text(
+                'Root key is offline — use your recovery phrase from the '
+                'device that created your identity.',
+              ),
+              enabled: false,
+            ),
+          if (widget.identity.canSign)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.restore),
+              title: const Text('Restore identity'),
+              subtitle: const Text('Restore from a recovery phrase'),
+              onTap: () {
+                Navigator.pop(context);
+                unawaited(_restoreIdentity());
+              },
+            ),
         ],
       ),
     );
@@ -2982,6 +3034,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _renameThisDevice() async {
+    if (!widget.identity.canSign) return; // requires root signing
     final controller = TextEditingController(text: widget.deviceKeys.cert.name);
     final name = await showDialog<String>(
       context: context,
@@ -3019,6 +3072,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _revokeDevice(DeviceCert cert) async {
+    if (!widget.identity.canSign) return; // requires root signing
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
