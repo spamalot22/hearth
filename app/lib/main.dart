@@ -833,6 +833,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       },
       onInference: _handleMeshControl,
       onDmConnected: _onDmConnected,
+      isBlocked: _blocked.contains,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -1446,12 +1447,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Declines a connection request. Nothing was ever opened or stored, so this
   /// just forgets the pubkey; [block] additionally drops any re-request.
   Future<void> _declineRequest(String peerHex, {bool block = false}) async {
+    if (block) {
+      await _blockPeer(peerHex); // also drops the request + persists
+      return;
+    }
     _requests.remove(peerHex);
     unawaited(_reqStore?.remove(peerHex));
-    if (block) {
-      _blocked.add(peerHex);
-      await _settings?.blockUser(peerHex);
-    }
     if (mounted) setState(() {});
   }
 
@@ -2722,6 +2723,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       },
       onInference: _handleMeshControl,
       onDmConnected: _onDmConnected,
+      isBlocked: _blocked.contains,
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);
@@ -4491,23 +4493,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     } else if (action == 'name') {
       await _renameContact(author);
     } else if (action == 'block') {
-      setState(() {
-        if (isBlocked) {
-          _blocked.remove(authorHex);
-        } else {
-          _blocked.add(authorHex);
-          // Immediately mute in voice if in a call.
-          if (_voice != null && _voice!.volumeOf(authorHex) > 0) {
-            unawaited(_voice!.setVolume(authorHex, 0.0));
-          }
-        }
-      });
-      if (isBlocked) {
-        await _settings?.unblockUser(authorHex);
-      } else {
-        await _settings?.blockUser(authorHex);
-      }
+      await (isBlocked ? _unblockPeer(authorHex) : _blockPeer(authorHex));
     }
+  }
+
+  /// Blocks [peerHex]: persists the block, mutes them in voice, and — per the
+  /// plan's DM rule — **closes any DM with them and stops it restoring**, so a
+  /// blocked peer's messages are never received or stored again (no session →
+  /// no mesh/courier). Also clears any pending first-contact / request for them.
+  /// Group messages stay in the DAG (rendered redacted) as before.
+  Future<void> _blockPeer(String peerHex) async {
+    setState(() => _blocked.add(peerHex));
+    await _settings?.blockUser(peerHex);
+    if (_voice != null && _voice!.volumeOf(peerHex) > 0) {
+      unawaited(_voice!.setVolume(peerHex, 0.0));
+    }
+    // Drop any in-flight first contact / pending request.
+    unawaited(_pendingContact.remove(peerHex)?.close());
+    unawaited(_pending?.remove(peerHex));
+    _requests.remove(peerHex);
+    unawaited(_reqStore?.remove(peerHex));
+    // Close + forget the DM so nothing more is ingested (past history stays on
+    // disk, just unreachable; re-DMing after unblock would surface it again).
+    _persistedDms.remove(peerHex);
+    unawaited(_dms?.remove(peerHex));
+    final dmId = await dmChannelId(widget.identity.publicKeyHex, peerHex);
+    await _channels?.leave(dmId);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _unblockPeer(String peerHex) async {
+    setState(() => _blocked.remove(peerHex));
+    await _settings?.unblockUser(peerHex);
+    if (mounted) setState(() {});
   }
 
   /// Picks one of your contacts and opens an encrypted DM. You can only DM people

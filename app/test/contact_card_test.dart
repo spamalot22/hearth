@@ -5,6 +5,7 @@
 // this covers everything up to the point a relay would take over.
 import 'package:core/core.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/channel.dart';
 import 'package:hearth/contact_card.dart';
 import 'package:hearth/group_channel.dart';
 import 'package:hearth/main.dart';
@@ -126,6 +127,43 @@ void main() {
     expect(dm.peerPubkey, peer.publicKey);
 
     await _finish(tester);
+  });
+
+  test('block closes a DM and openDm refuses a blocked peer', () async {
+    // Tested at the ChannelManager level (no widget tree) — the block→close-DM
+    // mechanism: openDm opens when clear, leave closes it, and once blocked
+    // openDm refuses so no session (hence no ingestion/storage) exists.
+    final me = await Identity.generate();
+    final peer = await Identity.generate();
+    final blocked = <String>{};
+    final cm = ChannelManager(
+      identity: me,
+      relayUrl: Uri.parse('http://localhost:8787'),
+      live: false, // in-memory, no mesh
+      onUpdate: () {},
+      isBlocked: blocked.contains,
+    );
+
+    await cm.openDm(peer.publicKey);
+    expect(cm.active?.peerPubkey, peer.publicKey, reason: 'opens when clear');
+
+    // Block + close, as _blockPeer does.
+    blocked.add(peer.publicKeyHex);
+    await cm.leave(await dmChannelId(me.publicKeyHex, peer.publicKeyHex));
+    expect(
+      cm.sessions.where((s) => s.isDm),
+      isEmpty,
+      reason: 'the blocked peer\'s DM session is closed',
+    );
+
+    // Reopen is refused while blocked → still no DM session.
+    await cm.openDm(peer.publicKey);
+    expect(
+      cm.sessions.where((s) => s.isDm),
+      isEmpty,
+      reason: 'openDm refuses a blocked peer',
+    );
+    await cm.close();
   });
 
   testWidgets('accepting your own card is refused', (tester) async {

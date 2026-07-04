@@ -368,6 +368,7 @@ class ChannelManager {
     this.onForceUpdate,
     this.onInference,
     this.onDmConnected,
+    this.isBlocked,
   });
 
   final Identity identity;
@@ -393,6 +394,10 @@ class ChannelManager {
   /// Fired with a peer's pubkey (hex) when a **DM** connects to them — used to
   /// retire a pending first-contact once it lands.
   final void Function(String peerHex)? onDmConnected;
+
+  /// Whether a peer (hex) is blocked. When set, [openDm] refuses blocked peers,
+  /// so a blocked DM never opens (and thus never receives/stores messages).
+  final bool Function(String peerHex)? isBlocked;
 
   final Map<String, ChannelSession> _sessions = {};
   // DM ids currently being opened — guards the await window in [openDm] so two
@@ -512,8 +517,10 @@ class ChannelManager {
     onUpdate();
   }
 
-  /// Opens (or focuses) the encrypted DM with [peerPubkey].
+  /// Opens (or focuses) the encrypted DM with [peerPubkey]. A blocked peer is
+  /// refused, so no DM session — hence no ingestion — exists for them.
   Future<void> openDm(List<int> peerPubkey) async {
+    if (isBlocked?.call(hex.encode(peerPubkey)) ?? false) return;
     final id = await dmChannelId(identity.publicKeyHex, hex.encode(peerPubkey));
     // Reserve synchronously so a concurrent open for the same peer bails here
     // rather than building a second (leaked) session across the await below.

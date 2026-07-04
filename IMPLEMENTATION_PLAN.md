@@ -861,6 +861,18 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   `animations` package); and an animated **send button**. Continuous ambient
   animations are gated behind `_ambientAnimations` (off under `flutter test`, so
   `pumpAndSettle` still settles); one-shot animations run normally.
+- **2026-07-04** — **Block now actually drops DMs (was only redacting).** The
+  2026-06-29 block model promised "DMs from a blocked user are silently dropped
+  on receive (never stored)", but only the *group* half (store-in-DAG +
+  render-redacted) was implemented; DM messages from a blocked peer were still
+  ingested and stored, merely hidden at render. Now blocking a peer **closes any
+  DM with them and stops it restoring** (`_blockPeer`), and `ChannelManager.openDm`
+  refuses a blocked peer (`isBlocked` guard) so no DM session — hence no
+  mesh/courier/ingestion — exists for them. Future messages are never received
+  or stored; past history stays on disk (unreachable) rather than being purged,
+  so an unblock + re-DM would surface it again. Groups are unchanged
+  (store-redacted, restore on unblock). Surfaced by the post-release review of
+  the contact-card work.
 - **2026-07-03** — **Contact cards — cold-start DMs without a shared group.**
   Closed the gap where you could only DM someone whose pubkey you already had
   (via a mutual group or an invite). A **contact card** is the person-level
