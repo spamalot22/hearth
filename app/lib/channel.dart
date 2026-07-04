@@ -63,7 +63,7 @@ class DmChannelCipher implements ChannelCipher {
 class MultiDeviceDmCipher implements ChannelCipher {
   MultiDeviceDmCipher({
     required this.selfDevice,
-    required this.selfRoot,
+    this.selfRoot,
     required this.peerRootKey,
     required this.peerBundleLookup,
     required this.ownDeviceKeys,
@@ -72,8 +72,9 @@ class MultiDeviceDmCipher implements ChannelCipher {
   /// This device's identity (for ECDH in MultiDeviceBox).
   final Identity selfDevice;
 
-  /// The root identity (for PairBox fallback).
-  final Identity selfRoot;
+  /// The root identity (for PairBox fallback). Null in offline-root mode —
+  /// legacy PairBox messages become unreadable (shown as 🔒).
+  final Identity? selfRoot;
 
   /// The DM partner's root Ed25519 public key.
   final List<int> peerRootKey;
@@ -90,9 +91,15 @@ class MultiDeviceDmCipher implements ChannelCipher {
   Future<Uint8List> encrypt(List<int> plaintext) async {
     final peerBundle = peerBundleLookup();
     if (peerBundle == null) {
-      // No bundle — fall back to PairBox (legacy peer).
+      // No bundle — fall back to PairBox (legacy peer). If root is offline,
+      // we can't encrypt to this peer at all.
+      final root = selfRoot;
+      if (root == null) {
+        throw StateError(
+            'cannot encrypt DM: peer has no device bundle and root is offline');
+      }
       return PairBox.encrypt(plaintext,
-          self: selfRoot, peerEd25519PublicKey: peerRootKey);
+          self: root, peerEd25519PublicKey: peerRootKey);
     }
     // Encrypt to all peer devices + our own devices (so all our devices can
     // read messages we sent).
@@ -165,8 +172,13 @@ class MultiDeviceDmCipher implements ChannelCipher {
       }
     }
     // Fallback: PairBox (legacy message or MultiDeviceBox failed).
+    final root = selfRoot;
+    if (root == null) {
+      throw const FormatException(
+          'cannot decrypt: legacy PairBox message and root is offline');
+    }
     return PairBox.decrypt(boxed,
-        self: selfRoot, peerEd25519PublicKey: peerRootKey);
+        self: root, peerEd25519PublicKey: peerRootKey);
   }
 }
 

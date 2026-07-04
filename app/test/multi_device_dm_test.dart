@@ -125,4 +125,89 @@ void main() {
       expect(decrypted, plaintext);
     });
   });
+
+  group('MultiDeviceDmCipher - offline root mode', () {
+    test('encrypts via MultiDeviceBox without root (bundle available)',
+        () async {
+      final aliceDevice = await Identity.generate();
+      final bobRoot = await Identity.generate();
+      final bobDevice = await Identity.generate();
+
+      final bobBundle = await DeviceBundle.publish(
+        root: bobRoot,
+        devices: [bobDevice.publicKey],
+      );
+
+      // No selfRoot — offline mode.
+      final cipher = MultiDeviceDmCipher(
+        selfDevice: aliceDevice,
+        selfRoot: null,
+        peerRootKey: bobRoot.publicKey,
+        peerBundleLookup: () => bobBundle,
+        ownDeviceKeys: () => [aliceDevice.publicKey],
+      );
+
+      final plaintext = Uint8List.fromList([7, 8, 9]);
+      final boxed = await cipher.encrypt(plaintext);
+      expect(boxed[0], 1, reason: 'MultiDeviceBox format');
+
+      // Bob decrypts.
+      final bobCipher = MultiDeviceDmCipher(
+        selfDevice: bobDevice,
+        selfRoot: null,
+        peerRootKey: Uint8List(32), // doesn't matter — won't use PairBox
+        peerBundleLookup: () => DeviceBundle(
+          rootKey: Uint8List(32),
+          devices: [aliceDevice.publicKey],
+          publishedMs: 0,
+          signature: Uint8List(64),
+        ),
+        ownDeviceKeys: () => [bobDevice.publicKey],
+      );
+      expect(await bobCipher.decrypt(boxed), plaintext);
+    });
+
+    test('encrypt throws when no bundle and root is offline', () async {
+      final device = await Identity.generate();
+      final peerRoot = await Identity.generate();
+
+      final cipher = MultiDeviceDmCipher(
+        selfDevice: device,
+        selfRoot: null, // offline
+        peerRootKey: peerRoot.publicKey,
+        peerBundleLookup: () => null, // no bundle
+        ownDeviceKeys: () => [device.publicKey],
+      );
+
+      expect(
+        () => cipher.encrypt(Uint8List.fromList([1])),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('decrypt throws FormatException for PairBox message when root offline',
+        () async {
+      final aliceRoot = await Identity.generate();
+      final bobRoot = await Identity.generate();
+      final bobDevice = await Identity.generate();
+
+      // Alice sends a PairBox message.
+      final legacy = DmChannelCipher(aliceRoot, bobRoot.publicKey);
+      final boxed = await legacy.encrypt(Uint8List.fromList([1]));
+
+      // Bob tries to decrypt with offline root — should fail gracefully.
+      final bobCipher = MultiDeviceDmCipher(
+        selfDevice: bobDevice,
+        selfRoot: null, // offline
+        peerRootKey: aliceRoot.publicKey,
+        peerBundleLookup: () => null,
+        ownDeviceKeys: () => [bobDevice.publicKey],
+      );
+
+      expect(
+        () => bobCipher.decrypt(boxed),
+        throwsA(isA<FormatException>()),
+      );
+    });
+  });
 }
