@@ -21,7 +21,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # (see .github/workflows/release-app.yml — the `version` job feeds --build-name
 # and --build-number). This value is only used for local/dev builds, so there's
 # no need to hand-edit it per release — just tag.
-version: 0.7.4+1
+version: 0.7.5+1
 
 environment:
   sdk: ^3.12.2
