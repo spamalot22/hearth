@@ -2510,59 +2510,88 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
+    // On mobile, use a full-screen page. On desktop/web, use a centered dialog.
+    final usePage =
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS);
+    if (usePage) {
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(builder: (_) => _buildSettingsPage()),
+      );
+      return;
+    }
     await showDialog<void>(
       context: context,
       builder: (context) => Dialog(
-        child: DefaultTabController(
-          length: kIsWeb ? 5 : 6,
-          child: SizedBox(
-            width: 400,
-            height: 480,
-            child: Column(
+        clipBehavior: Clip.antiAlias,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 400,
+            maxHeight: MediaQuery.of(context).size.height * 0.8,
+          ),
+          child: _buildSettingsBody(showClose: true),
+        ),
+      ),
+    );
+  }
+
+  /// Full-screen settings page for mobile.
+  Widget _buildSettingsPage() {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Settings')),
+      body: _buildSettingsBody(showClose: false),
+    );
+  }
+
+  /// Shared settings body: tabbed content.
+  Widget _buildSettingsBody({required bool showClose}) {
+    return DefaultTabController(
+      length: kIsWeb ? 5 : 6,
+      child: Column(
+        children: [
+          if (showClose)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+              child: Row(
+                children: [
+                  Text(
+                    'Settings',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+          const TabBar(
+            isScrollable: true,
+            tabs: [
+              Tab(text: 'Audio'),
+              Tab(text: 'Identity'),
+              Tab(text: 'Devices'),
+              Tab(text: 'Network'),
+              Tab(text: 'Privacy'),
+              if (!kIsWeb) Tab(text: 'AI'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
               children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  child: Row(
-                    children: [
-                      Text(
-                        'Settings',
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const Spacer(),
-                      IconButton(
-                        icon: const Icon(Icons.close),
-                        onPressed: () => Navigator.pop(context),
-                      ),
-                    ],
-                  ),
-                ),
-                const TabBar(
-                  isScrollable: true,
-                  tabs: [
-                    Tab(text: 'Audio'),
-                    Tab(text: 'Identity'),
-                    Tab(text: 'Devices'),
-                    Tab(text: 'Network'),
-                    Tab(text: 'Privacy'),
-                    if (!kIsWeb) Tab(text: 'AI'),
-                  ],
-                ),
-                Expanded(
-                  child: TabBarView(
-                    children: [
-                      _audioTab(),
-                      _identityTab(),
-                      _devicesTab(),
-                      _networkTab(),
-                      _privacyTab(),
-                      if (!kIsWeb) _aiTab(),
-                    ],
-                  ),
-                ),
+                _audioTab(),
+                _identityTab(),
+                _devicesTab(),
+                _networkTab(),
+                _privacyTab(),
+                if (!kIsWeb) _aiTab(),
               ],
             ),
           ),
-        ),
+        ],
       ),
     );
   }
