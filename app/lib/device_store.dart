@@ -139,12 +139,18 @@ class DeviceStore {
   DeviceBundle? bundleFor(String rootKeyHex) => _bundlesCache[rootKeyHex];
 
   /// Stores a verified bundle. Only accepts if it's newer than the existing one
-  /// (monotonic timestamp — prevents replay of an older bundle).
+  /// (monotonic) and not unreasonably far in the future (prevents timestamp
+  /// poisoning where a far-future bundle permanently blocks updates).
   Future<bool> setBundle(DeviceBundle bundle) async {
     final rootHex = bundle.rootKeyHex;
     final existing = _bundlesCache[rootHex];
     if (existing != null && existing.publishedMs >= bundle.publishedMs) {
       return false; // reject stale/replayed bundle
+    }
+    // Reject bundles with timestamps more than 5 minutes in the future.
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    if (bundle.publishedMs > now + 5 * 60 * 1000) {
+      return false; // far-future timestamp — likely poisoned or clock-skewed
     }
     _bundlesCache[rootHex] = bundle;
     await _persistBundles();

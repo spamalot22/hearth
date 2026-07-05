@@ -165,6 +165,12 @@ class SyncSession {
 
   Future<void> close() => _sub.cancel();
 
+  /// Maximum pending wants per peer (prevents OOM from a malicious HAVE flood).
+  static const int _maxPendingWants = 10000;
+
+  /// Maximum heads accepted per HAVE frame (bounds a single frame's impact).
+  static const int _maxHaveHeads = 1000;
+
   // Serialise handling so concurrent gives don't race on _wanted or add().
   void _enqueue(SyncFrame frame) {
     _tail = _tail.then((_) => _handle(frame));
@@ -173,9 +179,10 @@ class SyncSession {
   Future<void> _handle(SyncFrame frame) async {
     switch (frame) {
       case HaveFrame(:final heads):
-        _requestMissing(heads);
+        _requestMissing(heads.take(_maxHaveHeads));
       case WantFrame(:final ids):
-        for (final idHex in ids) {
+        // Cap responses to prevent amplification.
+        for (final idHex in ids.take(_maxHaveHeads)) {
           final message = repository.get(_bytes(idHex));
           if (message != null) _link.send(GiveFrame(message));
         }
@@ -211,9 +218,12 @@ class SyncSession {
   }
 
   /// WANTs every id we neither hold nor have already asked this peer for.
+  /// Capped at [_maxPendingWants] to prevent memory exhaustion from a malicious
+  /// peer flooding fake HAVE IDs.
   void _requestMissing(Iterable<String> ids) {
     final missing = <String>[];
     for (final idHex in ids) {
+      if (_wanted.length >= _maxPendingWants) break;
       if (repository.contains(_bytes(idHex)) || !_wanted.add(idHex)) continue;
       missing.add(idHex);
     }
