@@ -529,12 +529,23 @@ class _BootstrapState extends State<_Bootstrap> {
           deviceKey: device.publicKey,
           name: DeviceKeys.defaultDeviceName(),
         );
-        final bundle = await DeviceBundle.publish(
-          root: root,
-          devices: [device.publicKey],
-        );
+        // Initialize Hive before opening the device store (fresh install).
+        await Hive.initFlutter();
         final ds = await DeviceStore.open();
         await ds.addCert(cert);
+        // Merge with any existing bundle's device list (handles concurrent
+        // enrollment — both devices end up in the bundle).
+        final existing = ds.bundleFor(hex.encode(root.publicKey));
+        final allDeviceKeys = <Uint8List>[device.publicKey];
+        if (existing != null) {
+          for (final k in existing.devices) {
+            if (hex.encode(k) != device.publicKeyHex) allDeviceKeys.add(k);
+          }
+        }
+        final bundle = await DeviceBundle.publish(
+          root: root,
+          devices: allDeviceKeys,
+        );
         await ds.setBundle(bundle);
         return (Identity.fromPublicKey(root.publicKey), DeviceKeys(device, cert));
       }
@@ -1582,6 +1593,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if ((_myName != null || _myAvatar != null) &&
           _announced.add(active.channelId)) {
         await _announceName(active);
+        // Publish our device bundle so peers can encrypt DMs per-device.
+        await _announceBundle(active);
       }
     }
     if (mounted) {
@@ -1790,6 +1803,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Persists a DM once it has real (non-bookkeeping) history, so it restores on
   /// the next launch. A DM with only a profile announce and no conversation is
   /// left unsaved — nothing to restore. Only call with a decrypted session (the
+  /// Publishes our device bundle into [session] so peers learn our device set.
+  Future<void> _announceBundle(ChannelSession session) async {
+    final store = _deviceStore;
+    if (store == null) return;
+    final bundle = store.bundleFor(widget.identity.publicKeyHex);
+    if (bundle == null) return;
+    try {
+      final content = DeviceBundleContent(bundle.toJson());
+      final payload = await session.encodePayload(content);
+      final message = await _createMessage(session, payload);
+      await session.publish(message);
+    } catch (_) {
+      // Best-effort — the bundle will be re-published next channel entry.
+    }
+  }
+
   /// Persists device certs seen from messages that match our root identity
   /// (i.e. our other devices). Lightweight — only processes new ones.
   void _learnDeviceCerts(ChannelSession session) {

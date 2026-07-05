@@ -42,8 +42,10 @@ class SecureKeyStore implements KeyStore {
 /// A [KeyStore] that syncs across the user's devices via platform keychain:
 /// - **Apple (iOS/macOS):** iCloud Keychain (`synchronizable: true`). The seed
 ///   syncs automatically to all devices signed into the same Apple ID.
-/// - **Android:** encrypted SharedPreferences with Auto Backup enabled. The seed
-///   syncs to the user's Google account and restores on new devices.
+///   Note: Apple requires `first_unlock` accessibility for synchronizable items
+///   (`unlocked` cannot sync). This is the most restrictive level that works.
+/// - **Android:** encrypted secure storage with Auto Backup. The seed syncs to
+///   the user's Google account and restores on new devices.
 /// - **Windows/Linux/Web:** falls back to local-only (no cross-device sync).
 ///
 /// This is separate from the device-only [SecureKeyStore] used for the device
@@ -52,7 +54,9 @@ class SecureKeyStore implements KeyStore {
 class SyncedKeyStore implements KeyStore {
   static const _key = 'hearth.root.synced';
 
-  FlutterSecureStorage get _storage {
+  // Stored as a static field (not a getter) so the same instance + options are
+  // used for both reads and writes — prevents option mismatch bugs.
+  static final FlutterSecureStorage _storage = () {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return const FlutterSecureStorage(
         iOptions: IOSOptions(
@@ -69,10 +73,8 @@ class SyncedKeyStore implements KeyStore {
         ),
       );
     }
-    // Android: default encrypted storage + Android Auto Backup.
-    // Windows/Linux/Web: local-only (no sync — phrase is the fallback).
     return const FlutterSecureStorage();
-  }
+  }();
 
   @override
   Future<void> writeSeed(Uint8List seed) =>
@@ -82,7 +84,15 @@ class SyncedKeyStore implements KeyStore {
   Future<Uint8List?> readSeed() async {
     try {
       final value = await _storage.read(key: _key);
-      return value == null ? null : Uint8List.fromList(base64Decode(value));
+      if (value == null) return null; // not present
+      return Uint8List.fromList(base64Decode(value));
+    } on FormatException {
+      // Value exists but is corrupted (invalid base64 from a garbled sync).
+      // Delete the corrupt entry so it doesn't block future syncs.
+      try {
+        await _storage.delete(key: _key);
+      } catch (_) {}
+      return null;
     } catch (_) {
       // Platform doesn't support synced storage or keychain unavailable.
       return null;
