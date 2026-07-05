@@ -982,6 +982,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final FocusNode _composerFocus = FocusNode();
   final ScrollController _scroll = ScrollController();
   bool _showScrollDown = false;
+  // Messages that were present when the channel was first rendered — these
+  // skip the entrance animation (only new arrivals animate in).
+  final Set<String> _seenMessageIds = {};
+  String? _seenForChannel; // which channel _seenMessageIds is populated for
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   ChannelManager? _channels;
   ContactBook? _contacts;
@@ -1071,6 +1075,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Set<String> _baselined = {}; // channels past their initial settle
   final Map<String, Set<String>> _seenMembers =
       {}; // channelId -> known members
+  final Map<String, (int, Set<String>)> _membersCache =
+      {}; // channelId -> (msgCount, members)
   final Set<String> _promptedNew = {}; // members offered to add this session
   final List<({String key, String name})> _newMembers = []; // pending prompts
   bool _promptingMember = false;
@@ -1579,14 +1585,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               .where((s) => s.channelId == control.channelId)
               .firstOrNull;
           if (session != null) {
-            final msg = session.repository
-                .ordered()
-                .cast<Message?>()
-                .firstWhere(
-                  (m) => m!.idHex == control.messageId,
-                  orElse: () => null,
-                );
-            if (msg != null) cache[control.messageId] = msg.timestampMs;
+            final ordered = session.repository.ordered();
+            final idx = ordered.indexWhere((m) => m.idHex == control.messageId);
+            if (idx >= 0) cache[control.messageId] = ordered[idx].timestampMs;
           }
         }
       });
@@ -2216,13 +2217,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Set<String> _membersOf(ChannelSession session) {
     final self = hex.encode(widget.identity.publicKey);
-    return {
+    final msgCount = session.repository.length;
+    final peerCount = session.mesh?.peers.length ?? 0;
+    final cacheKey = session.channelId;
+    final cached = _membersCache[cacheKey];
+    // Invalidate if message count or peer count changed.
+    if (cached != null && cached.$1 == msgCount + peerCount) {
+      return cached.$2;
+    }
+    final members = {
       for (final message in session.repository.ordered())
         if (hex.encode(message.author) != self) hex.encode(message.author),
-      // Also include currently connected mesh peers (they may not have sent a
-      // message yet but are live in this channel).
       ...?session.mesh?.peers,
     }..remove(self);
+    _membersCache[cacheKey] = (msgCount + peerCount, members);
+    return members;
   }
 
   /// Builds the members list with active (< 7d) and inactive (collapsed) sections.
@@ -5780,6 +5789,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               itemCount: messages.length,
               itemBuilder: (context, i) {
                 final msg = messages[i];
+                // Seed the set on first render of this channel so existing
+                // messages don't animate. Only subsequent arrivals stagger in.
+                if (_seenForChannel != session.channelId) {
+                  _seenForChannel = session.channelId;
+                  _seenMessageIds.clear();
+                  for (final m in messages) {
+                    _seenMessageIds.add(m.idHex);
+                  }
+                }
+                // Only animate messages arriving after the initial load.
+                final isNew = _seenMessageIds.add(msg.idHex);
+                if (!isNew) {
+                  return _bubble(context, session, msg);
+                }
                 // Stagger: newer messages (higher index) appear first,
                 // older ones cascade in with 50ms delay each (max 300ms).
                 final stagger = ((messages.length - 1 - i) * 50)

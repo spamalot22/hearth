@@ -18,12 +18,14 @@ import 'message.dart';
 /// durable persistence is layered on top later.
 class MessageStore {
   final Map<String, Message> _byId = HashMap<String, Message>();
+  List<Message>? _cachedOrder;
 
   /// Adds [m]; returns false if a message with the same id was already present.
   bool add(Message m) {
     final key = m.idHex;
     if (_byId.containsKey(key)) return false;
     _byId[key] = m;
+    _cachedOrder = null; // invalidate
     return true;
   }
 
@@ -65,6 +67,7 @@ class MessageStore {
   /// constraint until they arrive — the result stays a valid causal order of
   /// whatever subset is held.
   List<Message> ordered() {
+    if (_cachedOrder != null) return _cachedOrder!;
     // Kahn's algorithm over the present-only subgraph.
     final indegree = HashMap<String, int>();
     final childrenOf = HashMap<String, List<String>>();
@@ -100,7 +103,8 @@ class MessageStore {
     // Content-addressing makes cycles impossible (a cycle would require a hash
     // to contain itself), so every present node is emitted.
     assert(out.length == _byId.length, 'cycle in a content-addressed DAG?');
-    return out;
+    _cachedOrder = List.unmodifiable(out);
+    return _cachedOrder!;
   }
 
   static int _byTimestampThenId(Message a, Message b) {

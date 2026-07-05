@@ -61,7 +61,8 @@ class MultiDeviceDmCipher implements ChannelCipher {
     final peerBundle = peerBundleLookup();
     if (peerBundle == null) {
       throw StateError(
-          'cannot encrypt DM: peer has no device bundle (they must update)');
+        'cannot encrypt DM: peer has no device bundle (they must update)',
+      );
     }
     // Encrypt to all peer devices + our own devices.
     final recipientKeys = <Uint8List>[
@@ -165,7 +166,8 @@ class ChannelSession {
   final StreamSubscription<FrameChannel>? _peersSub;
   final StreamSubscription<String>? _blobSub;
   final RelayTransport? _relayCourier;
-  final Map<String, Content> _content = {};
+  final Map<String, Content> _content = <String, Content>{};
+  static const int _maxContentCache = 5000;
   final Map<String, Uint8List> _blobs = {};
   final Set<String> _requested = {};
   // Device pubkey hex → root pubkey hex, populated from device-signed messages.
@@ -225,8 +227,12 @@ class ChannelSession {
         : InMemoryMessageStorage();
     final repository = MessageRepository(storage);
     await repository.load();
-    final engine = SyncEngine(repository, channelId,
-        blobStore: blobStore, isDeviceRevoked: isDeviceRevoked);
+    final engine = SyncEngine(
+      repository,
+      channelId,
+      blobStore: blobStore,
+      isDeviceRevoked: isDeviceRevoked,
+    );
     final updatesSub = engine.updates.listen((_) => onUpdate());
     // A fetched blob arriving just triggers a refresh; refreshContent loads it
     // from the store.
@@ -357,11 +363,15 @@ class ChannelSession {
       if (!_content.containsKey(message.idHex)) {
         try {
           _content[message.idHex] = parseContent(
-            await cipher.decrypt(message.payload,
-                senderDevice: message.device),
+            await cipher.decrypt(message.payload, senderDevice: message.device),
           );
         } catch (_) {
           _content[message.idHex] = const TextContent('🔒 unreadable');
+        }
+        // Evict oldest entries if cache exceeds threshold. LinkedHashMap
+        // preserves insertion order, so we remove from the front.
+        while (_content.length > _maxContentCache) {
+          _content.remove(_content.keys.first);
         }
       }
       final content = _content[message.idHex]!;
