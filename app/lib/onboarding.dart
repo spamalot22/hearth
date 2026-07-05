@@ -19,14 +19,16 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   static const _pages = [
     _OnboardingPage(
       icon: Icons.lock_outline,
+      iconLabel: 'Encryption',
       title: 'Your messages, your keys',
       body:
           'Hearth encrypts everything end-to-end. Messages travel '
           'peer-to-peer — no server can read them, and no account is '
-          'needed. Your identity is a cryptographic key on your device.',
+          'needed. Your identity lives on your device — not on a server.',
     ),
     _OnboardingPage(
       icon: Icons.devices,
+      iconLabel: 'Multiple devices',
       title: 'Multi-device, no cloud',
       body:
           'Use Hearth on multiple devices simultaneously. Each device '
@@ -35,6 +37,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     ),
     _OnboardingPage(
       icon: Icons.shield_outlined,
+      iconLabel: 'Recovery phrase',
       title: 'Your 24-word backup',
       body:
           'You\'ll get a 24-word recovery phrase — the only way to '
@@ -128,11 +131,13 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 class _OnboardingPage extends StatelessWidget {
   const _OnboardingPage({
     required this.icon,
+    required this.iconLabel,
     required this.title,
     required this.body,
   });
 
   final IconData icon;
+  final String iconLabel;
   final String title;
   final String body;
 
@@ -144,7 +149,12 @@ class _OnboardingPage extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, size: 80, color: theme.colorScheme.primary),
+          Icon(
+            icon,
+            size: 80,
+            color: theme.colorScheme.primary,
+            semanticLabel: iconLabel,
+          ),
           const SizedBox(height: 32),
           Text(
             title,
