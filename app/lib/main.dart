@@ -5217,11 +5217,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _newDm() async {
     final contacts = _contacts?.entries() ?? const <String, String>{};
     if (contacts.isEmpty) {
-      if (mounted) {
-        setState(
-          () => _error = "no contacts yet — tap someone's name to add them",
-        );
-      }
+      // No contacts yet — offer to add one via QR/paste instead of a dead end.
+      await _joinViaInvite();
       return;
     }
     final chosenHex = await showModalBottomSheet<String>(
@@ -5304,6 +5301,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               await contacts.setName(pubkeyHex, name.trim());
               if (mounted) setState(() {});
             }
+          },
+          onAddContact: () {
+            Navigator.pop(context);
+            _joinViaInvite();
           },
         ),
       ),
@@ -7745,6 +7746,7 @@ class _ContactsPage extends StatefulWidget {
     required this.onInvite,
     required this.onRemove,
     required this.onRename,
+    required this.onAddContact,
   });
 
   final ContactBook contacts;
@@ -7756,6 +7758,7 @@ class _ContactsPage extends StatefulWidget {
   final void Function(String pubkeyHex, String channelId) onInvite;
   final Future<void> Function(String pubkeyHex) onRemove;
   final Future<void> Function(String pubkeyHex) onRename;
+  final VoidCallback onAddContact;
 
   @override
   State<_ContactsPage> createState() => _ContactsPageState();
@@ -7780,7 +7783,16 @@ class _ContactsPageState extends State<_ContactsPage> {
     final entries = Map.of(widget.contacts.entries())..remove(selfHex);
     final myName = widget.contacts.nameFor(selfHex);
     return Scaffold(
-      appBar: AppBar(title: const Text('Contacts')),
+      appBar: AppBar(
+        title: const Text('Contacts'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person_add_outlined),
+            tooltip: 'Add contact',
+            onPressed: widget.onAddContact,
+          ),
+        ],
+      ),
       body: Column(
         children: [
           // Your profile card.
@@ -7814,9 +7826,27 @@ class _ContactsPageState extends State<_ContactsPage> {
           const Divider(height: 1),
           Expanded(
             child: entries.isEmpty
-                ? const Center(
-                    child: Text(
-                      "No contacts yet — tap someone's name in a chat to add them.",
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.person_add_outlined,
+                          size: 48,
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'No contacts yet',
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton.icon(
+                          onPressed: widget.onAddContact,
+                          icon: const Icon(Icons.qr_code_scanner),
+                          label: const Text('Add via QR or invite'),
+                        ),
+                      ],
                     ),
                   )
                 : ListView.builder(
