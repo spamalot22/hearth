@@ -3936,11 +3936,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _handleDeepLink(Uri uri) {
     // Reconstruct the raw code: "hearth:<payload>" or "hearth-contact:<payload>"
-    // The URI scheme is the prefix, the rest is the path/opaque part.
-    final raw = uri.toString();
-    if (raw.isNotEmpty) {
-      unawaited(_handleInviteCode(raw));
-    }
+    // We can't trust uri.toString() because Dart may percent-encode base64url
+    // padding characters (=). Instead, rebuild from scheme + path which are
+    // decoded by the Uri class.
+    final scheme = uri.scheme; // 'hearth' or 'hearth-contact'
+    // For opaque URIs (no authority), the payload is in the path.
+    final payload = uri.path;
+    if (scheme.isEmpty || payload.isEmpty) return;
+    final raw = '$scheme:$payload';
+    unawaited(_handleInviteCode(raw));
   }
 
   /// Processes a raw invite or contact code string — shared between the
@@ -3991,6 +3995,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             : 'Joined ${channel.name}!',
       );
     }
+    // Once history has had a moment to sync, offer to add known members.
+    Future.delayed(const Duration(seconds: 3), () {
+      final active = _channels?.active;
+      if (mounted && active != null && active.channelId == channel.id) {
+        unawaited(_addMembers(active, auto: true));
+      }
+    });
   }
 
   /// Joins a channel from a pasted invite code.
