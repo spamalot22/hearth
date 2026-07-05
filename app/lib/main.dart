@@ -515,7 +515,34 @@ class _BootstrapState extends State<_Bootstrap> {
       );
       return (root, DeviceKeys(device, cert));
     }
-    // Real device — show enrollment UI.
+
+    // Check synced keychain (iCloud/Google) — if the root seed was synced from
+    // another device, auto-enroll this one silently (no phrase entry needed).
+    try {
+      final synced = SyncedKeyStore();
+      final syncedSeed = await synced.readSeed();
+      if (syncedSeed != null && syncedSeed.length == 32) {
+        final root = await Identity.fromSeed(syncedSeed);
+        final device = await Identity.loadOrCreate(deviceStore);
+        final cert = await DeviceCert.issue(
+          root: root,
+          deviceKey: device.publicKey,
+          name: DeviceKeys.defaultDeviceName(),
+        );
+        final bundle = await DeviceBundle.publish(
+          root: root,
+          devices: [device.publicKey],
+        );
+        final ds = await DeviceStore.open();
+        await ds.addCert(cert);
+        await ds.setBundle(bundle);
+        return (Identity.fromPublicKey(root.publicKey), DeviceKeys(device, cert));
+      }
+    } catch (_) {
+      // Synced keychain unavailable — fall through to enrollment UI.
+    }
+
+    // No synced seed either — show enrollment UI.
     return null;
   }
 
@@ -604,13 +631,14 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
         context: context,
         barrierDismissible: false,
         builder: (ctx) => AlertDialog(
-          title: const Text('Your recovery phrase'),
+          title: const Text('Recovery phrase (backup)'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                'Write this down and store it safely. It is the only way to '
-                'enroll new devices or recover your identity.',
+                'Your identity will sync automatically between your devices. '
+                'Write these 24 words down as a backup — you\'ll only need them '
+                'if you lose access to all your devices.',
               ),
               const SizedBox(height: 16),
               SelectableText(
@@ -667,7 +695,9 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
     }
   }
 
-  /// Signs device cert + bundle with [root], persists device key, discards root.
+  /// Signs device cert + bundle with [root], persists device key, stores root
+  /// seed in synced keychain for automatic cross-device enrollment, discards root
+  /// from local-only storage.
   Future<void> _enroll(Identity root) async {
     // Generate a fresh device key.
     final deviceStore = widget.keyStore is SecureKeyStore
@@ -687,6 +717,18 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       root: root,
       devices: [device.publicKey],
     );
+
+    // Persist root seed to the synced keychain (iCloud/Google backup) so other
+    // devices can auto-enroll without the phrase. Silent — the user doesn't see
+    // this; the phrase is the disaster-recovery fallback.
+    if (widget.keyStore is SecureKeyStore) {
+      try {
+        final synced = SyncedKeyStore();
+        await synced.writeSeed(await root.extractSeed());
+      } catch (_) {
+        // Platform doesn't support synced storage — phrase is the only backup.
+      }
+    }
 
     // Wipe stale data and persist cert + bundle post-wipe (below).
 
@@ -776,7 +818,7 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
                   const Divider(),
                   const SizedBox(height: 16),
                   Text(
-                    'Or enroll this device with an existing identity:',
+                    'Or recover with your 24-word backup phrase:',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                   const SizedBox(height: 12),
