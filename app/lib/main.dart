@@ -598,6 +598,13 @@ class _BootstrapState extends State<_Bootstrap> {
   }
 }
 
+/// Profile choices made during enrollment.
+class _ProfileSetup {
+  _ProfileSetup({required this.name, this.sync = true});
+  final String name;
+  final bool sync;
+}
+
 /// First-boot enrollment: create a new identity or enroll an existing one.
 /// After enrollment, persists only the device key + cert (root is discarded).
 class _EnrollmentScreen extends StatefulWidget {
@@ -642,14 +649,13 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
         context: context,
         barrierDismissible: false,
         builder: (ctx) => AlertDialog(
-          title: const Text('Recovery phrase (backup)'),
+          title: const Text('Recovery phrase'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                'Your identity will sync automatically between your devices. '
-                'Write these 24 words down as a backup — you\'ll only need them '
-                'if you lose access to all your devices.',
+                'Write these 24 words down and keep them safe. You\'ll only '
+                'need them if you lose access to all your devices.',
               ),
               const SizedBox(height: 16),
               SelectableText(
@@ -672,7 +678,12 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       );
       if (confirmed != true || !mounted) return;
 
-      await _enroll(root);
+      // Profile setup.
+      final profile = await _showProfileSetup();
+      if (profile == null || !mounted) return;
+
+      await _enroll(root,
+          name: profile.name, sync: profile.sync);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -698,7 +709,13 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
         return;
       }
       final root = await Identity.fromSeed(seed);
-      await _enroll(root);
+
+      // Profile setup.
+      if (!mounted) return;
+      final profile = await _showProfileSetup();
+      if (profile == null || !mounted) return;
+
+      await _enroll(root, name: profile.name, sync: profile.sync);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -706,10 +723,62 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
     }
   }
 
-  /// Signs device cert + bundle with [root], persists device key, stores root
-  /// seed in synced keychain for automatic cross-device enrollment, discards root
-  /// from local-only storage.
-  Future<void> _enroll(Identity root) async {
+  /// Shows the profile setup dialog. Returns null if cancelled.
+  Future<_ProfileSetup?> _showProfileSetup() {
+    final nameCtrl = TextEditingController();
+    var sync = true;
+    return showDialog<_ProfileSetup>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Set up your profile'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'Display name',
+                  hintText: 'What should people call you?',
+                ),
+                textCapitalization: TextCapitalization.words,
+              ),
+              const SizedBox(height: 20),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Sync to other devices'),
+                subtitle: const Text(
+                  'Stores your identity in iCloud / Google backup so new '
+                  'devices sign in automatically.',
+                ),
+                value: sync,
+                onChanged: (v) => setDialogState(() => sync = v),
+              ),
+            ],
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () {
+                final name = nameCtrl.text.trim();
+                if (name.isEmpty) return;
+                Navigator.pop(ctx, _ProfileSetup(name: name, sync: sync));
+              },
+              child: const Text('Continue'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Signs device cert + bundle with [root], persists device key, optionally
+  /// stores root seed in synced keychain, discards root from local-only storage.
+  Future<void> _enroll(Identity root, {
+    String? name,
+    bool sync = true,
+  }) async {
     // Generate a fresh device key.
     final deviceStore = widget.keyStore is SecureKeyStore
         ? SecureKeyStore(seedKey: 'hearth.device.seed')
@@ -730,9 +799,8 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
     );
 
     // Persist root seed to the synced keychain (iCloud/Google backup) so other
-    // devices can auto-enroll without the phrase. Silent — the user doesn't see
-    // this; the phrase is the disaster-recovery fallback.
-    if (widget.keyStore is SecureKeyStore) {
+    // devices can auto-enroll without the phrase — only if the user opted in.
+    if (sync && widget.keyStore is SecureKeyStore) {
       try {
         final synced = SyncedKeyStore();
         await synced.writeSeed(await root.extractSeed());
@@ -775,6 +843,12 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
     final freshDs = await DeviceStore.open();
     await freshDs.addCert(cert);
     await freshDs.setBundle(bundle);
+
+    // Persist the chosen display name so it's used on first channel entry.
+    if (name != null && name.isNotEmpty) {
+      final profile = await ProfileStore.open();
+      await profile.setName(name);
+    }
 
     // Reboot the app into the enrolled state.
     if (!mounted) return;
@@ -2740,6 +2814,43 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  Future<bool> _isSynced() async {
+    try {
+      return (await SyncedKeyStore().readSeed()) != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _deleteSyncedSeed() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Stop syncing identity?'),
+        content: const Text(
+          'Your identity will be removed from iCloud / Google backup. '
+          'New devices will need your 24-word recovery phrase to sign in. '
+          'This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Stop syncing'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await SyncedKeyStore().deleteSeed();
+    } catch (_) {}
+    if (mounted) setState(() {});
+  }
+
   Widget _identityTab() {
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -2764,6 +2875,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               'To add a new device or revoke one, enter the phrase in '
               'Settings → Devices.',
             ),
+          ),
+          FutureBuilder<bool>(
+            future: _isSynced(),
+            builder: (context, snap) {
+              final synced = snap.data ?? false;
+              return ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(synced ? Icons.cloud_done : Icons.cloud_off),
+                title: Text(synced
+                    ? 'Identity synced to iCloud / Google'
+                    : 'Identity not synced (phrase only)'),
+                subtitle: Text(synced
+                    ? 'New devices sign in automatically. Tap to stop syncing.'
+                    : 'Only your written recovery phrase can add new devices.'),
+                onTap: synced ? _deleteSyncedSeed : null,
+              );
+            },
           ),
         ],
       ),
