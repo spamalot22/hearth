@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:convert';
 
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
@@ -43,8 +44,9 @@ class DeviceStore {
     }
     try {
       final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-      _certsCache =
-          list.map((j) => DeviceCert.fromJson(j.cast<String, Object?>())).toList();
+      _certsCache = list
+          .map((j) => DeviceCert.fromJson(j.cast<String, Object?>()))
+          .toList();
     } catch (_) {
       _certsCache = [];
     }
@@ -89,14 +91,34 @@ class DeviceStore {
     await _persistCerts();
   }
 
-  Future<void> _persistCerts() =>
-      _box.put(_certsKey, jsonEncode(_certsCache.map((c) => c.toJson()).toList()));
+  Future<void> _persistCerts() => _box.put(
+    _certsKey,
+    jsonEncode(_certsCache.map((c) => c.toJson()).toList()),
+  );
 
   /// All known revocations for this identity.
-  List<DeviceRevocation> get revocations => List.unmodifiable(_revocationsCache);
+  List<DeviceRevocation> get revocations =>
+      List.unmodifiable(_revocationsCache);
 
   /// The set of revoked device key hex strings (O(1) lookup).
   Set<String> get revokedDeviceKeys => _revokedCache;
+
+  /// Returns the root key hex for a given device key hex, or null if unknown.
+  /// Looks up from known certs (our own devices) and known bundles (peers).
+  String? rootForDevice(String deviceKeyHex) {
+    // Check our own device certs.
+    for (final cert in _certsCache) {
+      if (cert.deviceKeyHex == deviceKeyHex) return hex.encode(cert.rootKey);
+    }
+    // Check peer bundles — each bundle's root is known.
+    for (final entry in _bundlesCache.entries) {
+      final bundle = entry.value;
+      for (final device in bundle.devices) {
+        if (hex.encode(device) == deviceKeyHex) return entry.key;
+      }
+    }
+    return null;
+  }
 
   /// Adds a revocation if not already known. Returns true if new.
   Future<bool> addRevocation(DeviceRevocation rev) async {
@@ -128,8 +150,12 @@ class DeviceStore {
     }
     try {
       final map = (jsonDecode(raw) as Map).cast<String, dynamic>();
-      _bundlesCache = map.map((k, v) =>
-          MapEntry(k, DeviceBundle.fromJson((v as Map).cast<String, Object?>())));
+      _bundlesCache = map.map(
+        (k, v) => MapEntry(
+          k,
+          DeviceBundle.fromJson((v as Map).cast<String, Object?>()),
+        ),
+      );
     } catch (_) {
       _bundlesCache = {};
     }

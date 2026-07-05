@@ -2041,17 +2041,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// contact is trusted, so their DM opens straight away.
   Future<void> _onRendezvousContact(String peerHex) async {
     if (peerHex == widget.identity.publicKeyHex) return;
+    if (peerHex == widget.deviceKeys.publicKeyHex) return;
     // A blocked pubkey is silently dropped — no request, no DM — like every
     // other receive path (notifications, message render, voice).
     if (_blocked.contains(peerHex)) return;
     final channels = _channels;
     if (channels == null) return;
-    if (_contacts?.nameFor(peerHex) != null) {
+    // The rendezvous mesh uses device keys (for signing). Resolve to root key
+    // via the device store's cert chain, or check contacts by device key too.
+    final rootHex = _deviceStore?.rootForDevice(peerHex) ?? peerHex;
+    if (_contacts?.nameFor(rootHex) != null) {
       try {
-        await channels.openDm(hex.decode(peerHex));
+        await channels.openDm(hex.decode(rootHex));
       } catch (_) {}
-    } else if (_requests.add(peerHex)) {
-      unawaited(_reqStore?.save(peerHex));
+    } else if (_requests.add(rootHex)) {
+      unawaited(_reqStore?.save(rootHex));
     }
     if (mounted) setState(() {});
   }
@@ -2197,8 +2201,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       relayUrl: _relayUrl,
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       rendezvousId: rendezvousId,
-      identity: widget.identity,
-      ignore: {widget.identity.publicKeyHex},
+      identity: widget.deviceKeys.device,
+      ignore: {widget.identity.publicKeyHex, widget.deviceKeys.publicKeyHex},
       // We already know the owner from the card, so a rendezvous connect just
       // confirms reachability; the DM proper forms on its derived channel and
       // _onDmConnected retires this listener once it lands.
@@ -2230,8 +2234,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       relayUrl: _relayUrl,
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       rendezvousId: rv,
-      identity: widget.identity,
-      ignore: {widget.identity.publicKeyHex},
+      identity: widget.deviceKeys.device,
+      ignore: {widget.identity.publicKeyHex, widget.deviceKeys.publicKeyHex},
       onContact: _onRendezvousContact,
     );
   }
