@@ -632,7 +632,23 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
   String? _error;
   bool _working = false;
   bool _showOnboarding = true;
+  UpdateInfo? _updateInfo;
   final _phraseController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.autoPoll) _checkUpdate();
+  }
+
+  Future<void> _checkUpdate() async {
+    final relayUrl = widget.relayUrl ?? kRelayUrl;
+    final state = await checkForUpdate(relayUrl);
+    if (!mounted) return;
+    if (state is UpdateAvailable) {
+      setState(() => _updateInfo = state.info);
+    }
+  }
 
   @override
   void dispose() {
@@ -915,6 +931,26 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
+                  if (_updateInfo != null) ...[
+                    MaterialBanner(
+                      content: Text(
+                        'Hearth v${_updateInfo!.version} is available. '
+                        'Please update before creating an identity.',
+                      ),
+                      leading: const Icon(Icons.system_update),
+                      actions: [
+                        TextButton(
+                          onPressed: () => launchUrl(
+                            Uri.parse(
+                              'https://github.com/spamalot22/hearth/releases/latest',
+                            ),
+                          ),
+                          child: const Text('Update'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   const Text('🔥', style: TextStyle(fontSize: 64)),
                   const SizedBox(height: 16),
                   Text(
