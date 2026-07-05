@@ -47,6 +47,7 @@ import 'media_library.dart';
 import 'mesh_control.dart';
 import 'network_status.dart';
 import 'notify.dart';
+import 'onboarding.dart';
 import 'profile.dart';
 import 'rendezvous.dart';
 import 'screen_picker.dart';
@@ -547,7 +548,10 @@ class _BootstrapState extends State<_Bootstrap> {
           devices: allDeviceKeys,
         );
         await ds.setBundle(bundle);
-        return (Identity.fromPublicKey(root.publicKey), DeviceKeys(device, cert));
+        return (
+          Identity.fromPublicKey(root.publicKey),
+          DeviceKeys(device, cert),
+        );
       }
     } catch (_) {
       // Synced keychain unavailable — fall through to enrollment UI.
@@ -626,6 +630,7 @@ class _EnrollmentScreen extends StatefulWidget {
 class _EnrollmentScreenState extends State<_EnrollmentScreen> {
   String? _error;
   bool _working = false;
+  bool _showOnboarding = true;
   final _phraseController = TextEditingController();
 
   @override
@@ -682,8 +687,7 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       final profile = await _showProfileSetup();
       if (profile == null || !mounted) return;
 
-      await _enroll(root,
-          name: profile.name, sync: profile.sync);
+      await _enroll(root, name: profile.name, sync: profile.sync);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
@@ -775,10 +779,7 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
 
   /// Signs device cert + bundle with [root], persists device key, optionally
   /// stores root seed in synced keychain, discards root from local-only storage.
-  Future<void> _enroll(Identity root, {
-    String? name,
-    bool sync = true,
-  }) async {
+  Future<void> _enroll(Identity root, {String? name, bool sync = true}) async {
     // Generate a fresh device key.
     final deviceStore = widget.keyStore is SecureKeyStore
         ? SecureKeyStore(seedKey: 'hearth.device.seed')
@@ -852,21 +853,28 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
 
     // Reboot the app into the enrolled state.
     if (!mounted) return;
-    unawaited(Navigator.of(context).pushAndRemoveUntil<void>(
-      MaterialPageRoute<void>(
-        builder: (_) => HearthApp(
-          keyStore: widget.keyStore,
-          relayUrl: widget.relayUrl,
-          autoPoll: widget.autoPoll,
-          testApi: widget.testApi,
+    unawaited(
+      Navigator.of(context).pushAndRemoveUntil<void>(
+        MaterialPageRoute<void>(
+          builder: (_) => HearthApp(
+            keyStore: widget.keyStore,
+            relayUrl: widget.relayUrl,
+            autoPoll: widget.autoPoll,
+            testApi: widget.testApi,
+          ),
         ),
+        (_) => false,
       ),
-      (_) => false,
-    ));
+    );
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_showOnboarding) {
+      return OnboardingScreen(
+        onComplete: () => setState(() => _showOnboarding = false),
+      );
+    }
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -877,10 +885,7 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Text(
-                    '🔥',
-                    style: TextStyle(fontSize: 64),
-                  ),
+                  const Text('🔥', style: TextStyle(fontSize: 64)),
                   const SizedBox(height: 16),
                   Text(
                     'Hearth',
@@ -1925,9 +1930,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         // someone else's device set).
         if (bundle.rootKeyHex != hex.encode(message.author)) continue;
         // Monotonic check is inside setBundle.
-        unawaited(bundle.verify().then((valid) {
-          if (valid) unawaited(store.setBundle(bundle));
-        }));
+        unawaited(
+          bundle.verify().then((valid) {
+            if (valid) unawaited(store.setBundle(bundle));
+          }),
+        );
       } catch (_) {
         // Malformed bundle — skip.
       }
@@ -2883,12 +2890,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               return ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: Icon(synced ? Icons.cloud_done : Icons.cloud_off),
-                title: Text(synced
-                    ? 'Identity synced to iCloud / Google'
-                    : 'Identity not synced (phrase only)'),
-                subtitle: Text(synced
-                    ? 'New devices sign in automatically. Tap to stop syncing.'
-                    : 'Only your written recovery phrase can add new devices.'),
+                title: Text(
+                  synced
+                      ? 'Identity synced to iCloud / Google'
+                      : 'Identity not synced (phrase only)',
+                ),
+                subtitle: Text(
+                  synced
+                      ? 'New devices sign in automatically. Tap to stop syncing.'
+                      : 'Only your written recovery phrase can add new devices.',
+                ),
                 onTap: synced ? _deleteSyncedSeed : null,
               );
             },
@@ -2916,20 +2927,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       padding: const EdgeInsets.all(16),
       children: [
         for (final cert in certs)
-          _deviceTile(cert, isThis: cert.deviceKeyHex == thisDeviceHex,
-              isRevoked: revoked.contains(cert.deviceKeyHex)),
+          _deviceTile(
+            cert,
+            isThis: cert.deviceKeyHex == thisDeviceHex,
+            isRevoked: revoked.contains(cert.deviceKeyHex),
+          ),
         if (certs.isEmpty)
           const Padding(
             padding: EdgeInsets.all(32),
-            child: Text('No devices enrolled yet.',
-                textAlign: TextAlign.center),
+            child: Text(
+              'No devices enrolled yet.',
+              textAlign: TextAlign.center,
+            ),
           ),
       ],
     );
   }
 
-  Widget _deviceTile(DeviceCert cert,
-      {required bool isThis, required bool isRevoked}) {
+  Widget _deviceTile(
+    DeviceCert cert, {
+    required bool isThis,
+    required bool isRevoked,
+  }) {
     final issued = DateTime.fromMillisecondsSinceEpoch(cert.issuedMs);
     final dateStr =
         '${issued.year}-${issued.month.toString().padLeft(2, '0')}-${issued.day.toString().padLeft(2, '0')}';
@@ -2940,8 +2959,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         color: isRevoked
             ? Theme.of(context).colorScheme.error
             : isThis
-                ? Theme.of(context).colorScheme.primary
-                : null,
+            ? Theme.of(context).colorScheme.primary
+            : null,
       ),
       title: Row(
         children: [
@@ -2967,7 +2986,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
         ],
       ),
-      subtitle: Text('Enrolled $dateStr • ${cert.deviceKeyHex.substring(0, 8)}…'),
+      subtitle: Text(
+        'Enrolled $dateStr • ${cert.deviceKeyHex.substring(0, 8)}…',
+      ),
       trailing: isRevoked
           ? null
           : null, // rename/revoke require entering recovery phrase (TODO)
