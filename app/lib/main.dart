@@ -736,7 +736,12 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       final synced = SyncedKeyStore();
       final seed = await synced.readSeedInteractive();
       if (seed == null || seed.length != 32) {
-        // Don't show an error — user may have just dismissed the picker.
+        if (mounted) {
+          setState(
+            () => _error =
+                'No saved identity found. Use your 24-word phrase instead.',
+          );
+        }
         return;
       }
       final root = await Identity.fromSeed(seed);
