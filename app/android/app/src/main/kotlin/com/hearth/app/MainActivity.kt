@@ -91,7 +91,10 @@ class MainActivity : FlutterActivity() {
                             displayInfo = CreateCredentialRequest.DisplayInfo(label),
                             isAutoSelectAllowed = true,
                             origin = null,
-                            preferImmediatelyAvailableCredentials = true,
+                            // Allow the system to show a "Save to Google?" prompt
+                            // if needed — some devices won't auto-save custom
+                            // credential types without user confirmation.
+                            preferImmediatelyAvailableCredentials = false,
                         )
 
                         scope.launch {
