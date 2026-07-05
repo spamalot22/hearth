@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// [KeyStore] backed by the platform secure store via `flutter_secure_storage`
@@ -22,7 +23,7 @@ class SecureKeyStore implements KeyStore {
   SecureKeyStore({
     FlutterSecureStorage? storage,
     String seedKey = 'hearth.identity.seed',
-  }) : _seedKey = seedKey,
+  }) : _seedKey = seedKey, // ignore: prefer_initializing_formals
        _storage = storage ?? const FlutterSecureStorage();
 
   @override
@@ -44,19 +45,21 @@ class SecureKeyStore implements KeyStore {
 ///   syncs automatically to all devices signed into the same Apple ID.
 ///   Note: Apple requires `first_unlock` accessibility for synchronizable items
 ///   (`unlocked` cannot sync). This is the most restrictive level that works.
-/// - **Android:** encrypted secure storage with Auto Backup. The seed syncs to
-///   the user's Google account and restores on new devices.
-/// - **Windows/Linux/Web:** falls back to local-only (no cross-device sync).
+/// - **Android (API 34+):** Credential Manager API. The seed is stored as a
+///   custom credential in Google Password Manager, which syncs E2E-encrypted
+///   across all the user's Android devices (and Chrome on desktop).
+/// - **Android (<34) / Windows/Linux/Web:** falls back to null (no sync).
+///   The user enters their 24-word phrase on new devices.
 ///
 /// This is separate from the device-only [SecureKeyStore] used for the device
 /// subkey. The synced store holds the **root seed** so enrolling a new device
 /// is automatic (no phrase entry needed) — the phrase remains as disaster recovery.
 class SyncedKeyStore implements KeyStore {
   static const _key = 'hearth.root.synced';
+  static const _channel = MethodChannel('hearth/credentials');
 
-  // Stored as a static field (not a getter) so the same instance + options are
-  // used for both reads and writes — prevents option mismatch bugs.
-  static final FlutterSecureStorage _storage = () {
+  // Apple iCloud Keychain storage (iOS/macOS only).
+  static final FlutterSecureStorage? _appleStorage = () {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       return const FlutterSecureStorage(
         iOptions: IOSOptions(
@@ -73,36 +76,77 @@ class SyncedKeyStore implements KeyStore {
         ),
       );
     }
-    return const FlutterSecureStorage();
+    return null;
   }();
 
+  static bool get _isAndroid => defaultTargetPlatform == TargetPlatform.android;
+  static bool get _isApple =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.macOS;
+
   @override
-  Future<void> writeSeed(Uint8List seed) =>
-      _storage.write(key: _key, value: base64Encode(seed));
+  Future<void> writeSeed(Uint8List seed) async {
+    if (_isApple && _appleStorage != null) {
+      await _appleStorage!.write(key: _key, value: base64Encode(seed));
+    } else if (_isAndroid) {
+      try {
+        await _channel.invokeMethod('write', {'seed': base64Encode(seed)});
+      } on PlatformException {
+        // API <34 or user declined — not critical, phrase is the fallback.
+      }
+    }
+  }
 
   @override
   Future<Uint8List?> readSeed() async {
+    if (_isApple && _appleStorage != null) {
+      return _readApple();
+    } else if (_isAndroid) {
+      return _readAndroid();
+    }
+    return null;
+  }
+
+  Future<Uint8List?> _readApple() async {
     try {
-      final value = await _storage.read(key: _key);
-      if (value == null) return null; // not present
+      final value = await _appleStorage!.read(key: _key);
+      if (value == null) return null;
       return Uint8List.fromList(base64Decode(value));
     } on FormatException {
-      // Value exists but is corrupted (invalid base64 from a garbled sync).
-      // Delete the corrupt entry so it doesn't block future syncs.
       try {
-        await _storage.delete(key: _key);
+        await _appleStorage!.delete(key: _key);
       } catch (_) {}
       return null;
     } catch (_) {
-      // Platform doesn't support synced storage or keychain unavailable.
+      return null;
+    }
+  }
+
+  Future<Uint8List?> _readAndroid() async {
+    try {
+      final result = await _channel.invokeMethod<String?>('read');
+      if (result == null) return null;
+      return Uint8List.fromList(base64Decode(result));
+    } on PlatformException {
+      // API <34 or credential manager unavailable.
+      return null;
+    } on FormatException {
       return null;
     }
   }
 
   @override
   Future<void> deleteSeed() async {
-    try {
-      await _storage.delete(key: _key);
-    } catch (_) {}
+    if (_isApple && _appleStorage != null) {
+      try {
+        await _appleStorage!.delete(key: _key);
+      } catch (_) {}
+    } else if (_isAndroid) {
+      try {
+        await _channel.invokeMethod('delete');
+      } on PlatformException {
+        // Best effort.
+      }
+    }
   }
 }

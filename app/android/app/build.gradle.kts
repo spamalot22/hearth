@@ -75,6 +75,13 @@ android {
 dependencies {
     // Required by flutter_local_notifications when core library desugaring is on.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
+    // Credential Manager — stores the root seed in Google Password Manager so it
+    // syncs across Android devices (API 34+). The play-services-auth provider is
+    // needed on devices without a system Credential Manager implementation.
+    implementation("androidx.credentials:credentials:1.5.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.5.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
 
 kotlin {

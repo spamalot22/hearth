@@ -3,24 +3,173 @@ package com.hearth.app
 import android.app.DownloadManager
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.util.Base64
+import androidx.credentials.CreateCustomCredentialRequest
+import androidx.credentials.CreateCredentialRequest
+import androidx.credentials.CredentialManager
+import androidx.credentials.CustomCredential
+import androidx.credentials.GetCredentialRequest
+import androidx.credentials.GetCustomCredentialOption
+import androidx.credentials.exceptions.CreateCredentialException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import android.os.Bundle
 
 /**
- * Bridges Android's system [DownloadManager] to Dart so app updates download in
- * a system process that survives the app being backgrounded, screen-locked, or
- * closed (and resumes across connectivity drops). Dart enqueues the APK, polls
- * status, then verifies its SHA-256 against the signed manifest before install.
+ * Platform channels for native Android features:
+ * - `hearth/downloader`: system DownloadManager for APK updates
+ * - `hearth/credentials`: Credential Manager API for cross-device identity sync
  */
 class MainActivity : FlutterActivity() {
-    private val channelName = "hearth/downloader"
+    companion object {
+        /** Custom credential type scoped to this app. */
+        private const val CREDENTIAL_TYPE = "com.hearth.app/identity"
+
+        /** Bundle key for the base64-encoded seed inside the credential data. */
+        private const val KEY_SEED = "seed"
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        setupDownloaderChannel(flutterEngine)
+        setupCredentialChannel(flutterEngine)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Credential Manager — sync root seed via Google Password Manager
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun setupCredentialChannel(flutterEngine: FlutterEngine) {
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hearth/credentials")
+            .setMethodCallHandler { call, result ->
+                // Credential Manager requires API 34+. On older devices, report
+                // unsupported and let Dart fall through to the phrase.
+                if (Build.VERSION.SDK_INT < 34) {
+                    result.error("unsupported", "Credential Manager requires API 34+", null)
+                    return@setMethodCallHandler
+                }
+
+                val credentialManager = CredentialManager.create(this)
+
+                when (call.method) {
+                    "write" -> {
+                        val seedBase64 = call.argument<String>("seed")
+                        if (seedBase64 == null) {
+                            result.error("args", "seed required", null)
+                            return@setMethodCallHandler
+                        }
+                        // Build the credential data bundle.
+                        val credentialData = Bundle().apply {
+                            putString(KEY_SEED, seedBase64)
+                        }
+                        val candidateQueryData = Bundle()
+
+                        val request = CreateCustomCredentialRequest(
+                            type = CREDENTIAL_TYPE,
+                            credentialData = credentialData,
+                            candidateQueryData = candidateQueryData,
+                            isSystemProviderRequired = false,
+                            displayInfo = CreateCredentialRequest.DisplayInfo("Hearth Identity"),
+                            isAutoSelectAllowed = true,
+                            origin = null,
+                            preferImmediatelyAvailableCredentials = true,
+                        )
+
+                        CoroutineScope(Dispatchers.Main).launch {
+                            try {
+                                credentialManager.createCredential(this@MainActivity, request)
+                                result.success(true)
+                            } catch (e: CreateCredentialException) {
+                                result.error(
+                                    "create_failed",
+                                    e.message ?: "Failed to save credential",
+                                    e.type,
+                                )
+                            }
+                        }
+                    }
+
+                    "read" -> {
+                        val option = GetCustomCredentialOption(
+                            type = CREDENTIAL_TYPE,
+                            requestData = Bundle(),
+                            candidateQueryData = Bundle(),
+                            isSystemProviderRequired = false,
+                            isAutoSelectAllowed = true,
+                        )
+
+                        val request = GetCredentialRequest(
+                            listOf(option),
+                            preferImmediatelyAvailableCredentials = true,
+                        )
+
+                        CoroutineScope(Dispatchers.Main).launch {
+                            try {
+                                val response = credentialManager.getCredential(
+                                    this@MainActivity,
+                                    request,
+                                )
+                                val credential = response.credential
+                                if (credential is CustomCredential &&
+                                    credential.type == CREDENTIAL_TYPE
+                                ) {
+                                    val seedBase64 = credential.data.getString(KEY_SEED)
+                                    if (seedBase64 != null) {
+                                        result.success(seedBase64)
+                                    } else {
+                                        result.success(null)
+                                    }
+                                } else {
+                                    result.success(null)
+                                }
+                            } catch (e: NoCredentialException) {
+                                // No credential saved — normal on first device.
+                                result.success(null)
+                            } catch (e: GetCredentialException) {
+                                // User cancelled or other failure — treat as absent.
+                                result.success(null)
+                            }
+                        }
+                    }
+
+                    "delete" -> {
+                        // Credential Manager doesn't have a direct delete API for
+                        // custom credentials. We clear it by signalling the provider.
+                        // For now, this is best-effort; the user can also manage
+                        // credentials in Google Password Manager settings.
+                        CoroutineScope(Dispatchers.Main).launch {
+                            try {
+                                credentialManager.clearCredentialState(
+                                    androidx.credentials.ClearCredentialStateRequest()
+                                )
+                                result.success(true)
+                            } catch (e: Exception) {
+                                // Best effort — don't fail the Dart side.
+                                result.success(true)
+                            }
+                        }
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DownloadManager — system-managed APK downloads for auto-update
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private fun setupDownloaderChannel(flutterEngine: FlutterEngine) {
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hearth/downloader")
             .setMethodCallHandler { call, result ->
                 val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
                 when (call.method) {
@@ -32,8 +181,6 @@ class MainActivity : FlutterActivity() {
                             return@setMethodCallHandler
                         }
                         try {
-                            // Overwrite any previous download of the same name so
-                            // the app-private dir doesn't accumulate stale APKs.
                             File(
                                 getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS),
                                 fileName,
@@ -98,7 +245,7 @@ class MainActivity : FlutterActivity() {
                                     ),
                                 )
                             } else {
-                                result.success(null) // not found (cleared)
+                                result.success(null)
                             }
                         }
                     }
