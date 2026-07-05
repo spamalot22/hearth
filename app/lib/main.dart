@@ -736,16 +736,15 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       final synced = SyncedKeyStore();
       final seed = await synced.readSeedInteractive();
       if (seed == null || seed.length != 32) {
-        if (mounted) {
-          setState(() => _error = 'No saved identity found in Google');
-        }
+        // Don't show an error — user may have just dismissed the picker.
         return;
       }
       final root = await Identity.fromSeed(seed);
       if (!mounted) return;
       final profile = await _showProfileSetup();
       if (profile == null || !mounted) return;
-      await _enroll(root, name: profile.name, sync: profile.sync);
+      // sync: false — the seed is already in Google, no need to re-write it.
+      await _enroll(root, name: profile.name, sync: false);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {

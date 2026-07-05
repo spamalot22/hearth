@@ -143,8 +143,14 @@ class MainActivity : FlutterActivity() {
                                 // No credential saved — normal on first device.
                                 result.success(null)
                             } catch (e: GetCredentialException) {
-                                // User cancelled or other failure — treat as absent.
-                                result.success(null)
+                                // User cancelled or provider error. Return a
+                                // distinct marker so Dart can distinguish
+                                // "nothing found" from "user dismissed".
+                                if (e.type == "android.credentials.GetCredentialException.TYPE_USER_CANCELED") {
+                                    result.success("cancelled")
+                                } else {
+                                    result.success(null)
+                                }
                             } catch (e: IllegalStateException) {
                                 // Activity destroyed mid-operation.
                                 result.success(null)

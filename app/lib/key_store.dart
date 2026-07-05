@@ -127,7 +127,7 @@ class SyncedKeyStore implements KeyStore {
       final result = await _channel.invokeMethod<String?>('read', {
         'silent': silent,
       });
-      if (result == null) return null;
+      if (result == null || result == 'cancelled') return null;
       return Uint8List.fromList(base64Decode(result));
     } on PlatformException {
       // API <34 or credential manager unavailable.
