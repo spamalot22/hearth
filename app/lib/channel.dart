@@ -168,6 +168,8 @@ class ChannelSession {
   final RelayTransport? _relayCourier;
   final Map<String, Content> _content = <String, Content>{};
   static const int _maxContentCache = 5000;
+  bool _refreshing = false;
+  bool _refreshDirty = false;
   final Map<String, Uint8List> _blobs = {};
   final Set<String> _requested = {};
   // Device pubkey hex → root pubkey hex, populated from device-signed messages.
@@ -351,6 +353,24 @@ class ChannelSession {
   /// (sticker/sound) they reference is fetched into the local cache, and
   /// rebuilds the edit/tombstone revision index.
   Future<void> refreshContent() async {
+    // Prevent overlapping calls from clearing each other's revision index.
+    // If a call arrives while refreshing, mark dirty and re-run after.
+    if (_refreshing) {
+      _refreshDirty = true;
+      return;
+    }
+    _refreshing = true;
+    try {
+      do {
+        _refreshDirty = false;
+        await _refreshContentInner();
+      } while (_refreshDirty);
+    } finally {
+      _refreshing = false;
+    }
+  }
+
+  Future<void> _refreshContentInner() async {
     _edits.clear();
     _deleted.clear();
     for (final message in repository.ordered()) {

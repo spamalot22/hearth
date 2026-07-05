@@ -7255,10 +7255,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final content = session.contentOf(message);
     Widget? quoteWidget;
     if (content.replyTo != null) {
-      final original = session.repository.ordered().cast<Message?>().firstWhere(
-        (m) => m!.idHex == content.replyTo,
-        orElse: () => null,
-      );
+      final original = session.repository.getByHex(content.replyTo!);
       if (original != null) {
         final origText = _contentPreview(session, original);
         final origName = _displayName(original.author);
