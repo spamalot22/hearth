@@ -4,8 +4,9 @@ import android.app.DownloadManager
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
-import android.util.Base64
+import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CreateCustomCredentialRequest
 import androidx.credentials.CreateCredentialRequest
 import androidx.credentials.CredentialManager
@@ -21,8 +22,9 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import android.os.Bundle
 
 /**
  * Platform channels for native Android features:
@@ -38,10 +40,21 @@ class MainActivity : FlutterActivity() {
         private const val KEY_SEED = "seed"
     }
 
+    /** Activity-scoped coroutine scope, cancelled in onDestroy. */
+    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    /** Credential Manager singleton (lazy — only created when first used). */
+    private val credentialManager by lazy { CredentialManager.create(this) }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         setupDownloaderChannel(flutterEngine)
         setupCredentialChannel(flutterEngine)
+    }
+
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -58,8 +71,6 @@ class MainActivity : FlutterActivity() {
                     return@setMethodCallHandler
                 }
 
-                val credentialManager = CredentialManager.create(this)
-
                 when (call.method) {
                     "write" -> {
                         val seedBase64 = call.argument<String>("seed")
@@ -67,16 +78,14 @@ class MainActivity : FlutterActivity() {
                             result.error("args", "seed required", null)
                             return@setMethodCallHandler
                         }
-                        // Build the credential data bundle.
                         val credentialData = Bundle().apply {
                             putString(KEY_SEED, seedBase64)
                         }
-                        val candidateQueryData = Bundle()
 
                         val request = CreateCustomCredentialRequest(
                             type = CREDENTIAL_TYPE,
                             credentialData = credentialData,
-                            candidateQueryData = candidateQueryData,
+                            candidateQueryData = Bundle(),
                             isSystemProviderRequired = false,
                             displayInfo = CreateCredentialRequest.DisplayInfo("Hearth Identity"),
                             isAutoSelectAllowed = true,
@@ -84,7 +93,7 @@ class MainActivity : FlutterActivity() {
                             preferImmediatelyAvailableCredentials = true,
                         )
 
-                        CoroutineScope(Dispatchers.Main).launch {
+                        scope.launch {
                             try {
                                 credentialManager.createCredential(this@MainActivity, request)
                                 result.success(true)
@@ -94,6 +103,9 @@ class MainActivity : FlutterActivity() {
                                     e.message ?: "Failed to save credential",
                                     e.type,
                                 )
+                            } catch (e: IllegalStateException) {
+                                // Activity destroyed mid-operation.
+                                result.error("cancelled", "Activity destroyed", null)
                             }
                         }
                     }
@@ -112,7 +124,7 @@ class MainActivity : FlutterActivity() {
                             preferImmediatelyAvailableCredentials = true,
                         )
 
-                        CoroutineScope(Dispatchers.Main).launch {
+                        scope.launch {
                             try {
                                 val response = credentialManager.getCredential(
                                     this@MainActivity,
@@ -122,12 +134,7 @@ class MainActivity : FlutterActivity() {
                                 if (credential is CustomCredential &&
                                     credential.type == CREDENTIAL_TYPE
                                 ) {
-                                    val seedBase64 = credential.data.getString(KEY_SEED)
-                                    if (seedBase64 != null) {
-                                        result.success(seedBase64)
-                                    } else {
-                                        result.success(null)
-                                    }
+                                    result.success(credential.data.getString(KEY_SEED))
                                 } else {
                                     result.success(null)
                                 }
@@ -137,19 +144,24 @@ class MainActivity : FlutterActivity() {
                             } catch (e: GetCredentialException) {
                                 // User cancelled or other failure — treat as absent.
                                 result.success(null)
+                            } catch (e: IllegalStateException) {
+                                // Activity destroyed mid-operation.
+                                result.success(null)
                             }
                         }
                     }
 
                     "delete" -> {
-                        // Credential Manager doesn't have a direct delete API for
-                        // custom credentials. We clear it by signalling the provider.
-                        // For now, this is best-effort; the user can also manage
-                        // credentials in Google Password Manager settings.
-                        CoroutineScope(Dispatchers.Main).launch {
+                        // Note: clearCredentialState() signals the provider to stop
+                        // offering this app's credentials, but does NOT delete the
+                        // stored credential from Google Password Manager. The user
+                        // can remove it manually at passwords.google.com. This is a
+                        // platform limitation — there's no programmatic delete API
+                        // for custom credentials.
+                        scope.launch {
                             try {
                                 credentialManager.clearCredentialState(
-                                    androidx.credentials.ClearCredentialStateRequest()
+                                    ClearCredentialStateRequest()
                                 )
                                 result.success(true)
                             } catch (e: Exception) {
