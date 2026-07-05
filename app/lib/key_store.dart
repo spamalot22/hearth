@@ -90,7 +90,18 @@ class SyncedKeyStore implements KeyStore {
       await _appleStorage!.write(key: _key, value: base64Encode(seed));
     } else if (_isAndroid) {
       try {
-        await _channel.invokeMethod('write', {'seed': base64Encode(seed)});
+        // Include a fingerprint in the label so multiple credentials (from
+        // reinstalls) are distinguishable in the Google Password Manager picker.
+        final fingerprint = seed.length >= 4
+            ? seed
+                  .sublist(0, 4)
+                  .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                  .join()
+            : '';
+        await _channel.invokeMethod('write', {
+          'seed': base64Encode(seed),
+          'label': 'Hearth #$fingerprint',
+        });
       } on PlatformException {
         // API <34 or user declined — not critical, phrase is the fallback.
       }

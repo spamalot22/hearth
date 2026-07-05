@@ -74,6 +74,7 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "write" -> {
                         val seedBase64 = call.argument<String>("seed")
+                        val label = call.argument<String>("label") ?: "Hearth Identity"
                         if (seedBase64 == null) {
                             result.error("args", "seed required", null)
                             return@setMethodCallHandler
@@ -87,7 +88,7 @@ class MainActivity : FlutterActivity() {
                             credentialData = credentialData,
                             candidateQueryData = Bundle(),
                             isSystemProviderRequired = false,
-                            displayInfo = CreateCredentialRequest.DisplayInfo("Hearth Identity"),
+                            displayInfo = CreateCredentialRequest.DisplayInfo(label),
                             isAutoSelectAllowed = true,
                             origin = null,
                             preferImmediatelyAvailableCredentials = true,
