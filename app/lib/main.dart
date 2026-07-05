@@ -6,6 +6,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:animations/animations.dart';
+import 'package:app_links/app_links.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
@@ -1385,6 +1386,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(initBackgroundFetch());
     // Ask for the Android 13+ notification grant now the UI is up.
     if (widget.autoPoll) unawaited(requestAndroidNotificationPermission());
+    // Deep links: handle hearth: and hearth-contact: URLs from external QR
+    // scanners or shared links that open the app.
+    if (widget.autoPoll) _initDeepLinks();
     unawaited(_saveBackgroundState());
   }
 
@@ -3298,6 +3302,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _linkSub?.cancel();
     _voicePresenceTimer?.cancel();
     _updateCheckTimer?.cancel();
     unawaited(_channels?.close());
@@ -3913,6 +3918,81 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(_saveBackgroundState());
   }
 
+  // ─── Deep Links ───────────────────────────────────────────────────────────
+
+  StreamSubscription<Uri>? _linkSub;
+
+  /// Listens for incoming deep links (hearth: / hearth-contact: URLs from
+  /// external QR scanners or shared links).
+  void _initDeepLinks() {
+    final appLinks = AppLinks();
+    // Handle the link that launched the app (cold start).
+    appLinks.getInitialLink().then((uri) {
+      if (uri != null) _handleDeepLink(uri);
+    });
+    // Handle links while the app is already running (warm start).
+    _linkSub = appLinks.uriLinkStream.listen(_handleDeepLink);
+  }
+
+  void _handleDeepLink(Uri uri) {
+    // Reconstruct the raw code: "hearth:<payload>" or "hearth-contact:<payload>"
+    // The URI scheme is the prefix, the rest is the path/opaque part.
+    final raw = uri.toString();
+    if (raw.isNotEmpty) {
+      unawaited(_handleInviteCode(raw));
+    }
+  }
+
+  /// Processes a raw invite or contact code string — shared between the
+  /// paste/scan UI and the deep link handler.
+  Future<void> _handleInviteCode(String code) async {
+    if (code.trim().isEmpty) return;
+    final card = ContactCard.decode(code.trim());
+    if (card != null) {
+      await _acceptContactCard(card);
+      return;
+    }
+    final parsed = GroupChannel.fromInvite(code.trim());
+    if (parsed == null) {
+      if (mounted) _setError('invalid invite or contact code');
+      return;
+    }
+    final channel = parsed.channel;
+    String? adoptedRelay;
+    final inviteRelay = parsed.relayUrl;
+    if (inviteRelay != null &&
+        inviteRelay != _relayUrl.toString() &&
+        _relayUrl.toString() == kRelayUrl.toString()) {
+      final relay = Uri.tryParse(inviteRelay);
+      if (relay != null && relay.hasScheme && relay.hasAuthority) {
+        await _settings?.setRelayUrl(inviteRelay);
+        _relayUrl = relay;
+        adoptedRelay = inviteRelay;
+      }
+    }
+    await _registry?.save(channel);
+    if (mounted) setState(() => _groups[channel.id] = channel);
+    final inviter = parsed.inviterPubkey;
+    if (inviter != null &&
+        inviter != widget.identity.publicKeyHex &&
+        _contacts?.nameFor(inviter) == null) {
+      await _contacts?.setName(
+        inviter,
+        parsed.inviterName ??
+            'hearth#${_fingerprint(Uint8List.fromList(hex.decode(inviter)))}',
+      );
+    }
+    await _channels?.openGroup(channel.id, channel.key);
+    if (mounted) {
+      setState(() {});
+      _setError(
+        adoptedRelay != null
+            ? 'Joined ${channel.name}! (relay set to $adoptedRelay)'
+            : 'Joined ${channel.name}!',
+      );
+    }
+  }
+
   /// Joins a channel from a pasted invite code.
   Future<void> _joinViaInvite() async {
     String? code;
@@ -3969,73 +4049,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
     if (code == null || code.trim().isEmpty) return;
-    // A contact card and a channel invite share this scan/paste entry — dispatch
-    // by prefix. A card starts a person-to-person DM rather than joining a group.
-    final card = ContactCard.decode(code.trim());
-    if (card != null) {
-      await _acceptContactCard(card);
-      return;
-    }
-    final parsed = GroupChannel.fromInvite(code.trim());
-    if (parsed == null) {
-      if (mounted) _setError('invalid invite or contact code');
-      return;
-    }
-    final channel = parsed.channel;
-    // Adopt the invite's relay if we're still on the bundled default, so a new
-    // joiner never types a URL. (Won't override a relay you've set yourself.)
-    String? adoptedRelay;
-    final inviteRelay = parsed.relayUrl;
-    if (inviteRelay != null &&
-        inviteRelay != _relayUrl.toString() &&
-        _relayUrl.toString() == kRelayUrl.toString()) {
-      final relay = Uri.tryParse(inviteRelay);
-      if (relay != null && relay.hasScheme && relay.hasAuthority) {
-        await _settings?.setRelayUrl(inviteRelay);
-        _relayUrl = relay;
-        adoptedRelay = inviteRelay;
-      }
-    }
-    await _registry?.save(channel);
-    if (mounted) setState(() => _groups[channel.id] = channel);
-    // Mandatorily add the inviter as a contact — guarantees you have at least one
-    // edge into the channel (the invite-tree stays connected; they're your
-    // cold-start bootstrap peer).
-    final inviter = parsed.inviterPubkey;
-    if (inviter != null &&
-        inviter != widget.identity.publicKeyHex &&
-        _contacts?.nameFor(inviter) == null) {
-      await _contacts?.setName(
-        inviter,
-        parsed.inviterName ??
-            'hearth#${_fingerprint(Uint8List.fromList(hex.decode(inviter)))}',
-      );
-    }
-    await _channels?.openGroup(channel.id, channel.key);
-    // Once history has had a moment to sync, offer to add known members.
-    Future.delayed(const Duration(seconds: 3), () {
-      final active = _channels?.active;
-      if (mounted && active != null && active.channelId == channel.id) {
-        unawaited(_addMembers(active, auto: true));
-      }
-    });
-    if (adoptedRelay != null && mounted) {
-      await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Relay set from invite'),
-          content: Text(
-            'Restart Hearth to connect to this channel via\n$adoptedRelay',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('OK'),
-            ),
-          ],
-        ),
-      );
-    }
+    await _handleInviteCode(code);
   }
 
   /// Shows the invite code for a group channel, with a copy button.

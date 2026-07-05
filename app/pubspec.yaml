@@ -75,6 +75,7 @@ dependencies:
   background_fetch: ^1.7.0
   animations: ^2.2.0
   record: ^7.1.1
+  app_links: ^7.2.0
 
 dev_dependencies:
   flutter_test:
