@@ -2555,15 +2555,49 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
-    // On mobile, use a full-screen page. On desktop/web, use a centered dialog.
+    // On mobile, use a full-screen bottom sheet. On desktop/web, use a dialog.
     final usePage =
         !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS);
     if (usePage) {
-      await Navigator.push<void>(
-        context,
-        MaterialPageRoute(builder: (_) => _buildSettingsPage()),
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (context) => DefaultTabController(
+          length: 6,
+          child: Scaffold(
+            appBar: AppBar(
+              title: const Text('Settings'),
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.pop(context),
+              ),
+              bottom: const TabBar(
+                isScrollable: true,
+                tabs: [
+                  Tab(text: 'Audio'),
+                  Tab(text: 'Identity'),
+                  Tab(text: 'Devices'),
+                  Tab(text: 'Network'),
+                  Tab(text: 'Privacy'),
+                  Tab(text: 'AI'),
+                ],
+              ),
+            ),
+            body: TabBarView(
+              children: [
+                _audioTab(),
+                _identityTab(),
+                _devicesTab(),
+                _networkTab(),
+                _privacyTab(),
+                _aiTab(),
+              ],
+            ),
+          ),
+        ),
       );
       return;
     }
@@ -2577,39 +2611,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             maxHeight: MediaQuery.of(context).size.height * 0.8,
           ),
           child: _buildSettingsBody(showClose: true),
-        ),
-      ),
-    );
-  }
-
-  /// Full-screen settings page for mobile.
-  Widget _buildSettingsPage() {
-    return DefaultTabController(
-      length: 6,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Settings'),
-          bottom: const TabBar(
-            isScrollable: true,
-            tabs: [
-              Tab(text: 'Audio'),
-              Tab(text: 'Identity'),
-              Tab(text: 'Devices'),
-              Tab(text: 'Network'),
-              Tab(text: 'Privacy'),
-              Tab(text: 'AI'),
-            ],
-          ),
-        ),
-        body: TabBarView(
-          children: [
-            _audioTab(),
-            _identityTab(),
-            _devicesTab(),
-            _networkTab(),
-            _privacyTab(),
-            _aiTab(),
-          ],
         ),
       ),
     );
