@@ -728,6 +728,31 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
     }
   }
 
+  /// Restore identity from Google Password Manager (Android Credential Manager).
+  /// Shows the system credential picker — the user taps their saved identity.
+  Future<void> _restoreFromGoogle() async {
+    setState(() => _working = true);
+    try {
+      final synced = SyncedKeyStore();
+      final seed = await synced.readSeedInteractive();
+      if (seed == null || seed.length != 32) {
+        if (mounted) {
+          setState(() => _error = 'No saved identity found in Google');
+        }
+        return;
+      }
+      final root = await Identity.fromSeed(seed);
+      if (!mounted) return;
+      final profile = await _showProfileSetup();
+      if (profile == null || !mounted) return;
+      await _enroll(root, name: profile.name, sync: profile.sync);
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _working = false);
+    }
+  }
+
   /// Shows the profile setup dialog. Returns null if cancelled.
   Future<_ProfileSetup?> _showProfileSetup() {
     final nameCtrl = TextEditingController();
@@ -905,6 +930,14 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
                     icon: const Icon(Icons.add),
                     label: const Text('Create new identity'),
                   ),
+                  if (defaultTargetPlatform == TargetPlatform.android) ...[
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _working ? null : _restoreFromGoogle,
+                      icon: const Icon(Icons.cloud_download_outlined),
+                      label: const Text('Restore from Google'),
+                    ),
+                  ],
                   const SizedBox(height: 24),
                   const Divider(),
                   const SizedBox(height: 16),

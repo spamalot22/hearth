@@ -122,9 +122,11 @@ class SyncedKeyStore implements KeyStore {
     }
   }
 
-  Future<Uint8List?> _readAndroid() async {
+  Future<Uint8List?> _readAndroid({bool silent = true}) async {
     try {
-      final result = await _channel.invokeMethod<String?>('read');
+      final result = await _channel.invokeMethod<String?>('read', {
+        'silent': silent,
+      });
       if (result == null) return null;
       return Uint8List.fromList(base64Decode(result));
     } on PlatformException {
@@ -133,6 +135,18 @@ class SyncedKeyStore implements KeyStore {
     } on FormatException {
       return null;
     }
+  }
+
+  /// Attempts to read the synced seed with user interaction (shows the
+  /// Credential Manager bottom sheet on Android). Use this from a button tap
+  /// on the enrollment screen — not from boot, where no UI is visible.
+  Future<Uint8List?> readSeedInteractive() async {
+    if (_isApple && _appleStorage != null) {
+      return _readApple();
+    } else if (_isAndroid) {
+      return _readAndroid(silent: false);
+    }
+    return null;
   }
 
   @override

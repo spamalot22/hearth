@@ -111,6 +111,7 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "read" -> {
+                        val silent = call.argument<Boolean>("silent") ?: false
                         val option = GetCustomCredentialOption(
                             type = CREDENTIAL_TYPE,
                             requestData = Bundle(),
@@ -121,7 +122,7 @@ class MainActivity : FlutterActivity() {
 
                         val request = GetCredentialRequest(
                             listOf(option),
-                            preferImmediatelyAvailableCredentials = true,
+                            preferImmediatelyAvailableCredentials = silent,
                         )
 
                         scope.launch {
