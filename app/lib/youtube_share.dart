@@ -14,10 +14,10 @@ String? parseYoutubeId(String input) {
   } catch (_) {
     return null;
   }
-  if (uri.host.contains('youtu.be')) {
+  if (_isYoutubeHost(uri.host, 'youtu.be')) {
     return uri.pathSegments.isEmpty ? null : _validId(uri.pathSegments.first);
   }
-  if (uri.host.contains('youtube.com')) {
+  if (_isYoutubeHost(uri.host, 'youtube.com')) {
     final v = uri.queryParameters['v'];
     if (v != null) return _validId(v);
     final segs = uri.pathSegments;
@@ -31,6 +31,9 @@ String? parseYoutubeId(String input) {
 
 String? _validId(String s) =>
     RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(s) ? s : null;
+
+bool _isYoutubeHost(String host, String domain) =>
+    host == domain || host.endsWith('.$domain');
 
 /// Asks for a YouTube URL/id and returns the raw text (null if cancelled).
 /// The caller parses it with [parseYoutubeId] so it can show its own error.
@@ -85,31 +88,41 @@ class WatchPartyController {
     onReady?.call();
   }
 
-  Future<void> load(String videoId, {double start = 0}) async {
+  Future<void> load(
+    String videoId, {
+    double start = 0,
+    bool autoplay = true,
+  }) async {
     // Defence-in-depth: only ever interpolate a validated id / finite number
     // into JS. Callers validate too, but never trust a value reaching here.
     if (!RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(videoId)) return;
-    final s = start.isFinite && start >= 0 ? start : 0.0;
-    await _web?.evaluateJavascript(source: 'ytLoad("$videoId", $s);');
+    await _web?.evaluateJavascript(
+      source: 'ytLoad("$videoId", ${_jsSeconds(start)}, $autoplay);',
+    );
   }
 
   Future<void> play() async => _web?.evaluateJavascript(source: 'ytPlay();');
   Future<void> pause() async => _web?.evaluateJavascript(source: 'ytPause();');
   Future<void> seek(double seconds) async =>
-      _web?.evaluateJavascript(source: 'ytSeek($seconds);');
+      _web?.evaluateJavascript(source: 'ytSeek(${_jsSeconds(seconds)});');
   Future<void> setMuted(bool muted) async =>
       _web?.evaluateJavascript(source: 'ytMute($muted);');
 
   Future<double> currentTime() async {
     final r = await _web?.evaluateJavascript(source: 'ytTime();');
-    return (r as num?)?.toDouble() ?? 0;
+    return _safeSeconds((r as num?)?.toDouble());
   }
 
   Future<double> duration() async {
     final r = await _web?.evaluateJavascript(source: 'ytDuration();');
-    return (r as num?)?.toDouble() ?? 0;
+    return _safeSeconds((r as num?)?.toDouble());
   }
 }
+
+double _safeSeconds(double? seconds) =>
+    seconds != null && seconds.isFinite && seconds >= 0 ? seconds : 0.0;
+
+String _jsSeconds(double seconds) => _safeSeconds(seconds).toString();
 
 // A minimal page hosting the official IFrame Player API with native controls
 // hidden (controls:0) — playback is driven entirely through the JS bridge, so
@@ -123,24 +136,45 @@ const String _kPlayerHtml = '''
 <div id="p"></div>
 <script>
 var player=null;
+var desiredPlaying=null;
+var desiredMuted=false;
+function seconds(v){ v=Number(v); return Number.isFinite(v)&&v>=0?v:0; }
 function post(ev,data){ if(window.flutter_inappwebview){ window.flutter_inappwebview.callHandler('yt', ev, data||{}); } }
+function applyMute(){ if(!player) return; if(desiredMuted){ if(player.mute)player.mute(); }else{ if(player.unMute)player.unMute(); } }
 function onYouTubeIframeAPIReady(){
   player = new YT.Player('p', {
     width:'100%', height:'100%',
     playerVars:{controls:0, rel:0, modestbranding:1, playsinline:1, disablekb:1, fs:0, iv_load_policy:3},
     events:{
       'onReady':function(){ post('ready',{}); },
-      'onStateChange':function(e){ post('state',{state:e.data, time:(player&&player.getCurrentTime)?player.getCurrentTime():0}); }
+      'onStateChange':function(e){
+        var state=e.data;
+        if(state===5 && desiredPlaying===true && player&&player.playVideo){ setTimeout(function(){ if(desiredPlaying===true) player.playVideo(); },0); }
+        if(state===1 && desiredPlaying===false && player&&player.pauseVideo){ setTimeout(function(){ if(desiredPlaying===false) player.pauseVideo(); },0); state=2; }
+        post('state',{state:state, time:(player&&player.getCurrentTime)?seconds(player.getCurrentTime()):0});
+      }
     }
   });
 }
-function ytLoad(id,start){ if(player&&player.loadVideoById){ player.loadVideoById({videoId:id,startSeconds:start||0}); } }
-function ytPlay(){ if(player&&player.playVideo) player.playVideo(); }
-function ytPause(){ if(player&&player.pauseVideo) player.pauseVideo(); }
-function ytSeek(t){ if(player&&player.seekTo) player.seekTo(t,true); }
-function ytMute(m){ if(player){ if(m){if(player.mute)player.mute();}else{if(player.unMute)player.unMute();} } }
-function ytTime(){ return (player&&player.getCurrentTime)?player.getCurrentTime():0; }
-function ytDuration(){ return (player&&player.getDuration)?player.getDuration():0; }
+function ytLoad(id,start,autoplay){
+  if(!player) return;
+  desiredPlaying=!!autoplay;
+  var s=seconds(start);
+  if(desiredPlaying && player.loadVideoById){
+    player.loadVideoById({videoId:id,startSeconds:s});
+  }else if(!desiredPlaying && player.cueVideoById){
+    player.cueVideoById({videoId:id,startSeconds:s});
+  }else if(player.loadVideoById){
+    player.loadVideoById({videoId:id,startSeconds:s});
+  }
+  applyMute();
+}
+function ytPlay(){ desiredPlaying=true; if(player&&player.playVideo) player.playVideo(); }
+function ytPause(){ desiredPlaying=false; if(player&&player.pauseVideo) player.pauseVideo(); }
+function ytSeek(t){ if(player&&player.seekTo) player.seekTo(seconds(t),true); }
+function ytMute(m){ desiredMuted=!!m; applyMute(); }
+function ytTime(){ return (player&&player.getCurrentTime)?seconds(player.getCurrentTime()):0; }
+function ytDuration(){ return (player&&player.getDuration)?seconds(player.getDuration()):0; }
 (function(){ var t=document.createElement('script'); t.src='https://www.youtube.com/iframe_api'; document.head.appendChild(t); })();
 </script>
 </body></html>
@@ -176,7 +210,17 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
     super.didUpdateWidget(old);
     if (!widget.controller.isReady) return;
     if (old.videoId != widget.videoId) {
-      widget.controller.load(widget.videoId, start: widget.startSeconds);
+      widget.controller.load(
+        widget.videoId,
+        start: widget.startSeconds,
+        autoplay: widget.startPlaying,
+      );
+    } else if (old.startPlaying != widget.startPlaying) {
+      if (widget.startPlaying) {
+        widget.controller.play();
+      } else {
+        widget.controller.pause();
+      }
     }
     if (old.muted != widget.muted) {
       widget.controller.setMuted(widget.muted);
@@ -227,13 +271,9 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
               widget.controller.load(
                 widget.videoId,
                 start: widget.startSeconds,
+                autoplay: widget.startPlaying,
               );
               widget.controller.setMuted(widget.muted);
-              if (widget.startPlaying) {
-                widget.controller.play();
-              } else {
-                widget.controller.pause();
-              }
             } else if (ev == 'state') {
               // YT states: 1 playing, 2 paused, 3 buffering. Treat buffering as
               // playing so a seek doesn't read as a pause and ripple to viewers.

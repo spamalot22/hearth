@@ -17,6 +17,7 @@ void main() {
 
     test('extracts from a youtu.be short link', () {
       expect(parseYoutubeId('https://youtu.be/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
+      expect(parseYoutubeId('https://m.youtu.be/dQw4w9WgXcQ'), 'dQw4w9WgXcQ');
     });
 
     test('extracts from /shorts/ and /embed/ paths', () {
@@ -33,6 +34,14 @@ void main() {
     test('rejects non-YouTube input and wrong-length ids', () {
       expect(parseYoutubeId('not a link'), isNull);
       expect(parseYoutubeId('https://example.com/watch?v=dQw4w9WgXcQ'), isNull);
+      expect(
+        parseYoutubeId('https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ'),
+        isNull,
+      );
+      expect(
+        parseYoutubeId('https://notyoutube.com/watch?v=dQw4w9WgXcQ'),
+        isNull,
+      );
       expect(parseYoutubeId('abc'), isNull);
     });
   });

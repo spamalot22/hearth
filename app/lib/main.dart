@@ -4644,10 +4644,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ) async {
     final c = _ytController;
     if (c == null || !c.isReady || _ytHidden) return;
-    if (!isNew) {
-      final cur = await c.currentTime();
-      if ((cur - position).abs() > 2.0) await c.seek(position);
+    if (isNew) {
+      await c.load(videoId, start: position, autoplay: playing);
+      return;
     }
+    final cur = await c.currentTime();
+    if ((cur - position).abs() > 2.0) await c.seek(position);
     if (playing) {
       await c.play();
     } else {
