@@ -34,7 +34,7 @@ jobs:
       - name: Install + test (backend)
         working-directory: backend
         run: |
-          pnpm install --frozen-lockfile || true
+          pnpm install --frozen-lockfile
           pnpm rebuild esbuild
           pnpm typecheck
           pnpm test

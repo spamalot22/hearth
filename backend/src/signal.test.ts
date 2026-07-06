@@ -54,10 +54,14 @@ describe('signalling routes', () => {
     app: ReturnType<typeof createRelay>,
     path: string,
     body: unknown,
+    token?: string,
   ) {
     return app.request(path, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify(body),
     });
   }
@@ -74,17 +78,24 @@ describe('signalling routes', () => {
     const aliceToken = hub.issueToken(aliceHex, Date.now());
     const bobToken = hub.issueToken(bobHex, Date.now());
 
-    await postJson(app, '/signal', {
-      channel: 'general',
-      to: bobHex,
-      from: aliceHex,
-      kind: 'offer',
-      data: { sdp: 'x' },
-      token: aliceToken,
-    });
+    await postJson(
+      app,
+      '/signal',
+      {
+        channel: 'general',
+        to: bobHex,
+        from: aliceHex,
+        kind: 'offer',
+        data: { sdp: 'x' },
+      },
+      aliceToken,
+    );
 
     const sigRes = await app.request(
-      `/signal?channel=general&for=${bobHex}&since=0&token=${bobToken}`,
+      `/signal?channel=general&for=${bobHex}&since=0`,
+      {
+        headers: { authorization: `Bearer ${bobToken}` },
+      },
     );
     const sig = (await sigRes.json()) as {
       signals: { from: string; kind: string }[];
@@ -107,14 +118,18 @@ describe('signalling routes', () => {
     });
     expect(malformed.status).toBe(400);
 
-    const badKind = await postJson(app, '/signal', {
-      channel: 'general',
-      to: bobHex,
-      from: aliceHex,
-      kind: 'restart',
-      data: {},
-      token: aliceToken,
-    });
+    const badKind = await postJson(
+      app,
+      '/signal',
+      {
+        channel: 'general',
+        to: bobHex,
+        from: aliceHex,
+        kind: 'restart',
+        data: {},
+      },
+      aliceToken,
+    );
     expect(badKind.status).toBe(400);
   });
 });

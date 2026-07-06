@@ -32,7 +32,9 @@ describe('GIF proxy', () => {
   it('reports not-configured when the relay has no Giphy key', async () => {
     const app = createRelay();
     const token = await getToken(app);
-    const res = await app.request(`/gif/search?q=cat&token=${token}`);
+    const res = await app.request('/gif/search?q=cat', {
+      headers: { authorization: `Bearer ${token}` },
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ gifs: [], configured: false });
   });
@@ -41,7 +43,9 @@ describe('GIF proxy', () => {
     process.env.GIPHY_KEY = 'fake-key';
     const app = createRelay();
     const token = await getToken(app);
-    const res = await app.request(`/gif/search?q=&token=${token}`);
+    const res = await app.request('/gif/search?q=', {
+      headers: { authorization: `Bearer ${token}` },
+    });
     expect(await res.json()).toEqual({ gifs: [], configured: true });
   });
 });

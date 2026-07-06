@@ -24,6 +24,7 @@ services:
       FREESOUND_KEY: ${FREESOUND_KEY:-}
       # Auto-update: shared secret for POST /version (sign-release.ts pushes here).
       RELEASE_SECRET: ${RELEASE_SECRET:-}
+      RELEASE_PUBLIC_KEY: ${RELEASE_PUBLIC_KEY:-}
       GITHUB_REPO: ${GITHUB_REPO:-spamalot22/hearth}
     volumes:
       - relay-data:/app/data

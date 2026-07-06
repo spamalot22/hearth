@@ -306,9 +306,11 @@ class WebRtcMesh {
         'for': selfPubkeyHex,
         'since': '$_signalSince',
       };
-      if (_authToken != null) params['token'] = _authToken!;
+      final headers = <String, String>{};
+      if (_authToken != null) headers['Authorization'] = 'Bearer $_authToken';
       final res = await _client.get(
         _activeUrl.replace(path: '/signal', queryParameters: params),
+        headers: headers,
       );
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
@@ -498,14 +500,16 @@ class WebRtcMesh {
     try {
       await _client.post(
         _activeUrl.replace(path: '/signal'),
-        headers: const {'content-type': 'application/json'},
+        headers: {
+          'content-type': 'application/json',
+          if (_authToken != null) 'Authorization': 'Bearer $_authToken',
+        },
         body: jsonEncode({
           'channel': channel,
           'to': to,
           'from': selfPubkeyHex,
           'kind': kind,
           'data': signed,
-          if (_authToken != null) 'token': _authToken,
         }),
       );
     } catch (_) {

@@ -94,7 +94,7 @@ export function addTunnelRoutes(
     ) {
       return c.json({ error: 'invalid tunnel frame' }, 400);
     }
-    const token = bearerToken(c) ?? body.token;
+    const token = bearerToken(c);
     if (!token) return c.json({ error: 'token required' }, 403);
     const owner = verifyToken(token, Date.now());
     if (owner !== body.from) {
@@ -113,7 +113,7 @@ export function addTunnelRoutes(
   app.get('/tunnel', (c) => {
     const from = c.req.query('from'); // who sent the frames
     const to = c.req.query('to'); // me (the poller)
-    const token = bearerToken(c) ?? c.req.query('token');
+    const token = bearerToken(c);
     if (!from || !to) {
       return c.json({ error: 'from and to required' }, 400);
     }

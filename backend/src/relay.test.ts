@@ -76,8 +76,7 @@ describe('relay', () => {
 
     expect((await post(app, wire)).status).toBe(200);
 
-    const token = await getToken(app);
-    const res = await app.request(`/poll?channel=general&since=0&token=${token}`);
+    const res = await app.request('/poll?channel=general&since=0');
     const data = (await res.json()) as { messages: WireMessage[]; seq: number };
     expect(data.messages).toHaveLength(1);
     expect(data.messages[0]!.id).toBe(wire.id);
@@ -107,15 +106,14 @@ describe('relay', () => {
 
   it('returns only messages newer than `since`', async () => {
     const app = createRelay();
-    const token = await getToken(app);
     await post(app, await makeWire('m1'));
     const first = (await (await app.request(
-      `/poll?channel=general&since=0&token=${token}`,
+      '/poll?channel=general&since=0',
     )).json()) as { seq: number };
 
     await post(app, await makeWire('m2'));
     const second = (await (await app.request(
-      `/poll?channel=general&since=${first.seq}&token=${token}`,
+      `/poll?channel=general&since=${first.seq}`,
     )).json()) as { messages: WireMessage[] };
 
     expect(second.messages).toHaveLength(1);
@@ -141,7 +139,10 @@ describe('relay', () => {
     const token = await getToken(app);
     let limited = false;
     for (let i = 0; i < 40; i++) {
-      if ((await app.request(`/gif/search?q=x&token=${token}`)).status === 429) {
+      const res = await app.request('/gif/search?q=x', {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (res.status === 429) {
         limited = true;
         break;
       }

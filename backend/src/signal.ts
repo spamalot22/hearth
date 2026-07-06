@@ -30,6 +30,13 @@ const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/i;
 const SIGNAL_KINDS = new Set(['offer', 'answer', 'ice']);
 
+/** Extracts a Bearer token from the Authorization header, or null. */
+function bearerToken(c: { req: { header(name: string): string | undefined } }): string | null {
+  const h = c.req.header('authorization');
+  if (!h || h.length < 8 || h.slice(0, 7).toLowerCase() !== 'bearer ') return null;
+  return h.slice(7);
+}
+
 interface StoredSignal {
   seq: number;
   from: string;
@@ -219,7 +226,6 @@ export function addSignalingRoutes(
       from?: string;
       kind?: string;
       data?: unknown;
-      token?: string;
     };
     try {
       body = (await c.req.json()) as typeof body;
@@ -236,8 +242,9 @@ export function addSignalingRoutes(
       return c.json({ error: 'invalid signal kind' }, 400);
     }
     // Authenticate sender via token.
-    if (!body.token) return c.json({ error: 'token required' }, 403);
-    const owner = hub.verifyToken(body.token, now());
+    const token = bearerToken(c);
+    if (!token) return c.json({ error: 'token required' }, 403);
+    const owner = hub.verifyToken(token, now());
     if (owner !== body.from) {
       return c.json({ error: 'invalid or expired token' }, 403);
     }
@@ -260,7 +267,7 @@ export function addSignalingRoutes(
   app.get('/signal', (c) => {
     const channel = c.req.query('channel');
     const forPubkey = c.req.query('for');
-    const token = c.req.query('token');
+    const token = bearerToken(c);
     if (!channel || !forPubkey) {
       return c.json({ error: 'channel and for required' }, 400);
     }

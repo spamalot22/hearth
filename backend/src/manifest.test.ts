@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, it, expect } from 'vitest';
 
-import { manifestSigningBytes } from './manifest';
+import { manifestSigningBytes, parseSignedManifest } from './manifest';
 
 describe('manifestSigningBytes', () => {
   // This exact string is also asserted by the Dart client
@@ -21,5 +21,31 @@ describe('manifestSigningBytes', () => {
       },
     });
     expect(new TextDecoder().decode(bytes)).toBe(expected);
+  });
+
+  it('parses only well-shaped signed manifests', () => {
+    expect(parseSignedManifest({
+      version: '0.7.8',
+      seq: 708,
+      assets: {
+        android: {
+          file: 'hearth-android.apk',
+          sha256: 'a'.repeat(64),
+        },
+      },
+      sig: 'b'.repeat(128),
+    })).not.toBeNull();
+
+    expect(parseSignedManifest({
+      version: '0.7.8',
+      seq: 708,
+      assets: {
+        android: {
+          file: 'hearth-android.apk',
+          sha256: 'not-hex',
+        },
+      },
+      sig: 'b'.repeat(128),
+    })).toBeNull();
   });
 });

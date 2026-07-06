@@ -109,12 +109,14 @@ describe('tunnel', () => {
       const app = makeApp(() => null);
       const res = await app.request('/tunnel', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer bad',
+        },
         body: JSON.stringify({
           from: aliceHex,
           to: bobHex,
           data: 'x',
-          token: 'bad',
         }),
       });
       expect(res.status).toBe(403);
@@ -124,12 +126,14 @@ describe('tunnel', () => {
       const app = makeApp(alwaysValid);
       const res = await app.request('/tunnel', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${aliceHex}`,
+        },
         body: JSON.stringify({
           from: aliceHex,
           to: bobHex,
           data: 'hello',
-          token: aliceHex,
         }),
       });
       expect(res.status).toBe(200);
@@ -147,12 +151,14 @@ describe('tunnel', () => {
 
       const invalidKey = await app.request('/tunnel', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          authorization: 'Bearer alice',
+        },
         body: JSON.stringify({
           from: 'alice',
           to: bobHex,
           data: 'hello',
-          token: 'alice',
         }),
       });
       expect(invalidKey.status).toBe(400);
@@ -180,27 +186,29 @@ describe('tunnel', () => {
       // Post a frame
       await app.request('/tunnel', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${aliceHex}`,
+        },
         body: JSON.stringify({
           from: aliceHex,
           to: bobHex,
           data: 'msg1',
-          token: aliceHex,
         }),
       });
 
       // Drain it
-      const res = await app.request(
-        `/tunnel?from=${aliceHex}&to=${bobHex}&token=${bobHex}`,
-      );
+      const res = await app.request(`/tunnel?from=${aliceHex}&to=${bobHex}`, {
+        headers: { authorization: `Bearer ${bobHex}` },
+      });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { frames: string[] };
       expect(body.frames).toEqual(['msg1']);
 
       // Second drain is empty
-      const res2 = await app.request(
-        `/tunnel?from=${aliceHex}&to=${bobHex}&token=${bobHex}`,
-      );
+      const res2 = await app.request(`/tunnel?from=${aliceHex}&to=${bobHex}`, {
+        headers: { authorization: `Bearer ${bobHex}` },
+      });
       expect(((await res2.json()) as { frames: string[] }).frames).toEqual([]);
     });
   });

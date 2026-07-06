@@ -45,10 +45,12 @@ To arm it:
    - Variable `RELAY_URL` = the relay's public URL (e.g. the Tailscale Funnel one).
    - Secret `RELEASE_PRIVATE_KEY` = the private key (CI signs the manifest with it).
    - Secret `RELEASE_SECRET` = any random string (authorises `POST /version`).
-3. **On the relay** (`backend/.env`): the same `RELEASE_SECRET`,
-   `GITHUB_REPO=spamalot22/hearth`, and `GITHUB_TOKEN` = a **read-only** GitHub
-   token (fine-grained, Contents: read). The relay proxies the private release
-   assets to clients with this token — it never leaves the relay.
+3. **On the relay** (`backend/.env`): the same `RELEASE_SECRET`, the public key
+   as `RELEASE_PUBLIC_KEY` (optional but recommended, so the relay rejects forged
+   manifests before storing them), `GITHUB_REPO=spamalot22/hearth`, and
+   `GITHUB_TOKEN` = a **read-only** GitHub token (fine-grained, Contents: read).
+   The relay proxies the private release assets to clients with this token — it
+   never leaves the relay.
 
 Once armed, each tag builds key-baked clients, signs a manifest of the assets, and
 POSTs it to the relay; clients on an older version then see an **Install** button.

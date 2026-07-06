@@ -124,7 +124,7 @@ export function createRelay(
   // a random scraper).
   const searchLimiter = new RateLimiter(SEARCH_RATE_LIMIT, SEARCH_RATE_WINDOW_MS);
   const limitSearch: MiddlewareHandler = async (c, next) => {
-    const token = bearerToken(c) ?? c.req.query('token');
+    const token = bearerToken(c);
     if (!token || !signalHub.verifyToken(token, Date.now())) {
       return c.json({ error: 'token required' }, 403);
     }

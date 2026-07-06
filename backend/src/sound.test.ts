@@ -32,7 +32,9 @@ describe('Sound proxy', () => {
   it('reports not-configured when the relay has no Freesound key', async () => {
     const app = createRelay();
     const token = await getToken(app);
-    const res = await app.request(`/sound/search?q=airhorn&token=${token}`);
+    const res = await app.request('/sound/search?q=airhorn', {
+      headers: { authorization: `Bearer ${token}` },
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ sounds: [], configured: false });
   });
@@ -41,7 +43,9 @@ describe('Sound proxy', () => {
     process.env.FREESOUND_KEY = 'fake-key';
     const app = createRelay();
     const token = await getToken(app);
-    const res = await app.request(`/sound/search?q=&token=${token}`);
+    const res = await app.request('/sound/search?q=', {
+      headers: { authorization: `Bearer ${token}` },
+    });
     expect(await res.json()).toEqual({ sounds: [], configured: true });
   });
 });

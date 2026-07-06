@@ -4,6 +4,9 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { dirname } from 'node:path';
 
+import { hexToBytes, verifySignature } from './message';
+import { manifestSigningBytes, parseSignedManifest } from './manifest';
+
 const DEFAULT_MANIFEST_PATH = './data/version.json';
 
 /**
@@ -89,16 +92,32 @@ export function addVersionRoutes(app: Hono, store: VersionStore): void {
     ) {
       return c.json({ error: 'unauthorized' }, 401);
     }
-    let body: { version?: unknown; seq?: unknown; sig?: unknown };
+    let body: unknown;
     try {
-      body = (await c.req.json()) as typeof body;
+      body = await c.req.json();
     } catch {
       return c.json({ error: 'invalid json' }, 400);
     }
-    if (!body?.version || !body?.seq || !body?.sig) {
-      return c.json({ error: 'invalid manifest (need version, seq, sig)' }, 400);
+    const manifest = parseSignedManifest(body);
+    if (!manifest) {
+      return c.json({ error: 'invalid manifest' }, 400);
     }
-    store.set(body);
+    const releasePublicKey = process.env['RELEASE_PUBLIC_KEY'];
+    if (releasePublicKey) {
+      let valid = false;
+      try {
+        const { sig, ...payload } = manifest;
+        valid = await verifySignature(
+          manifestSigningBytes(payload),
+          hexToBytes(sig),
+          hexToBytes(releasePublicKey),
+        );
+      } catch {
+        valid = false;
+      }
+      if (!valid) return c.json({ error: 'invalid manifest signature' }, 400);
+    }
+    store.set(manifest);
     return c.json({ ok: true });
   });
 }
