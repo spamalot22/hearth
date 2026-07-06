@@ -15,6 +15,8 @@ class GroupChannel {
   final String id; // 16 random bytes, hex
   final Uint8List key; // 32 random bytes
   final String name; // local display name
+  static final _idRe = RegExp(r'^[0-9a-f]{32}$');
+  static final _pubkeyRe = RegExp(r'^[0-9a-f]{64}$');
 
   /// Creates a brand-new channel (random id + key) with local [name].
   factory GroupChannel.create(String name) {
@@ -39,25 +41,27 @@ class GroupChannel {
 
   /// Parses an [invite] string into the channel + inviter, or null if malformed.
   static Invite? fromInvite(String invite) {
+    final trimmed = invite.trim();
+    if (!trimmed.startsWith('hearth:')) return null;
     try {
-      final body = invite.trim().replaceFirst('hearth:', '');
+      final body = trimmed.substring('hearth:'.length);
       final json = (jsonDecode(utf8.decode(base64Url.decode(body))) as Map)
           .cast<String, Object?>();
       final id = json['id'] as String?;
       final k = json['k'] as String?;
-      if (id == null || k == null || id.isEmpty) return null;
+      if (id == null || !_idRe.hasMatch(id) || k == null) return null;
+      final key = base64Url.decode(k);
+      if (key.length != 32) return null;
       String? nonEmpty(String key) {
         final v = json[key] as String?;
         return (v != null && v.trim().isNotEmpty) ? v : null;
       }
 
+      final inviter = nonEmpty('inv');
+      if (inviter != null && !_pubkeyRe.hasMatch(inviter)) return null;
       return Invite(
-        channel: GroupChannel(
-          id: id,
-          key: base64Url.decode(k),
-          name: nonEmpty('n') ?? id,
-        ),
-        inviterPubkey: nonEmpty('inv'),
+        channel: GroupChannel(id: id, key: key, name: nonEmpty('n') ?? id),
+        inviterPubkey: inviter,
         inviterName: nonEmpty('in'),
         relayUrl: nonEmpty('r'),
       );

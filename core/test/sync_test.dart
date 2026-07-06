@@ -15,6 +15,11 @@ MessageRepository _repo() => MessageRepository(InMemoryMessageStorage());
 /// Single-subscription, so frames sent before the session subscribes are
 /// buffered rather than dropped.
 class _Link implements FrameChannel {
+  _Link([this.peerHex = 'peer']);
+
+  @override
+  final String peerHex;
+
   final StreamController<SyncFrame> incoming = StreamController<SyncFrame>();
   _Link? partner;
 
@@ -26,8 +31,8 @@ class _Link implements FrameChannel {
 }
 
 (_Link, _Link) _pair() {
-  final a = _Link();
-  final b = _Link();
+  final a = _Link('b');
+  final b = _Link('a');
   a.partner = b;
   b.partner = a;
   return (a, b);
@@ -255,29 +260,34 @@ void main() {
       expect(r.length, 0);
     });
 
-    test('a revoked device messages are rejected via isDeviceRevoked',
-        () async {
-      final r = _repo();
-      final root = await Identity.generate();
-      final device = await Identity.generate();
-      final cert = await DeviceCert.issue(
-        root: root,
-        deviceKey: device.publicKey,
-        name: 'phone',
-      );
-      final m = await Message.create(
-        author: root,
-        channel: 'general',
-        payload: _b('should be dropped'),
-        signingDevice: device,
-        deviceCert: cert,
-      );
-      // The device is revoked — the callback says so.
-      final revokedSet = {hex.encode(device.publicKey)};
-      final engine = SyncEngine(r, 'general',
-          isDeviceRevoked: revokedSet.contains);
-      await engine.receive(m);
-      expect(r.length, 0, reason: 'revoked device message should be dropped');
-    });
+    test(
+      'a revoked device messages are rejected via isDeviceRevoked',
+      () async {
+        final r = _repo();
+        final root = await Identity.generate();
+        final device = await Identity.generate();
+        final cert = await DeviceCert.issue(
+          root: root,
+          deviceKey: device.publicKey,
+          name: 'phone',
+        );
+        final m = await Message.create(
+          author: root,
+          channel: 'general',
+          payload: _b('should be dropped'),
+          signingDevice: device,
+          deviceCert: cert,
+        );
+        // The device is revoked — the callback says so.
+        final revokedSet = {hex.encode(device.publicKey)};
+        final engine = SyncEngine(
+          r,
+          'general',
+          isDeviceRevoked: revokedSet.contains,
+        );
+        await engine.receive(m);
+        expect(r.length, 0, reason: 'revoked device message should be dropped');
+      },
+    );
   });
 }

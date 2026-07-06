@@ -13,6 +13,9 @@ import 'package:hearth/group_channel.dart';
 import 'package:hearth/main.dart';
 
 final warnings = <String>{};
+const testPubkeyHex =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const testRendezvousHex = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
 void _drain(WidgetTester tester) {
   for (
@@ -41,31 +44,37 @@ void main() {
   group('codec', () {
     test('round-trips all fields', () {
       final card = ContactCard(
-        pubkey: 'a1b2c3',
-        rendezvous: 'deadbeefcafebabe',
+        pubkey: testPubkeyHex,
+        rendezvous: testRendezvousHex,
         name: 'Sam',
         relayUrl: 'https://relay.example',
       );
       final back = ContactCard.decode(card.encode())!;
-      expect(back.pubkey, 'a1b2c3');
-      expect(back.rendezvous, 'deadbeefcafebabe');
+      expect(back.pubkey, testPubkeyHex);
+      expect(back.rendezvous, testRendezvousHex);
       expect(back.name, 'Sam');
       expect(back.relayUrl, 'https://relay.example');
     });
 
     test('round-trips with only the required fields', () {
       final back = ContactCard.decode(
-        ContactCard(pubkey: 'ab', rendezvous: 'cd').encode(),
+        ContactCard(
+          pubkey: testPubkeyHex,
+          rendezvous: testRendezvousHex,
+        ).encode(),
       )!;
-      expect(back.pubkey, 'ab');
-      expect(back.rendezvous, 'cd');
+      expect(back.pubkey, testPubkeyHex);
+      expect(back.rendezvous, testRendezvousHex);
       expect(back.name, isNull);
       expect(back.relayUrl, isNull);
     });
 
     test('encodes under the hearth-contact: scheme', () {
       expect(
-        ContactCard(pubkey: 'ab', rendezvous: 'cd').encode(),
+        ContactCard(
+          pubkey: testPubkeyHex,
+          rendezvous: testRendezvousHex,
+        ).encode(),
         startsWith('hearth-contact:'),
       );
     });
@@ -81,7 +90,7 @@ void main() {
     test('rejects a channel invite, empty, and junk', () {
       final invite = GroupChannel.create(
         'games',
-      ).invite(inviterPubkeyHex: 'ab');
+      ).invite(inviterPubkeyHex: testPubkeyHex);
       expect(ContactCard.decode(invite), isNull); // not our scheme
       expect(
         GroupChannel.fromInvite(invite),
@@ -94,9 +103,27 @@ void main() {
 
     test('rejects a card missing pubkey or rendezvous', () {
       // Hand-craft a card body with an empty rendezvous.
-      final bad = ContactCard(pubkey: 'ab', rendezvous: '').encode();
+      final bad = ContactCard(pubkey: testPubkeyHex, rendezvous: '').encode();
       // Empty rv is dropped from JSON, so it must fail to parse.
       expect(ContactCard.decode(bad), isNull);
+    });
+
+    test('rejects malformed pubkey and rendezvous capabilities', () {
+      expect(
+        ContactCard.decode(
+          ContactCard(
+            pubkey: 'not-hex',
+            rendezvous: testRendezvousHex,
+          ).encode(),
+        ),
+        isNull,
+      );
+      expect(
+        ContactCard.decode(
+          ContactCard(pubkey: testPubkeyHex, rendezvous: 'too-short').encode(),
+        ),
+        isNull,
+      );
     });
   });
 

@@ -89,7 +89,12 @@ export function addVersionRoutes(app: Hono, store: VersionStore): void {
     ) {
       return c.json({ error: 'unauthorized' }, 401);
     }
-    const body = await c.req.json();
+    let body: { version?: unknown; seq?: unknown; sig?: unknown };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: 'invalid json' }, 400);
+    }
     if (!body?.version || !body?.seq || !body?.sig) {
       return c.json({ error: 'invalid manifest (need version, seq, sig)' }, 400);
     }

@@ -26,6 +26,9 @@ import { hexToBytes, verifySignature } from './message';
 const PRESENCE_TTL_MS = 15_000;
 const SIGNAL_TTL_MS = 30_000;
 const TOKEN_TTL_MS = 60_000; // 60 seconds (signal/search/tunnel only)
+const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
+const HEX_SIGNATURE = /^[0-9a-f]{128}$/i;
+const SIGNAL_KINDS = new Set(['offer', 'answer', 'ice']);
 
 interface StoredSignal {
   seq: number;
@@ -50,7 +53,7 @@ export class SignalHub {
     if (!chan) {
       chan = new Map();
       // LRU eviction: cap unique channels in the presence map.
-      if (this.presence.size > MAX_CHANNELS) {
+      if (this.presence.size >= MAX_CHANNELS) {
         const oldest = this.presence.keys().next().value!;
         this.presence.delete(oldest);
       }
@@ -159,25 +162,41 @@ export function addSignalingRoutes(
   // Announce presence in a channel; returns the other live peers to connect to.
   // Requires an Ed25519 signature over "announce|<channel>|<pubkey>|<ts>".
   app.post('/announce', async (c) => {
-    const body = (await c.req.json()) as {
+    let body: {
       channel?: string;
       pubkey?: string;
       ts?: number;
       sig?: string;
     };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: 'invalid json' }, 400);
+    }
     if (!body.channel || !body.pubkey) {
       return c.json({ error: 'channel and pubkey required' }, 400);
     }
+    if (!HEX_PUBKEY.test(body.pubkey)) {
+      return c.json({ error: 'invalid pubkey' }, 400);
+    }
     // Verify identity: sig over "announce|channel|pubkey|ts".
     if (body.sig && body.ts) {
+      if (!HEX_SIGNATURE.test(body.sig)) {
+        return c.json({ error: 'invalid signature' }, 403);
+      }
       const msg = new TextEncoder().encode(
         `announce|${body.channel}|${body.pubkey}|${body.ts}`,
       );
-      const valid = await verifySignature(
-        msg,
-        hexToBytes(body.sig),
-        hexToBytes(body.pubkey),
-      );
+      let valid = false;
+      try {
+        valid = await verifySignature(
+          msg,
+          hexToBytes(body.sig),
+          hexToBytes(body.pubkey),
+        );
+      } catch {
+        valid = false;
+      }
       if (!valid) return c.json({ error: 'invalid signature' }, 403);
       // Reject stale timestamps (>30s old).
       if (Math.abs(now() - body.ts) > 30_000) {
@@ -194,7 +213,7 @@ export function addSignalingRoutes(
   // Drop an SDP/ICE signal into a recipient's mailbox.
   const signalLimiter = new RateLimiter(SIGNAL_RATE_LIMIT, SIGNAL_RATE_WINDOW_MS);
   app.post('/signal', async (c) => {
-    const body = (await c.req.json()) as {
+    let body: {
       channel?: string;
       to?: string;
       from?: string;
@@ -202,8 +221,19 @@ export function addSignalingRoutes(
       data?: unknown;
       token?: string;
     };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: 'invalid json' }, 400);
+    }
     if (!body.channel || !body.to || !body.from || !body.kind) {
       return c.json({ error: 'channel, to, from, kind required' }, 400);
+    }
+    if (!HEX_PUBKEY.test(body.to) || !HEX_PUBKEY.test(body.from)) {
+      return c.json({ error: 'invalid pubkey' }, 400);
+    }
+    if (!SIGNAL_KINDS.has(body.kind)) {
+      return c.json({ error: 'invalid signal kind' }, 400);
     }
     // Authenticate sender via token.
     if (!body.token) return c.json({ error: 'token required' }, 403);

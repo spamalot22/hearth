@@ -171,6 +171,12 @@ class WebRtcMesh {
       if (entry.value.connection != null) entry.key: entry.value.connection!,
   };
 
+  /// Peers with any usable frame path, direct WebRTC or relay tunnel.
+  Iterable<String> get connectedPeers => {
+    ...connections.keys,
+    ..._tunnels.keys,
+  };
+
   void _start() {
     if (_started) return;
     _started = true;
@@ -540,6 +546,7 @@ class _PeerLink implements FrameChannel {
     this.onControl,
   });
 
+  @override
   final String peerHex;
   final bool initiator;
   final List<Map<String, dynamic>> _iceServers;

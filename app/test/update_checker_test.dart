@@ -96,6 +96,13 @@ void main() {
         ..remove('assets');
       expect(await verifyManifest(m, id.publicKeyHex), isNull);
     });
+
+    test('rejects malformed signature hex without throwing', () async {
+      final id = await Identity.generate();
+      final m = await _manifest(id)
+        ..['sig'] = 'not-hex';
+      expect(await verifyManifest(m, id.publicKeyHex), isNull);
+    });
   });
 
   group('checkForUpdate', () {

@@ -65,4 +65,18 @@ describe('/version', () => {
     expect(res.status).toBe(400);
     delete process.env['RELEASE_SECRET'];
   });
+
+  it('rejects malformed manifest json', async () => {
+    process.env['RELEASE_SECRET'] = 'test-secret';
+    const res = await app.request('/version', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer test-secret',
+      },
+      body: '{',
+    });
+    expect(res.status).toBe(400);
+    delete process.env['RELEASE_SECRET'];
+  });
 });

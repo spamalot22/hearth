@@ -32,6 +32,8 @@ class ContactCard {
   final String? relayUrl;
 
   static const _prefix = 'hearth-contact:';
+  static final _pubkeyRe = RegExp(r'^[0-9a-f]{64}$');
+  static final _rendezvousRe = RegExp(r'^[0-9a-f]{32}$');
 
   /// A fresh unguessable rendezvous id (16 random bytes, hex) — the same shape
   /// as a channel capability id, so it's just as unguessable.
@@ -62,7 +64,12 @@ class ContactCard {
               .cast<String, Object?>();
       final pk = json['pk'] as String?;
       final rv = json['rv'] as String?;
-      if (pk == null || pk.isEmpty || rv == null || rv.isEmpty) return null;
+      if (pk == null ||
+          !_pubkeyRe.hasMatch(pk) ||
+          rv == null ||
+          !_rendezvousRe.hasMatch(rv)) {
+        return null;
+      }
       String? nonEmpty(String key) {
         final v = json[key] as String?;
         return (v != null && v.trim().isNotEmpty) ? v : null;

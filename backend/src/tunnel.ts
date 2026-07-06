@@ -22,6 +22,7 @@ function bearerToken(c: { req: { header(name: string): string | undefined } }): 
 
 const TUNNEL_TTL_MS = 30_000;
 const MAX_BUFFER = 100;
+const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 // Cap distinct (from|to) pairs. Undrained buffers to peers that never poll
 // (e.g. an attacker posting to random `to` values) would otherwise grow the map
 // without bound — the TTL only fires on drain.
@@ -72,14 +73,26 @@ export function addTunnelRoutes(
 
   // A peer sends a frame through the relay to another peer.
   app.post('/tunnel', async (c) => {
-    const body = (await c.req.json()) as {
+    let body: {
       from?: string;
       to?: string;
       data?: string;
       token?: string;
     };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: 'invalid json' }, 400);
+    }
     if (!body.from || !body.to || !body.data) {
       return c.json({ error: 'from, to, data required' }, 400);
+    }
+    if (
+      !HEX_PUBKEY.test(body.from) ||
+      !HEX_PUBKEY.test(body.to) ||
+      typeof body.data !== 'string'
+    ) {
+      return c.json({ error: 'invalid tunnel frame' }, 400);
     }
     const token = bearerToken(c) ?? body.token;
     if (!token) return c.json({ error: 'token required' }, 403);
@@ -103,6 +116,9 @@ export function addTunnelRoutes(
     const token = bearerToken(c) ?? c.req.query('token');
     if (!from || !to) {
       return c.json({ error: 'from and to required' }, 400);
+    }
+    if (!HEX_PUBKEY.test(from) || !HEX_PUBKEY.test(to)) {
+      return c.json({ error: 'invalid tunnel pair' }, 400);
     }
     if (!token) return c.json({ error: 'token required' }, 403);
     const owner = verifyToken(token, Date.now());

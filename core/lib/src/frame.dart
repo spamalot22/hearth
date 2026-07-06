@@ -11,6 +11,9 @@ import 'message.dart';
 /// provide an in-memory pair. Single-subscription — exactly one session consumes
 /// it.
 abstract interface class FrameChannel {
+  /// Hex pubkey for the peer on the other side of this channel.
+  String get peerHex;
+
   /// Sends [frame] to the peer.
   void send(SyncFrame frame);
 

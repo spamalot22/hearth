@@ -343,6 +343,11 @@ class HearthTestApi {
   /// Simulates someone reaching your card's rendezvous (owner side), so the
   /// incoming message-request gate can be driven without a live mesh.
   late Future<void> Function(String peerHex) simulateIncomingContact;
+
+  /// Simulates the live multi-device rendezvous shape: the mesh peer is a device
+  /// key, then the rendezvous intro carries its root-signed device cert.
+  late Future<void> Function(String deviceHex, DeviceCert cert)
+  simulateIncomingDeviceContact;
 }
 
 /// The Hearth theme for a given [brightness] — the ember seed with warm surfaces
@@ -1248,7 +1253,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         await _acceptContactCard(card);
         return true;
       })
-      ..simulateIncomingContact = _onRendezvousContact;
+      ..simulateIncomingContact = _onRendezvousContact
+      ..simulateIncomingDeviceContact = _onRendezvousDeviceContact;
     unawaited(_init());
   }
 
@@ -2050,6 +2056,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // The rendezvous mesh uses device keys (for signing). Resolve to root key
     // via the device store's cert chain, or check contacts by device key too.
     final rootHex = _deviceStore?.rootForDevice(peerHex) ?? peerHex;
+    if (_blocked.contains(rootHex)) return;
     if (_contacts?.nameFor(rootHex) != null) {
       try {
         await channels.openDm(hex.decode(rootHex));
@@ -2058,6 +2065,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       unawaited(_reqStore?.save(rootHex));
     }
     if (mounted) setState(() {});
+  }
+
+  Future<void> _onRendezvousDeviceContact(
+    String deviceHex,
+    DeviceCert cert,
+  ) async {
+    if (cert.deviceKeyHex != deviceHex) return;
+    if (!await cert.verify()) return;
+    await _onRendezvousContact(cert.rootKeyHex);
   }
 
   /// Accepts a connection request: the usual add-a-petname prompt, then opens
@@ -2155,17 +2171,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     // Adopt the card's relay if we're still on the bundled default (mirrors the
     // channel-invite behaviour), so a fresh install can reach the owner.
-    if (card.relayUrl != null &&
-        card.relayUrl != _relayUrl.toString() &&
-        _relayUrl.toString() == kRelayUrl.toString()) {
-      final relay = Uri.tryParse(card.relayUrl!);
-      if (relay != null && relay.hasScheme && relay.hasAuthority) {
-        await _settings?.setRelayUrl(card.relayUrl!);
-        _relayUrl = relay;
-        _channels?.updateFallbackUrls(
-          (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
-        );
-      }
+    final cardRelay = _adoptableExternalRelay(card.relayUrl);
+    if (cardRelay != null) {
+      await _settings?.setRelayUrl(cardRelay.toString());
+      _relayUrl = cardRelay;
+      _channels?.updateFallbackUrls(
+        (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
+      );
     }
     // Name suggestion from the card, unless we've already named them.
     if (_contacts?.nameFor(ownerHex) == null) {
@@ -2202,6 +2214,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       rendezvousId: rendezvousId,
       identity: widget.deviceKeys.device,
+      deviceCert: widget.deviceKeys.cert,
       ignore: {widget.identity.publicKeyHex, widget.deviceKeys.publicKeyHex},
       // We already know the owner from the card, so a rendezvous connect just
       // confirms reachability; the DM proper forms on its derived channel and
@@ -2235,6 +2248,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
       rendezvousId: rv,
       identity: widget.deviceKeys.device,
+      deviceCert: widget.deviceKeys.cert,
       ignore: {widget.identity.publicKeyHex, widget.deviceKeys.publicKeyHex},
       onContact: _onRendezvousContact,
     );
@@ -2505,7 +2519,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final all = <String>{};
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
       final mesh = session.mesh;
-      if (mesh != null) all.addAll(mesh.connections.keys);
+      if (mesh != null) all.addAll(mesh.connectedPeers);
     }
     return all.length;
   }
@@ -2554,48 +2568,32 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  Uri? _adoptableExternalRelay(String? raw) {
+    if (raw == null ||
+        raw == _relayUrl.toString() ||
+        _relayUrl.toString() != kRelayUrl.toString()) {
+      return null;
+    }
+    final relay = Uri.tryParse(raw);
+    if (relay == null || relay.scheme != 'https' || !relay.hasAuthority) {
+      return null;
+    }
+    return relay;
+  }
+
   Future<void> _openSettings() async {
-    // On mobile, use a full-screen bottom sheet. On desktop/web, use a dialog.
+    // On mobile, use a normal full-screen route. A modal bottom sheet nested
+    // inside the drawer route can render as an empty scrim on Android.
     final usePage =
         !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS);
     if (usePage) {
-      await showModalBottomSheet<void>(
-        context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        builder: (context) => DefaultTabController(
-          length: 6,
-          child: Scaffold(
-            appBar: AppBar(
-              title: const Text('Settings'),
-              leading: IconButton(
-                icon: const Icon(Icons.close),
-                onPressed: () => Navigator.pop(context),
-              ),
-              bottom: const TabBar(
-                isScrollable: true,
-                tabs: [
-                  Tab(text: 'Audio'),
-                  Tab(text: 'Identity'),
-                  Tab(text: 'Devices'),
-                  Tab(text: 'Network'),
-                  Tab(text: 'Privacy'),
-                  Tab(text: 'AI'),
-                ],
-              ),
-            ),
-            body: TabBarView(
-              children: [
-                _audioTab(),
-                _identityTab(),
-                _devicesTab(),
-                _networkTab(),
-                _privacyTab(),
-                _aiTab(),
-              ],
-            ),
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (context) => Scaffold(
+            body: SafeArea(child: _buildSettingsBody(showClose: true)),
           ),
         ),
       );
@@ -4095,16 +4093,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     final channel = parsed.channel;
     String? adoptedRelay;
-    final inviteRelay = parsed.relayUrl;
-    if (inviteRelay != null &&
-        inviteRelay != _relayUrl.toString() &&
-        _relayUrl.toString() == kRelayUrl.toString()) {
-      final relay = Uri.tryParse(inviteRelay);
-      if (relay != null && relay.hasScheme && relay.hasAuthority) {
-        await _settings?.setRelayUrl(inviteRelay);
-        _relayUrl = relay;
-        adoptedRelay = inviteRelay;
-      }
+    final relay = _adoptableExternalRelay(parsed.relayUrl);
+    if (relay != null) {
+      await _settings?.setRelayUrl(relay.toString());
+      _relayUrl = relay;
+      adoptedRelay = relay.toString();
     }
     await _registry?.save(channel);
     if (mounted) setState(() => _groups[channel.id] = channel);

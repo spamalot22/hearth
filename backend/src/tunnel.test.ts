@@ -3,6 +3,9 @@ import { describe, it, expect } from 'vitest';
 import { Hono } from 'hono';
 import { TunnelHub, addTunnelRoutes } from './tunnel';
 
+const aliceHex = 'a'.repeat(64);
+const bobHex = 'b'.repeat(64);
+
 function makeApp(verifyToken: (t: string, now: number) => string | null) {
   const app = new Hono();
   const hub = new TunnelHub();
@@ -97,7 +100,7 @@ describe('tunnel', () => {
       const res = await app.request('/tunnel', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ from: 'a', to: 'b', data: 'x' }),
+        body: JSON.stringify({ from: aliceHex, to: bobHex, data: 'x' }),
       });
       expect(res.status).toBe(403);
     });
@@ -107,7 +110,12 @@ describe('tunnel', () => {
       const res = await app.request('/tunnel', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ from: 'a', to: 'b', data: 'x', token: 'bad' }),
+        body: JSON.stringify({
+          from: aliceHex,
+          to: bobHex,
+          data: 'x',
+          token: 'bad',
+        }),
       });
       expect(res.status).toBe(403);
     });
@@ -117,10 +125,37 @@ describe('tunnel', () => {
       const res = await app.request('/tunnel', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ from: 'alice', to: 'bob', data: 'hello', token: 'alice' }),
+        body: JSON.stringify({
+          from: aliceHex,
+          to: bobHex,
+          data: 'hello',
+          token: aliceHex,
+        }),
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
+    });
+
+    it('returns 400 for malformed json and invalid pubkeys', async () => {
+      const app = makeApp(alwaysValid);
+      const malformed = await app.request('/tunnel', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{',
+      });
+      expect(malformed.status).toBe(400);
+
+      const invalidKey = await app.request('/tunnel', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          from: 'alice',
+          to: bobHex,
+          data: 'hello',
+          token: 'alice',
+        }),
+      });
+      expect(invalidKey.status).toBe(400);
     });
   });
 
@@ -133,7 +168,7 @@ describe('tunnel', () => {
 
     it('returns 403 without token', async () => {
       const app = makeApp(alwaysValid);
-      const res = await app.request('/tunnel?from=a&to=b');
+      const res = await app.request(`/tunnel?from=${aliceHex}&to=${bobHex}`);
       expect(res.status).toBe(403);
     });
 
@@ -146,17 +181,26 @@ describe('tunnel', () => {
       await app.request('/tunnel', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ from: 'alice', to: 'bob', data: 'msg1', token: 'alice' }),
+        body: JSON.stringify({
+          from: aliceHex,
+          to: bobHex,
+          data: 'msg1',
+          token: aliceHex,
+        }),
       });
 
       // Drain it
-      const res = await app.request('/tunnel?from=alice&to=bob&token=bob');
+      const res = await app.request(
+        `/tunnel?from=${aliceHex}&to=${bobHex}&token=${bobHex}`,
+      );
       expect(res.status).toBe(200);
       const body = (await res.json()) as { frames: string[] };
       expect(body.frames).toEqual(['msg1']);
 
       // Second drain is empty
-      const res2 = await app.request('/tunnel?from=alice&to=bob&token=bob');
+      const res2 = await app.request(
+        `/tunnel?from=${aliceHex}&to=${bobHex}&token=${bobHex}`,
+      );
       expect(((await res2.json()) as { frames: string[] }).frames).toEqual([]);
     });
   });

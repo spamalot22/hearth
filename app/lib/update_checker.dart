@@ -72,11 +72,16 @@ Future<UpdateInfo?> verifyManifest(
   if (version == null || seq == null || sig == null || assets == null) {
     return null;
   }
-  final valid = await Identity.verifySignature(
-    manifestSigningBytes(version, seq, assets),
-    signature: _hexDecode(sig),
-    publicKey: _hexDecode(publicKeyHex),
-  );
+  final bool valid;
+  try {
+    valid = await Identity.verifySignature(
+      manifestSigningBytes(version, seq, assets),
+      signature: _hexDecode(sig),
+      publicKey: _hexDecode(publicKeyHex),
+    );
+  } catch (_) {
+    return null;
+  }
   if (!valid) return null;
   return UpdateInfo(version: version, seq: seq, assets: assets);
 }

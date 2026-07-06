@@ -9,6 +9,7 @@
 // test asserts it stayed empty, so a stray framework notice can't silently mask
 // the behavioural assertions.
 import 'package:core/core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/content.dart';
@@ -83,6 +84,32 @@ Future<void> _finish(WidgetTester tester) async {
 
 void main() {
   setUp(warnings.clear);
+
+  testWidgets('Android settings opens as a populated fullscreen page', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await _boot(tester);
+      await _createChannel(tester, 'general');
+
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await _settle(tester);
+      await tester.tap(find.widgetWithText(ListTile, 'Settings'));
+      await _settle(tester);
+
+      expect(find.text('Settings'), findsOneWidget);
+      expect(find.text('Audio'), findsOneWidget);
+      expect(find.text('Identity'), findsOneWidget);
+      expect(find.text('Devices'), findsOneWidget);
+      expect(find.text('Network'), findsOneWidget);
+      expect(find.text('Privacy'), findsOneWidget);
+      expect(find.text('AI'), findsOneWidget);
+      await _finish(tester);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('create → send → react → pin → reply', (tester) async {
     await _boot(tester);

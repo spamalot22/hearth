@@ -33,6 +33,9 @@ class RelayTunnel implements FrameChannel {
   bool _polling = false;
 
   @override
+  String get peerHex => peerPubkeyHex;
+
+  @override
   Stream<SyncFrame> get frames => _frames.stream;
 
   /// Starts polling for frames from the peer.

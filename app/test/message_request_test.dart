@@ -47,6 +47,17 @@ Future<HearthTestApi> _boot(WidgetTester tester) async {
   return api;
 }
 
+Future<(Identity, Identity, DeviceCert)> _peerDevice() async {
+  final root = await Identity.generate();
+  final device = await Identity.generate();
+  final cert = await DeviceCert.issue(
+    root: root,
+    deviceKey: device.publicKey,
+    name: 'Peer device',
+  );
+  return (root, device, cert);
+}
+
 Future<void> _openDrawer(WidgetTester tester) async {
   await tester.tap(find.byTooltip('Open navigation menu'));
   await _settle(tester);
@@ -65,8 +76,8 @@ void main() {
     tester,
   ) async {
     final api = await _boot(tester);
-    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
-    await api.simulateIncomingContact(peer.publicKeyHex);
+    final (peer, device, cert) = await _peerDevice();
+    await api.simulateIncomingDeviceContact(device.publicKeyHex, cert);
     await _settle(tester);
 
     // Crucially: no DM channel exists for them yet — nothing can be received
@@ -84,8 +95,8 @@ void main() {
     tester,
   ) async {
     final api = await _boot(tester);
-    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
-    await api.simulateIncomingContact(peer.publicKeyHex);
+    final (peer, device, cert) = await _peerDevice();
+    await api.simulateIncomingDeviceContact(device.publicKeyHex, cert);
     await _settle(tester);
 
     await _openDrawer(tester);
@@ -119,8 +130,8 @@ void main() {
 
   testWidgets('a blocked peer cannot re-create a request', (tester) async {
     final api = await _boot(tester);
-    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
-    await api.simulateIncomingContact(peer.publicKeyHex);
+    final (peer, device, cert) = await _peerDevice();
+    await api.simulateIncomingDeviceContact(device.publicKeyHex, cert);
     await _settle(tester);
 
     // Block them from the request sheet.
@@ -131,7 +142,7 @@ void main() {
     await _settle(tester);
 
     // They reconnect to the rendezvous — it must be silently dropped.
-    await api.simulateIncomingContact(peer.publicKeyHex);
+    await api.simulateIncomingDeviceContact(device.publicKeyHex, cert);
     await _settle(tester);
     await _openDrawer(tester);
     expect(
@@ -147,8 +158,8 @@ void main() {
     tester,
   ) async {
     final api = await _boot(tester);
-    final peer = await Identity.loadOrCreate(InMemoryKeyStore());
-    await api.simulateIncomingContact(peer.publicKeyHex);
+    final (_, device, cert) = await _peerDevice();
+    await api.simulateIncomingDeviceContact(device.publicKeyHex, cert);
     await _settle(tester);
 
     await _openDrawer(tester);

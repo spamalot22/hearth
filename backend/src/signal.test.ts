@@ -4,6 +4,9 @@ import { describe, expect, it } from 'vitest';
 import { createRelay } from './relay';
 import { SignalHub } from './signal';
 
+const aliceHex = 'a'.repeat(64);
+const bobHex = 'b'.repeat(64);
+
 describe('SignalHub', () => {
   it('announce returns other live peers, excluding self', () => {
     const hub = new SignalHub();
@@ -64,31 +67,54 @@ describe('signalling routes', () => {
     const app = createRelay(undefined, hub);
 
     // Announce directly via hub (bypasses signature check for unit test).
-    const peers = hub.announce('general', 'bob', Date.now());
-    hub.announce('general', 'alice', Date.now());
+    const peers = hub.announce('general', bobHex, Date.now());
+    hub.announce('general', aliceHex, Date.now());
     expect(peers).toEqual([]); // bob is first
 
-    const aliceToken = hub.issueToken('alice', Date.now());
-    const bobToken = hub.issueToken('bob', Date.now());
+    const aliceToken = hub.issueToken(aliceHex, Date.now());
+    const bobToken = hub.issueToken(bobHex, Date.now());
 
     await postJson(app, '/signal', {
       channel: 'general',
-      to: 'bob',
-      from: 'alice',
+      to: bobHex,
+      from: aliceHex,
       kind: 'offer',
       data: { sdp: 'x' },
       token: aliceToken,
     });
 
     const sigRes = await app.request(
-      `/signal?channel=general&for=bob&since=0&token=${bobToken}`,
+      `/signal?channel=general&for=${bobHex}&since=0&token=${bobToken}`,
     );
     const sig = (await sigRes.json()) as {
       signals: { from: string; kind: string }[];
       seq: number;
     };
     expect(sig.signals).toHaveLength(1);
-    expect(sig.signals[0]!.from).toBe('alice');
+    expect(sig.signals[0]!.from).toBe(aliceHex);
     expect(sig.signals[0]!.kind).toBe('offer');
+  });
+
+  it('rejects malformed signal json and invalid signal kinds', async () => {
+    const hub = new SignalHub();
+    const app = createRelay(undefined, hub);
+    const aliceToken = hub.issueToken(aliceHex, Date.now());
+
+    const malformed = await app.request('/signal', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{',
+    });
+    expect(malformed.status).toBe(400);
+
+    const badKind = await postJson(app, '/signal', {
+      channel: 'general',
+      to: bobHex,
+      from: aliceHex,
+      kind: 'restart',
+      data: {},
+      token: aliceToken,
+    });
+    expect(badKind.status).toBe(400);
   });
 });

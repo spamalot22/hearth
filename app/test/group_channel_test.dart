@@ -3,6 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/group_channel.dart';
 
 void main() {
+  const inviterHex =
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
   group('GroupChannel', () {
     test('create makes a random id and a 32-byte key', () {
       final c = GroupChannel.create('My Room');
@@ -19,7 +22,7 @@ void main() {
       final c = GroupChannel.create('Games');
       final back = GroupChannel.fromInvite(
         c.invite(
-          inviterPubkeyHex: 'abcd',
+          inviterPubkeyHex: inviterHex,
           inviterName: 'Alice',
           relayUrl: 'https://relay.example.com',
         ),
@@ -28,7 +31,7 @@ void main() {
       expect(back!.channel.id, c.id);
       expect(back.channel.key, c.key);
       expect(back.channel.name, 'Games');
-      expect(back.inviterPubkey, 'abcd');
+      expect(back.inviterPubkey, inviterHex);
       expect(back.inviterName, 'Alice');
       expect(back.relayUrl, 'https://relay.example.com');
     });
@@ -36,6 +39,12 @@ void main() {
     test('a malformed invite returns null', () {
       expect(GroupChannel.fromInvite('garbage'), isNull);
       expect(GroupChannel.fromInvite('hearth:not base64!!'), isNull);
+      expect(
+        GroupChannel.fromInvite(
+          GroupChannel.create('bad').invite(inviterPubkeyHex: 'abcd'),
+        ),
+        isNull,
+      );
     });
   });
 }
