@@ -2614,6 +2614,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  Future<void> _openSettingsAfterDrawerCloses() async {
+    Navigator.pop(context);
+    await Future<void>.delayed(const Duration(milliseconds: 280));
+    if (!mounted) return;
+    await _openSettings();
+  }
+
   /// Shared settings body: tabbed content.
   Widget _buildSettingsBody({required bool showClose}) {
     return DefaultTabController(
@@ -2665,24 +2672,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  /// Enumerates audio devices. On some platforms (Windows), labels are empty
-  /// until getUserMedia has been called at least once, so we do a quick
-  /// acquire-and-release first to trigger the permission prompt.
+  /// Enumerates audio devices. On desktop, labels can be empty until the native
+  /// WebRTC layer has been initialized, so we do a lightweight kick there. On
+  /// mobile, opening Settings must not request microphone permission; voice chat
+  /// and the explicit mic test button handle that user-visible permission flow.
   Future<List<MediaDeviceInfo>> _enumerateAudioDevices() async {
-    // On mobile, trigger permission grant first.
-    if (defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
-      try {
-        final stream = await navigator.mediaDevices.getUserMedia({
-          'audio': true,
-          'video': false,
-        });
-        for (final t in stream.getTracks()) {
-          await t.stop();
-        }
-        await stream.dispose();
-      } catch (_) {}
-    }
     var devices = await navigator.mediaDevices.enumerateDevices();
     // On Windows/desktop, enumerateDevices can return empty until a
     // PeerConnection has been created. Create a throwaway one to kick the
@@ -2724,9 +2718,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     style: Theme.of(context).textTheme.labelLarge,
                   ),
                   const SizedBox(height: 4),
-                  if (mics.isEmpty)
-                    const Text('No microphones found')
-                  else if (defaultTargetPlatform == TargetPlatform.android ||
+                  if (defaultTargetPlatform == TargetPlatform.android ||
                       defaultTargetPlatform == TargetPlatform.iOS)
                     ListTile(
                       dense: true,
@@ -2763,6 +2755,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         },
                       ),
                     )
+                  else if (mics.isEmpty)
+                    const Text('No microphones found')
                   else
                     for (final mic in mics)
                       ListTile(
@@ -6247,10 +6241,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               dense: true,
               leading: const Icon(Icons.settings_outlined, size: 20),
               title: const Text('Settings'),
-              onTap: () {
-                Navigator.pop(context);
-                unawaited(_openSettings());
-              },
+              onTap: () => unawaited(_openSettingsAfterDrawerCloses()),
             ),
             ListTile(
               dense: true,

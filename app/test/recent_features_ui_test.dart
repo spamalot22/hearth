@@ -105,6 +105,8 @@ void main() {
       expect(find.text('Network'), findsOneWidget);
       expect(find.text('Privacy'), findsOneWidget);
       expect(find.text('AI'), findsOneWidget);
+      expect(find.text('Built-in Microphone'), findsOneWidget);
+      expect(find.text('No microphones found'), findsNothing);
       await _finish(tester);
     } finally {
       debugDefaultTargetPlatformOverride = null;
