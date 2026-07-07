@@ -47,6 +47,7 @@ credential in Portainer (a **classic PAT with `read:packages`**).
 |-----|----------|-------|
 | `TS_AUTHKEY` | yes | the reusable auth key |
 | `TS_HOSTNAME` | no | node name → `https://<name>.<tailnet>.ts.net` (default `hearth-relay`) |
+| `TS_EXTRA_ARGS` | no | defaults to `--netfilter-mode=off` for NAS compatibility |
 | `GIPHY_KEY` | no | GIF search; without it search falls back to paste-a-URL |
 | `FREESOUND_KEY` | no | sound search |
 | `TAG` | no | image tag (default `latest`) |
@@ -71,6 +72,12 @@ Funnel needs **kernel networking** (a real TUN interface), so the stack maps
 scoped to the container's own network namespace, **not** privileged mode, no host or
 filesystem access.
 
+The stack disables Tailscale netfilter management with
+`TS_EXTRA_ARGS=--netfilter-mode=off`. This relay is not a subnet router or exit node;
+it only runs Serve/Funnel to proxy public HTTPS to `127.0.0.1:8787`. Disabling
+netfilter avoids NAS kernels that reject Tailscale's connmark rules while keeping the
+container in kernel/TUN mode for Funnel.
+
 ## 4 · Verify + point the app
 ```
 curl https://<host>.<tailnet>.ts.net/health    # → {"ok":true}
@@ -83,6 +90,14 @@ Then in Hearth on each device: drawer → **Relay** → that URL → restart. De
   Almost always **userspace mode** (`TS_USERSPACE=true`): it configures Funnel but
   never receives inbound traffic. Use kernel mode (the default). Confirm the relay
   itself is fine by exec'ing the tailscale container: `wget -qO- http://127.0.0.1:8787/health`.
+- **`curl: (35) TLS connect error: unexpected eof while reading`** — public Funnel DNS
+  resolves and accepts TCP, but HTTPS is not actually being served. First confirm the
+  relay answers inside the shared network namespace:
+  `docker exec -it <tailscale-container> wget -qO- http://127.0.0.1:8787/health`.
+  Then check `tailscale serve status` and `tailscale funnel status` inside the
+  Tailscale container. If the logs mention `CONNMARK`, `--nfmask`, or
+  `src_valid_mark`, make sure the stack includes `TS_EXTRA_ARGS=--netfilter-mode=off`
+  and redeploy it.
 - **`NXDOMAIN` / "could not resolve"** — usually a **stale negative DNS cache** from
   querying the name before Funnel published it. Try another resolver
   (`nslookup <host> 9.9.9.9`) or wait out the negative TTL. Funnel DNS is public.
