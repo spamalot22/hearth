@@ -85,6 +85,33 @@ Future<void> _finish(WidgetTester tester) async {
 void main() {
   setUp(warnings.clear);
 
+  test(
+    'settings device cert sort accepts DeviceStore immutable lists',
+    () async {
+      final root = await Identity.generate();
+      final thisDevice = await Identity.generate();
+      final otherDevice = await Identity.generate();
+      final thisCert = await DeviceCert.issue(
+        root: root,
+        deviceKey: thisDevice.publicKey,
+        name: 'This device',
+      );
+      final otherCert = await DeviceCert.issue(
+        root: root,
+        deviceKey: otherDevice.publicKey,
+        name: 'Other device',
+      );
+
+      final sorted = sortedSettingsDeviceCerts(
+        List<DeviceCert>.unmodifiable([otherCert, thisCert]),
+        thisDevice.publicKeyHex,
+      );
+
+      expect(sorted.first.deviceKeyHex, thisDevice.publicKeyHex);
+      expect(sorted, hasLength(2));
+    },
+  );
+
   testWidgets('Android settings opens as a populated fullscreen page', (
     tester,
   ) async {

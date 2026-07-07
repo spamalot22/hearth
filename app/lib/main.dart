@@ -350,6 +350,20 @@ class HearthTestApi {
   simulateIncomingDeviceContact;
 }
 
+@visibleForTesting
+List<DeviceCert> sortedSettingsDeviceCerts(
+  Iterable<DeviceCert> certs,
+  String thisDeviceHex,
+) {
+  final sorted = certs.toList();
+  sorted.sort((a, b) {
+    if (a.deviceKeyHex == thisDeviceHex) return -1;
+    if (b.deviceKeyHex == thisDeviceHex) return 1;
+    return b.issuedMs.compareTo(a.issuedMs);
+  });
+  return sorted;
+}
+
 /// The Hearth theme for a given [brightness] — the ember seed with warm surfaces
 /// (charcoal in dark, parchment in light) so both modes feel fireside.
 ThemeData hearthTheme(Brightness brightness) {
@@ -3080,15 +3094,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (store == null) {
       return const Center(child: Text('Device store not available'));
     }
-    final certs = store.certs;
+    final certs = sortedSettingsDeviceCerts(
+      store.certs,
+      widget.deviceKeys.publicKeyHex,
+    );
     final revoked = store.revokedDeviceKeys;
     final thisDeviceHex = widget.deviceKeys.publicKeyHex;
-    // Sort: this device first, then by issued date descending.
-    certs.sort((a, b) {
-      if (a.deviceKeyHex == thisDeviceHex) return -1;
-      if (b.deviceKeyHex == thisDeviceHex) return 1;
-      return b.issuedMs.compareTo(a.issuedMs);
-    });
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
