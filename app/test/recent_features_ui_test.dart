@@ -99,6 +99,7 @@ void main() {
       await _settle(tester);
 
       expect(find.text('Settings'), findsOneWidget);
+      expect(find.byType(AppBar), findsOneWidget);
       expect(find.text('Audio'), findsOneWidget);
       expect(find.text('Identity'), findsOneWidget);
       expect(find.text('Devices'), findsOneWidget);

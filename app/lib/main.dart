@@ -2582,20 +2582,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
-    // On mobile, use a normal full-screen route. A modal bottom sheet nested
-    // inside the drawer route can render as an empty scrim on Android.
+    // On mobile, use a normal full-screen page with its own Scaffold/AppBar.
+    // Bottom sheets and body-only routes have both produced blank scrims on
+    // Android while launched from the drawer.
     final usePage =
         !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS);
     if (usePage) {
       await Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          fullscreenDialog: true,
-          builder: (context) => Scaffold(
-            body: SafeArea(child: _buildSettingsBody(showClose: true)),
-          ),
-        ),
+        MaterialPageRoute(builder: (context) => _buildSettingsPage()),
       );
       return;
     }
@@ -2619,6 +2615,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     await Future<void>.delayed(const Duration(milliseconds: 280));
     if (!mounted) return;
     await _openSettings();
+  }
+
+  /// Full-screen settings page for mobile.
+  Widget _buildSettingsPage() {
+    return DefaultTabController(
+      length: 6,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Settings'),
+          bottom: const TabBar(
+            isScrollable: true,
+            tabs: [
+              Tab(text: 'Audio'),
+              Tab(text: 'Identity'),
+              Tab(text: 'Devices'),
+              Tab(text: 'Network'),
+              Tab(text: 'Privacy'),
+              Tab(text: 'AI'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _audioTab(),
+            _identityTab(),
+            _devicesTab(),
+            _networkTab(),
+            _privacyTab(),
+            _aiTab(),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Shared settings body: tabbed content.
