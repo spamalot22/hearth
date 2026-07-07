@@ -71,12 +71,6 @@ Funnel needs **kernel networking** (a real TUN interface), so the stack maps
 scoped to the container's own network namespace, **not** privileged mode, no host or
 filesystem access.
 
-The Funnel config lives in `backend/tailscale/funnel.json` and is mounted as the
-directory `/config` inside the Tailscale container. Keep it as a directory mount:
-Tailscale watches `TS_SERVE_CONFIG`, and mounting a single generated config file can
-fail on some Compose/Portainer setups with `failed to add fsnotify to watch: no such
-file`.
-
 ## 4 · Verify + point the app
 ```
 curl https://<host>.<tailnet>.ts.net/health    # → {"ok":true}
@@ -96,9 +90,9 @@ Then in Hearth on each device: drawer → **Relay** → that URL → restart. De
   Then check `tailscale serve status` and `tailscale funnel status` inside the
   Tailscale container.
 - **`failed to add fsnotify to watch: no such file`** — the file named by
-  `TS_SERVE_CONFIG` does not exist inside the Tailscale container at startup. Redeploy
-  from the current compose file and confirm the `./tailscale:/config:ro` mount is
-  present, then exec into the container and check `ls -l /config/funnel.json`.
+  `TS_SERVE_CONFIG` does not exist inside the Tailscale container at startup. Check
+  the rendered Portainer stack and confirm the `ts-funnel` config is mounted at
+  `/config/funnel.json`.
 - **`NXDOMAIN` / "could not resolve"** — usually a **stale negative DNS cache** from
   querying the name before Funnel published it. Try another resolver
   (`nslookup <host> 9.9.9.9`) or wait out the negative TTL. Funnel DNS is public.

@@ -28,7 +28,9 @@ services:
       TS_SERVE_CONFIG: /config/funnel.json
     volumes:
       - tailscale-state:/var/lib/tailscale
-      - ./tailscale:/config:ro
+    configs:
+      - source: ts-funnel
+        target: /config/funnel.json
     # Funnel needs kernel mode → a real TUN device. The host must provide /dev/net/tun
     # (load the `tun` kernel module on the host if missing; Proxmox LXC: lxc.mount.entry).
     devices:
@@ -54,6 +56,19 @@ services:
     depends_on:
       - tailscale
     restart: always
+
+configs:
+  ts-funnel:
+    content: |
+      {
+        "TCP": { "443": { "HTTPS": true } },
+        "Web": {
+          "$${TS_CERT_DOMAIN}:443": {
+            "Handlers": { "/": { "Proxy": "http://127.0.0.1:8787" } }
+          }
+        },
+        "AllowFunnel": { "$${TS_CERT_DOMAIN}:443": true }
+      }
 
 volumes:
   tailscale-state:
