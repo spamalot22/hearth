@@ -78,6 +78,12 @@ it only runs Serve/Funnel to proxy public HTTPS to `127.0.0.1:8787`. Disabling
 netfilter avoids NAS kernels that reject Tailscale's connmark rules while keeping the
 container in kernel/TUN mode for Funnel.
 
+The Funnel config lives in `backend/tailscale/funnel.json` and is mounted as the
+directory `/config` inside the Tailscale container. Keep it as a directory mount:
+Tailscale watches `TS_SERVE_CONFIG`, and mounting a single generated config file can
+fail on some Compose/Portainer setups with `failed to add fsnotify to watch: no such
+file`.
+
 ## 4 · Verify + point the app
 ```
 curl https://<host>.<tailnet>.ts.net/health    # → {"ok":true}
@@ -98,6 +104,10 @@ Then in Hearth on each device: drawer → **Relay** → that URL → restart. De
   Tailscale container. If the logs mention `CONNMARK`, `--nfmask`, or
   `src_valid_mark`, make sure the stack includes `TS_EXTRA_ARGS=--netfilter-mode=off`
   and redeploy it.
+- **`failed to add fsnotify to watch: no such file`** — the file named by
+  `TS_SERVE_CONFIG` does not exist inside the Tailscale container at startup. Redeploy
+  from the current compose file and confirm the `./tailscale:/config:ro` mount is
+  present, then exec into the container and check `ls -l /config/funnel.json`.
 - **`NXDOMAIN` / "could not resolve"** — usually a **stale negative DNS cache** from
   querying the name before Funnel published it. Try another resolver
   (`nslookup <host> 9.9.9.9`) or wait out the negative TTL. Funnel DNS is public.
