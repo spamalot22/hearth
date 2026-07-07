@@ -47,7 +47,6 @@ credential in Portainer (a **classic PAT with `read:packages`**).
 |-----|----------|-------|
 | `TS_AUTHKEY` | yes | the reusable auth key |
 | `TS_HOSTNAME` | no | node name → `https://<name>.<tailnet>.ts.net` (default `hearth-relay`) |
-| `TS_EXTRA_ARGS` | no | defaults to `--netfilter-mode=off` for NAS compatibility |
 | `GIPHY_KEY` | no | GIF search; without it search falls back to paste-a-URL |
 | `FREESOUND_KEY` | no | sound search |
 | `TAG` | no | image tag (default `latest`) |
@@ -72,12 +71,6 @@ Funnel needs **kernel networking** (a real TUN interface), so the stack maps
 scoped to the container's own network namespace, **not** privileged mode, no host or
 filesystem access.
 
-The stack disables Tailscale netfilter management with
-`TS_EXTRA_ARGS=--netfilter-mode=off`. This relay is not a subnet router or exit node;
-it only runs Serve/Funnel to proxy public HTTPS to `127.0.0.1:8787`. Disabling
-netfilter avoids NAS kernels that reject Tailscale's connmark rules while keeping the
-container in kernel/TUN mode for Funnel.
-
 The Funnel config lives in `backend/tailscale/funnel.json` and is mounted as the
 directory `/config` inside the Tailscale container. Keep it as a directory mount:
 Tailscale watches `TS_SERVE_CONFIG`, and mounting a single generated config file can
@@ -101,9 +94,7 @@ Then in Hearth on each device: drawer → **Relay** → that URL → restart. De
   relay answers inside the shared network namespace:
   `docker exec -it <tailscale-container> wget -qO- http://127.0.0.1:8787/health`.
   Then check `tailscale serve status` and `tailscale funnel status` inside the
-  Tailscale container. If the logs mention `CONNMARK`, `--nfmask`, or
-  `src_valid_mark`, make sure the stack includes `TS_EXTRA_ARGS=--netfilter-mode=off`
-  and redeploy it.
+  Tailscale container.
 - **`failed to add fsnotify to watch: no such file`** — the file named by
   `TS_SERVE_CONFIG` does not exist inside the Tailscale container at startup. Redeploy
   from the current compose file and confirm the `./tailscale:/config:ro` mount is

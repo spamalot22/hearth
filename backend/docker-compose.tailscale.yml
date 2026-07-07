@@ -12,10 +12,6 @@
 #   TS_USERSPACE   "false" (default) = kernel mode, REQUIRED for Funnel — userspace mode
 #                  configures Funnel but never receives inbound public traffic (you get a
 #                  502). Needs /dev/net/tun on the host (load the `tun` kernel module if missing).
-#   TS_EXTRA_ARGS  extra `tailscale up` flags. Defaults to `--netfilter-mode=off`
-#                  because this sidecar is only running Serve/Funnel, not subnet routing
-#                  or exit-node traffic, and some NAS kernels reject Tailscale's
-#                  connmark rules.
 #   GIPHY_KEY      (optional) GIF-search proxy key
 #   FREESOUND_KEY  (optional) sound-search proxy key
 #   TAG            (optional) relay image tag (default: latest)
@@ -28,7 +24,6 @@ services:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY to a Tailscale auth key}
       TS_HOSTNAME: ${TS_HOSTNAME:-hearth-relay}
       TS_USERSPACE: ${TS_USERSPACE:-false}
-      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:---netfilter-mode=off}
       TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/funnel.json
     volumes:
