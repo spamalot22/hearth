@@ -16,9 +16,6 @@ RUN pnpm install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src ./src
 
-# Seed version manifest (self-heals from GitHub at runtime if stale).
-RUN mkdir -p data && echo '{"version":"0.0.0","seq":0,"assets":{},"sig":""}' > data/version.json
-
 # Bundle to a single ESM file. All deps are pure JS — no native addons.
 # Uses server.ts (prod entry, no dotenv — env injected by Docker).
 RUN npx esbuild src/server.ts \
@@ -34,8 +31,6 @@ FROM gcr.io/distroless/nodejs24-debian12:latest
 WORKDIR /app
 
 COPY --from=build /app/dist ./
-# Version manifest (optional — self-heals from GitHub if absent).
-COPY --from=build /app/data ./data
 
 ENV PORT=8787
 EXPOSE 8787

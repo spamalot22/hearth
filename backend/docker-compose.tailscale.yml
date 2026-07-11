@@ -47,11 +47,6 @@ services:
       PORT: 8787
       GIPHY_KEY: ${GIPHY_KEY:-}
       FREESOUND_KEY: ${FREESOUND_KEY:-}
-      RELEASE_SECRET: ${RELEASE_SECRET:-}
-      RELEASE_PUBLIC_KEY: ${RELEASE_PUBLIC_KEY:-}
-      GITHUB_REPO: ${GITHUB_REPO:-spamalot22/hearth}
-    volumes:
-      - relay-data:/app/data
     network_mode: service:tailscale # share Tailscale's netns; Funnel → localhost:8787
     depends_on:
       - tailscale
@@ -72,4 +67,3 @@ configs:
 
 volumes:
   tailscale-state:
-  relay-data:

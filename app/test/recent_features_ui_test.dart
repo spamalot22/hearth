@@ -34,9 +34,16 @@ Future<void> _settle(WidgetTester tester) async {
   _drain(tester);
 }
 
-Future<void> _boot(WidgetTester tester) async {
+Future<void> _boot(
+  WidgetTester tester, {
+  Iterable<DeviceCert>? debugSettingsDeviceCerts,
+}) async {
   await tester.pumpWidget(
-    HearthApp(keyStore: InMemoryKeyStore(), autoPoll: false),
+    HearthApp(
+      keyStore: InMemoryKeyStore(),
+      autoPoll: false,
+      debugSettingsDeviceCerts: debugSettingsDeviceCerts,
+    ),
   );
   await _settle(tester);
 }
@@ -117,7 +124,18 @@ void main() {
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     try {
-      await _boot(tester);
+      final root = await Identity.generate();
+      final device = await Identity.generate();
+      final cert = await DeviceCert.issue(
+        root: root,
+        deviceKey: device.publicKey,
+        name: 'Stored Android device',
+      );
+
+      await _boot(
+        tester,
+        debugSettingsDeviceCerts: List<DeviceCert>.unmodifiable([cert]),
+      );
       await _createChannel(tester, 'general');
 
       await tester.tap(find.byTooltip('Open navigation menu'));
@@ -135,6 +153,10 @@ void main() {
       expect(find.text('AI'), findsOneWidget);
       expect(find.text('Built-in Microphone'), findsOneWidget);
       expect(find.text('No microphones found'), findsNothing);
+
+      await tester.tap(find.widgetWithText(Tab, 'Devices'));
+      await _settle(tester);
+      expect(find.text('Stored Android device'), findsOneWidget);
       await _finish(tester);
     } finally {
       debugDefaultTargetPlatformOverride = null;

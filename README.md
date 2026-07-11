@@ -43,9 +43,10 @@ offline); it can verify that a message is authentic but can never read it.
 - **Offline delivery is epidemic, not routed** — any peer can carry and re-serve
   another's (signed, sealed) messages without being able to forge or read them.
 - **Signed auto-updates with P2P enforcement** — a release signing key (Ed25519)
-  produces manifests the relay serves; peers propagate them epidemically. The app
-  verifies the signature against a hardcoded public key before gating — no trust
-  in the relay or peers required. Downgrade-protected by a monotonic sequence.
+  produces manifests published with GitHub Releases; peers can propagate them
+  epidemically. The app verifies the signature and asset hashes against a
+  hardcoded public key. Numeric version ordering plus a monotonic sequence prevent
+  downgrades.
 - **Peer-exchange & cached candidates** — once you hold a single live link, you
   discover all other reachable peers through the mesh (no relay). Known peers are
   cached locally for near-instant reconnection on restart.
@@ -81,7 +82,6 @@ disposable convenience.**
                          /announce /peers /signal
                          /messages /poll  (offline courier)
                          /tunnel (symmetric-NAT fallback)
-                         /version (signed auto-update manifest)
                          /gif/search /sound/search (keyed proxy)
 ```
 
@@ -280,9 +280,10 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 - **Signal mailbox reads are token-gated** — announces are Ed25519-signed and
   return a short-lived token; reading your signal mailbox requires the token, so
   strangers can't observe your ICE candidates.
-- **Auto-updates are signature-verified** — the relay (or any peer) can serve an
-  update manifest, but the app only trusts it if signed by the hardcoded release
-  key. A malicious relay or peer can't forge an update, only withhold one.
+- **Auto-updates are signature-verified** — clients fetch the latest manifest
+  from GitHub Releases and peers may relay it, but the app trusts it only when it
+  is signed by the hardcoded release key. GitHub or a peer can withhold an update,
+  but cannot forge one.
 - **Per-pubkey rate limiting** on signal and message endpoints prevents mailbox
   flooding from anonymous attackers.
 - **What the relay still learns:** that a peer is online, who they're signalling

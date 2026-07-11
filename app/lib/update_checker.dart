@@ -21,13 +21,26 @@ const String releasePublicKeyHex = String.fromEnvironment(
   defaultValue: '',
 );
 
+const String githubManifestUrl =
+    'https://github.com/spamalot22/hearth/releases/latest/download/manifest.json';
+
 /// Result of an update check.
 class UpdateInfo {
   final String version;
   final int seq;
   final Map<String, dynamic> assets;
+  final String? signature;
 
-  UpdateInfo({required this.version, required this.seq, required this.assets});
+  UpdateInfo({
+    required this.version,
+    required this.seq,
+    required this.assets,
+    this.signature,
+  });
+
+  Map<String, Object?>? get signedManifest => signature == null
+      ? null
+      : {'version': version, 'seq': seq, 'assets': assets, 'sig': signature};
 }
 
 /// Outcome of an update check.
@@ -37,7 +50,9 @@ sealed class UpdateState {
 
 /// On the current version (or check skipped on a dev build).
 class UpToDate extends UpdateState {
-  const UpToDate();
+  const UpToDate([this.verifiedRelease]);
+
+  final UpdateInfo? verifiedRelease;
 }
 
 /// A valid, newer signed release is available.
@@ -46,21 +61,59 @@ class UpdateAvailable extends UpdateState {
   final UpdateInfo info;
 }
 
-/// Couldn't reach the relay to verify the version — released builds block on this
-/// (you must connect to a relay to confirm you're current / get the update).
-class RelayUnreachable extends UpdateState {
-  const RelayUnreachable();
+/// GitHub could not provide a valid signed release manifest.
+class UpdateCheckUnavailable extends UpdateState {
+  const UpdateCheckUnavailable();
 }
 
-/// Verifies a peer- or relay-provided manifest's Ed25519 signature against
+/// A release tag accepted by CI: `X.Y.Z`, optionally prefixed with `v`.
+class ReleaseVersion implements Comparable<ReleaseVersion> {
+  const ReleaseVersion(this.major, this.minor, this.patch);
+
+  final int major;
+  final int minor;
+  final int patch;
+
+  static final _pattern = RegExp(
+    r'^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$',
+  );
+
+  static ReleaseVersion? tryParse(String value) {
+    final match = _pattern.firstMatch(value);
+    if (match == null) return null;
+    return ReleaseVersion(
+      int.parse(match.group(1)!),
+      int.parse(match.group(2)!),
+      int.parse(match.group(3)!),
+    );
+  }
+
+  @override
+  int compareTo(ReleaseVersion other) {
+    final majorResult = major.compareTo(other.major);
+    if (majorResult != 0) return majorResult;
+    final minorResult = minor.compareTo(other.minor);
+    if (minorResult != 0) return minorResult;
+    return patch.compareTo(other.patch);
+  }
+}
+
+bool isNewerRelease(String candidate, String current) {
+  final candidateVersion = ReleaseVersion.tryParse(candidate);
+  final currentVersion = ReleaseVersion.tryParse(current);
+  return candidateVersion != null &&
+      currentVersion != null &&
+      candidateVersion.compareTo(currentVersion) > 0;
+}
+
+/// Verifies a peer- or GitHub-provided manifest's Ed25519 signature against
 /// [publicKeyHex], over the **canonical** signing bytes ([manifestSigningBytes]).
 /// Returns its fields as [UpdateInfo] when valid, else null (missing fields,
 /// bad shape, or forged/garbled signature).
 ///
-/// This is the single verification both the relay check ([checkForUpdate]) and
+/// This is the single verification both the GitHub check ([checkForUpdate]) and
 /// the peer-to-peer path (`ChannelManager._handleVersionControl`) call, so the
-/// two can never drift onto different signing formats again — the drift that
-/// silently broke P2P propagation when only the relay path was migrated.
+/// two can never drift onto different signing formats.
 Future<UpdateInfo?> verifyManifest(
   Map<String, dynamic> manifest,
   String publicKeyHex,
@@ -83,49 +136,65 @@ Future<UpdateInfo?> verifyManifest(
     return null;
   }
   if (!valid) return null;
-  return UpdateInfo(version: version, seq: seq, assets: assets);
+  return UpdateInfo(version: version, seq: seq, assets: assets, signature: sig);
 }
 
-/// Checks the relay for a signed update manifest.
+/// Checks GitHub Releases for the latest signed update manifest.
 ///
-/// Returns [UpdateInfo] if a valid, newer release is available; null if
-/// up-to-date, unverifiable, or unreachable. Never throws — update checks are
-/// best-effort and must not disrupt the app.
-Future<UpdateState> checkForUpdate(Uri relayUrl, {http.Client? client}) async {
+/// Returns a typed outcome for a newer release, the current release, or a check
+/// that could not be completed. Never throws or blocks normal app operation.
+Future<UpdateState> checkForUpdate({
+  Uri? manifestUrl,
+  http.Client? client,
+  String currentVersion = appVersion,
+  String publicKeyHex = releasePublicKeyHex,
+  Future<int> Function()? readLastSeq,
+  Future<void> Function(int)? writeLastSeq,
+}) async {
   // Dev builds (and any build without the release key baked in) never enforce.
-  if (releasePublicKeyHex.isEmpty || appVersion == 'dev') {
+  if (publicKeyHex.isEmpty || currentVersion == 'dev') {
     return const UpToDate();
   }
+  final current = ReleaseVersion.tryParse(currentVersion);
+  if (current == null) return const UpdateCheckUnavailable();
+
   final c = client ?? http.Client();
   try {
     final res = await c
-        .get(relayUrl.replace(path: '/version'))
-        .timeout(const Duration(seconds: 5));
-    // Any HTTP response means the relay is reachable — only a connection failure
-    // counts as "down". A reachable relay with no manifest (404) is up to date.
-    if (res.statusCode != 200) return const UpToDate();
+        .get(manifestUrl ?? Uri.parse(githubManifestUrl))
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) return const UpdateCheckUnavailable();
     final body = jsonDecode(res.body) as Map<String, dynamic>;
-    final info = await verifyManifest(body, releasePublicKeyHex);
-    if (info == null) return const UpToDate(); // missing fields / forged
+    final info = await verifyManifest(body, publicKeyHex);
+    if (info == null) return const UpdateCheckUnavailable();
+
+    final candidate = ReleaseVersion.tryParse(info.version);
+    if (candidate == null) return const UpdateCheckUnavailable();
+    final comparison = candidate.compareTo(current);
+
+    // Seeing our own signed manifest establishes the downgrade floor. An older
+    // signed release is never an update, even on a fresh installation.
+    if (comparison <= 0) {
+      if (comparison == 0) {
+        final lastSeq = await (readLastSeq ?? _getLastSeq)();
+        if (info.seq > lastSeq) {
+          await (writeLastSeq ?? _setLastSeq)(info.seq);
+        }
+      }
+      return UpToDate(comparison == 0 ? info : null);
+    }
 
     // Downgrade protection: reject seq ≤ our last-seen seq.
-    final lastSeq = await _getLastSeq();
-    if (info.seq <= lastSeq) return const UpToDate();
-
-    // Already on this version — persist its seq as the downgrade floor.
-    if (info.version == appVersion) {
-      await _setLastSeq(info.seq);
-      return const UpToDate();
-    }
+    final lastSeq = await (readLastSeq ?? _getLastSeq)();
+    if (info.seq <= lastSeq) return const UpdateCheckUnavailable();
 
     return UpdateAvailable(info);
   } on TimeoutException {
-    return const RelayUnreachable();
+    return const UpdateCheckUnavailable();
   } on http.ClientException {
-    return const RelayUnreachable();
+    return const UpdateCheckUnavailable();
   } catch (_) {
-    // Malformed response etc. — relay's reachable, just nothing actionable.
-    return const UpToDate();
+    return const UpdateCheckUnavailable();
   } finally {
     if (client == null) c.close();
   }

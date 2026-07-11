@@ -65,6 +65,7 @@ class ScreenBroadcast {
     required DesktopCapturerSource source,
     required ScreenResolution resolution,
     required void Function() onEnded,
+    bool Function(String peerHex)? peerAllowed,
   }) async {
     final stream = await navigator.mediaDevices.getDisplayMedia(
       _displayConstraints(source, resolution),
@@ -75,6 +76,7 @@ class ScreenBroadcast {
       identity: identity,
       localStream: stream,
       forceInitiator: true, // the sharer offers to every viewer
+      peerAllowed: peerAllowed,
     );
     final broadcast = ScreenBroadcast._(source.name, mesh, stream, onEnded);
     // The mesh only starts announcing once peerConnected is listened to.
@@ -130,6 +132,7 @@ class ScreenView {
     required Identity identity,
     required Uri relayUrl,
     required void Function() onChange,
+    bool Function(String peerHex)? peerAllowed,
   }) async {
     final renderer = RTCVideoRenderer();
     await renderer.initialize();
@@ -139,6 +142,7 @@ class ScreenView {
       channel: 'screen:$channelId:$sharerHex',
       identity: identity,
       forceInitiator: false, // answer-only; the sharer offers
+      peerAllowed: peerAllowed,
       onRemoteStream: (peer, stream) {
         if (view._closed || peer != sharerHex) return;
         renderer.srcObject = stream;

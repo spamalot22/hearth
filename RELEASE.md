@@ -14,26 +14,26 @@ git tag 0.1.6
 git push origin 0.1.6      # the PUSH is what triggers it — `git tag` alone does nothing
 ```
 
-Bare (`0.1.6`) or v-prefixed (`v0.1.6`) both match. Watch it under the repo's
-**Actions** tab. (The GitHub web UI — *Releases → Draft a new release → publish* —
-also works; publishing creates and pushes the tag.)
+Bare (`0.1.6`) or v-prefixed (`v0.1.6`) tags both work. Push the tag and watch the
+repo's **Actions** tab; do not pre-publish a GitHub Release because the workflow
+must attach and sign the complete asset set first.
 
 ## What you get
 
 - **Relay image** on GHCR. Deploy it on the host with `docker compose pull &&
   docker compose up -d` — see [backend/DEPLOY.md](backend/DEPLOY.md).
 - **Client builds** on the release page: `hearth-android.apk` (sideload),
-  `hearth-windows.zip`, `hearth-web.zip`. The APK is debug-signed — fine to
-  sideload; add a release signing config before targeting the Play Store.
+  `hearth-windows.zip`, `hearth-web.zip`, plus the signed `manifest.json` used by
+  auto-update clients.
 
-## Auto-update (optional — dormant until armed)
+## Auto-update signing
 
-Clients can check the relay for a signed release and install it in-app (Android
-one-tap; Windows self-replace + relaunch). It's **off** until a signing key is
-baked in — without `RELEASE_PUBLIC_KEY` the client never checks, blocks, or
-updates.
+Clients fetch `manifest.json` directly from the latest public GitHub Release and
+install in-app (Android one-tap; Windows self-replace + relaunch). They verify its
+Ed25519 signature and each downloaded asset's SHA-256 hash before installation.
+The relay is not involved and can be offline during a release.
 
-To arm it:
+Configure these once:
 
 1. **Generate a release keypair** (once):
    ```sh
@@ -42,38 +42,29 @@ To arm it:
    Keep `privateKey` secret; `publicKey` is safe to expose.
 2. **GitHub → Settings → Secrets and variables → Actions:**
    - Variable `RELEASE_PUBLIC_KEY` = the public key (baked into every build).
-   - Variable `RELAY_URL` = the relay's public URL (e.g. the Tailscale Funnel one).
    - Secret `RELEASE_PRIVATE_KEY` = the private key (CI signs the manifest with it).
-   - Secret `RELEASE_SECRET` = any random string (authorises `POST /version`).
-3. **On the relay** (`backend/.env`): the same `RELEASE_SECRET`, the public key
-   as `RELEASE_PUBLIC_KEY` (optional but recommended, so the relay rejects forged
-   manifests before storing them), `GITHUB_REPO=spamalot22/hearth`, and
-   `GITHUB_TOKEN` = a **read-only** GitHub token (fine-grained, Contents: read).
-   The relay proxies the private release assets to clients with this token — it
-   never leaves the relay.
+   - Secrets `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+     `ANDROID_KEY_PASSWORD`, and `ANDROID_KEY_ALIAS` = the stable Android release
+     signing identity.
+   - Variable `RELAY_URL` = the app's default messaging relay URL. This is baked
+     into clients but is unrelated to update delivery.
 
-Once armed, each tag builds key-baked clients, signs a manifest of the assets, and
-POSTs it to the relay; clients on an older version then see an **Install** button.
-A released build that can't reach the relay blocks with "connect to a relay" — the
-deliberate private-phase kill-switch.
+Each tag builds key-baked clients, signs a manifest of the assets, and publishes
+everything atomically in one GitHub Release. Missing signing configuration fails
+the workflow before a release is published.
 
 ### Android updates need a *stable* signing key
 
-CI builds are **debug-signed with an ephemeral key** (regenerated each run), so an
-auto-update APK won't install over a previous one — Android rejects it
-(*signatures do not match*). For Android auto-update to work, add a fixed keystore
-(committed, or a CI secret) and a `signingConfig` in
-`app/android/app/build.gradle.kts` so every build shares one key. Until then an
-Android update is uninstall-then-reinstall. Windows + web are unaffected.
+Every release APK must use the same stable keystore. CI and Gradle both fail closed
+when it is missing; Android will reject an update signed by a different key.
 
 ## Notes
 
-- The `release-app` job ships **whatever platforms build** — one OS failing won't
-  block the others (`release:` runs `if: always()`).
+- `release-app` publishes only after Android, Windows, and web all build.
 - Client builds pin **Flutter 3.44.2** (`FLUTTER_VERSION` in `release-app.yml`);
   change it there to move the toolchain.
 - **Android is CI-only on some dev machines** — a corporate TLS proxy breaks local
   Gradle downloads, so let CI build/verify it. (The fixes for the modern Android
   toolchain — compileSdk 36 across all plugin modules, etc. — are already committed.)
-- The user-facing app version (`app/pubspec.yaml` `version:`) is separate from the
-  git tag; bump it there if you want the APK/exe to report a new version.
+- Release builds derive their displayed version and Android version code from the
+  git tag; `app/pubspec.yaml` is only the local-development fallback.

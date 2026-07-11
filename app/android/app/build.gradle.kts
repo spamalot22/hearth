@@ -9,10 +9,17 @@ plugins {
 
 // Release signing config is read from android/key.properties (gitignored). The
 // release workflow writes it from CI secrets; locally it points at the keystore.
-// When the file is absent (PR/CI builds, fresh clones) we fall back to debug
-// signing so non-release builds still work.
+// Debug builds need no key; release builds fail closed when it is absent.
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
+val isReleaseBuild = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+if (isReleaseBuild && !keystorePropertiesFile.exists()) {
+    throw GradleException(
+        "Release signing is not configured. Add android/key.properties before building a release APK."
+    )
+}
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
@@ -57,17 +64,9 @@ android {
 
     buildTypes {
         release {
-            // Use the real release keystore when key.properties is present (CI
-            // release builds + local signed builds). Android refuses an in-place
-            // update unless the new APK is signed with the same key, so every
-            // release must share this identity. Falls back to debug signing when
-            // the keystore is absent, so `flutter run --release` and PR/CI builds
-            // still work.
-            signingConfig = if (keystorePropertiesFile.exists()) {
-                signingConfigs.getByName("release")
-            } else {
-                signingConfigs.getByName("debug")
-            }
+            // Every published APK must share one signing identity so Android can
+            // authenticate and install it over an existing Hearth release.
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 }

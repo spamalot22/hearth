@@ -40,6 +40,7 @@ class WebRtcMesh {
     this.onPeerLeft,
     this.onPeerConnectedHex,
     this.onControl,
+    this.peerAllowed,
     this.forceInitiator,
     this.candidateCache,
     http.Client? client,
@@ -100,6 +101,10 @@ class WebRtcMesh {
   /// signalling) over the data channel. Null until track A wires a handler.
   final void Function(String peerHex, MeshControl control)? onControl;
 
+  /// Optional channel-level admission policy. Signalling authentication proves
+  /// who a peer is; this decides whether that identity belongs in this mesh.
+  final bool Function(String peerHex)? peerAllowed;
+
   /// Who offers in this mesh. `null` (default) uses the glare rule — the
   /// lexicographically-greater pubkey offers, so exactly one side of each pair
   /// does. `true` always offers to every discovered peer; `false` never offers
@@ -112,7 +117,7 @@ class WebRtcMesh {
   final CandidateCache? candidateCache;
 
   /// The signed release manifest to send to peers for version enforcement.
-  /// Set from the last-verified manifest (relay or peer-provided).
+  /// Set from the last-verified manifest (GitHub or peer-provided).
   Map<String, Object?>? versionManifest;
 
   /// Our own public key (hex) — our peer id in the mesh.
@@ -336,6 +341,7 @@ class WebRtcMesh {
     if (_closed ||
         peerHex.length != 64 ||
         peerHex == selfPubkeyHex ||
+        !(peerAllowed?.call(peerHex) ?? true) ||
         _links.containsKey(peerHex)) {
       return;
     }
@@ -355,6 +361,7 @@ class WebRtcMesh {
     final kind = signal['kind'] as String?;
     final data = signal['data'];
     if (from == null || kind == null || data is! Map) return;
+    if (!(peerAllowed?.call(from) ?? true)) return;
     final payload = data.cast<String, Object?>();
     // Drop anything not validly signed by the claimed sender — this is what
     // stops a relay/MITM impersonating a peer or substituting a fingerprint.
@@ -407,6 +414,10 @@ class WebRtcMesh {
   }
 
   void _emitPeer(_PeerLink link) {
+    if (!(peerAllowed?.call(link.peerHex) ?? true)) {
+      unawaited(link.dispose());
+      return;
+    }
     _backoffUntil.remove(link.peerHex); // connected — reset its backoff
     _backoffFailures.remove(link.peerHex);
     // Close any relay tunnel for this peer — direct connection wins.
@@ -474,7 +485,10 @@ class WebRtcMesh {
   /// Opens a relay tunnel as a fallback when ICE fails — symmetric NAT on both
   /// sides can't go direct, so the relay forwards opaque ciphertext.
   void _openTunnel(String peerHex) {
-    if (_tunnels.containsKey(peerHex)) return; // already tunnelling
+    if (!(peerAllowed?.call(peerHex) ?? true) ||
+        _tunnels.containsKey(peerHex)) {
+      return;
+    }
     final tunnel = RelayTunnel(
       baseUrl: _activeUrl,
       selfPubkeyHex: selfPubkeyHex,

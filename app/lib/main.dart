@@ -408,6 +408,7 @@ class HearthApp extends StatefulWidget {
     this.relayUrl,
     this.autoPoll = true,
     this.testApi,
+    this.debugSettingsDeviceCerts,
     super.key,
   });
 
@@ -419,6 +420,9 @@ class HearthApp extends StatefulWidget {
 
   /// Test-only seam for injecting simulated peer frames. Null in production.
   final HearthTestApi? testApi;
+
+  @visibleForTesting
+  final Iterable<DeviceCert>? debugSettingsDeviceCerts;
 
   @override
   State<HearthApp> createState() => _HearthAppState();
@@ -467,6 +471,7 @@ class _HearthAppState extends State<HearthApp> {
           autoPoll: widget.autoPoll,
           testApi: widget.testApi,
           themeMode: _themeMode,
+          debugSettingsDeviceCerts: widget.debugSettingsDeviceCerts,
         ),
       ),
     );
@@ -481,6 +486,7 @@ class _Bootstrap extends StatefulWidget {
     required this.autoPoll,
     this.testApi,
     this.themeMode,
+    this.debugSettingsDeviceCerts,
   });
 
   final KeyStore keyStore;
@@ -488,6 +494,7 @@ class _Bootstrap extends StatefulWidget {
   final bool autoPoll;
   final HearthTestApi? testApi;
   final ValueNotifier<ThemeMode>? themeMode;
+  final Iterable<DeviceCert>? debugSettingsDeviceCerts;
 
   @override
   State<_Bootstrap> createState() => _BootstrapState();
@@ -616,6 +623,7 @@ class _BootstrapState extends State<_Bootstrap> {
           autoPoll: widget.autoPoll,
           testApi: widget.testApi,
           themeMode: widget.themeMode,
+          debugSettingsDeviceCerts: widget.debugSettingsDeviceCerts,
         );
       },
     );
@@ -661,8 +669,7 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
   }
 
   Future<void> _checkUpdate() async {
-    final relayUrl = widget.relayUrl ?? kRelayUrl;
-    final state = await checkForUpdate(relayUrl);
+    final state = await checkForUpdate();
     if (!mounted) return;
     if (state is UpdateAvailable) {
       setState(() => _updateInfo = state.info);
@@ -1051,6 +1058,7 @@ class ChatScreen extends StatefulWidget {
     this.autoPoll = true,
     this.testApi,
     this.themeMode,
+    this.debugSettingsDeviceCerts,
     super.key,
   });
 
@@ -1065,6 +1073,9 @@ class ChatScreen extends StatefulWidget {
   final bool autoPoll;
   final HearthTestApi? testApi;
   final ValueNotifier<ThemeMode>? themeMode;
+
+  @visibleForTesting
+  final Iterable<DeviceCert>? debugSettingsDeviceCerts;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -1236,6 +1247,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   UpdateInfo? _updateInfo;
+  Map<String, Object?>? _verifiedReleaseManifest;
   double? _updateProgress;
   Offset _lastReactTap = Offset.zero; // where a quick-reaction was tapped
   bool _foreground =
@@ -1404,6 +1416,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             .map((c) => c.deviceKey)
             .toList();
       },
+      versionManifest: _verifiedReleaseManifest,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
@@ -2222,6 +2235,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Announces on [rendezvousId] to reach the card owner [ownerHex] for first
   /// contact. Idempotent per owner (replaces any live listener).
   void _startPendingRendezvous(String ownerHex, String rendezvousId) {
+    final bundle = _deviceStore?.bundleFor(widget.identity.publicKeyHex);
+    if (bundle == null) return;
     unawaited(_pendingContact[ownerHex]?.close());
     _pendingContact[ownerHex] = RendezvousListener.start(
       relayUrl: _relayUrl,
@@ -2229,11 +2244,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       rendezvousId: rendezvousId,
       identity: widget.deviceKeys.device,
       deviceCert: widget.deviceKeys.cert,
+      deviceBundle: bundle,
       ignore: {widget.identity.publicKeyHex, widget.deviceKeys.publicKeyHex},
       // We already know the owner from the card, so a rendezvous connect just
       // confirms reachability; the DM proper forms on its derived channel and
       // _onDmConnected retires this listener once it lands.
-      onContact: (_) {},
+      onContact: (intro) async {
+        if (intro.cert.rootKeyHex == ownerHex) {
+          await _rememberRendezvousIntro(intro);
+        }
+      },
     );
   }
 
@@ -2256,6 +2276,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!widget.autoPoll) return;
     final rv = _profile?.rendezvousId;
     if (rv == null) return;
+    final bundle = _deviceStore?.bundleFor(widget.identity.publicKeyHex);
+    if (bundle == null) return;
     unawaited(_rendezvous?.close());
     _rendezvous = RendezvousListener.start(
       relayUrl: _relayUrl,
@@ -2263,9 +2285,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       rendezvousId: rv,
       identity: widget.deviceKeys.device,
       deviceCert: widget.deviceKeys.cert,
+      deviceBundle: bundle,
       ignore: {widget.identity.publicKeyHex, widget.deviceKeys.publicKeyHex},
-      onContact: _onRendezvousContact,
+      onContact: (intro) async {
+        if (!await _rememberRendezvousIntro(intro)) return;
+        await _onRendezvousContact(intro.cert.rootKeyHex);
+      },
     );
+  }
+
+  /// Stores a rendezvous bundle monotonically, then checks the connecting
+  /// device against the newest copy. This prevents a revoked device replaying
+  /// an older, otherwise valid bundle to create a request or bootstrap a DM.
+  Future<bool> _rememberRendezvousIntro(RendezvousIntro intro) async {
+    final store = _deviceStore;
+    if (store == null) return false;
+    await store.setBundle(intro.bundle);
+    final current = store.bundleFor(intro.cert.rootKeyHex);
+    return current?.devices.any(
+          (key) => hex.encode(key) == intro.cert.deviceKeyHex,
+        ) ??
+        false;
   }
 
   /// Re-opens established DMs on [channels] without disturbing the active
@@ -2516,12 +2556,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _checkUpdate() async {
-    final state = await checkForUpdate(_relayUrl);
+    final state = await checkForUpdate();
     if (!mounted) return;
-    // Only a *confirmed newer* release forces an update (it also reaches us
-    // peer-to-peer via VersionControl). An unreachable relay must NOT block the
-    // app — Hearth is local-first and keeps working P2P/offline; the relay
-    // status dot already shows connectivity.
+    final verified = switch (state) {
+      UpdateAvailable(:final info) => info,
+      UpToDate(:final verifiedRelease) => verifiedRelease,
+      _ => null,
+    };
+    final manifest = verified?.signedManifest;
+    if (manifest != null) {
+      _verifiedReleaseManifest = manifest;
+      _channels?.updateVersionManifest(manifest);
+    }
+    // Only a confirmed newer release forces an update (it can also reach us
+    // peer-to-peer via VersionControl). A failed GitHub check must not block this
+    // local-first app from working P2P or offline.
     if (state is UpdateAvailable) {
       setState(() => _updateInfo = state.info);
     }
@@ -3091,14 +3140,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Widget _devicesTab() {
     final store = _deviceStore;
-    if (store == null) {
+    final debugCerts = widget.debugSettingsDeviceCerts;
+    if (store == null && debugCerts == null) {
       return const Center(child: Text('Device store not available'));
     }
     final certs = sortedSettingsDeviceCerts(
-      store.certs,
+      debugCerts ?? store!.certs,
       widget.deviceKeys.publicKeyHex,
     );
-    final revoked = store.revokedDeviceKeys;
+    final revoked = store?.revokedDeviceKeys ?? const <String>{};
     final thisDeviceHex = widget.deviceKeys.publicKeyHex;
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -3440,6 +3490,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             .map((c) => c.deviceKey)
             .toList();
       },
+      versionManifest: _verifiedReleaseManifest,
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
       await channels.openGroup(group.id, group.key);
@@ -4402,6 +4453,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         onChange: _voiceChanged,
         enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
         candidateCache: _channels?.candidateCache,
+        peerAllowed: (peerHex) =>
+            _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
       );
       _voice!.onSoundboard = (blob) {
         final session = _channels?.active;
@@ -4504,6 +4557,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         relayUrl: _relayUrl,
         source: choice.source,
         resolution: choice.resolution,
+        peerAllowed: (peerHex) =>
+            _channels?.isPeerAllowedForChannel(session.channelId, peerHex) ??
+            false,
         onEnded: () => unawaited(_stopScreenShare()),
       );
       if (!mounted) {
@@ -4543,6 +4599,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         sharerHex: sharerHex,
         identity: widget.identity,
         relayUrl: _relayUrl,
+        peerAllowed: (peerHex) =>
+            _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
         onChange: _voiceChanged,
       );
       if (!mounted) {

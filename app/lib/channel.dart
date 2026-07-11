@@ -221,6 +221,7 @@ class ChannelSession {
     void Function(String fromHex, List<String> peers)? onContactsOnline,
     void Function(Map<String, Object?> manifest)? onVersionControl,
     void Function(String peerHex, bool typing)? onTyping,
+    bool Function(String peerHex)? peerAllowed,
     void Function(String fromHex, String channelId, MeshControl control)?
     onInference,
   }) async {
@@ -250,6 +251,7 @@ class ChannelSession {
         channel: channelId,
         identity: meshIdentity ?? identity,
         candidateCache: candidateCache,
+        peerAllowed: peerAllowed,
         onPeerConnectedHex: onPeerConnectedHex,
         onPeerLeft: (_) {
           // Resume relay polling when the last P2P peer drops.
@@ -500,6 +502,7 @@ class ChannelManager {
     this.isDeviceRevoked,
     this.peerBundleLookup,
     this.ownDeviceKeys,
+    this.versionManifest,
   });
 
   final Identity identity;
@@ -545,6 +548,9 @@ class ChannelManager {
 
   /// Returns this identity's active device keys (for self-encryption in DMs).
   final List<Uint8List> Function()? ownDeviceKeys;
+
+  /// Last GitHub-verified release manifest, forwarded to connected peers.
+  Map<String, Object?>? versionManifest;
 
   final Map<String, ChannelSession> _sessions = {};
   // DM ids currently being opened — guards the await window in [openDm] so two
@@ -611,23 +617,24 @@ class ChannelManager {
 
   /// Handles a peer-provided version manifest. Verifies the signature
   /// independently — the peer is just a courier, not a trust source — through
-  /// the *same* [verifyManifest] the relay-check path uses, so the two can't
+  /// the *same* [verifyManifest] the GitHub-check path uses, so the two can't
   /// drift onto different signing formats.
   Future<void> _handleVersionControl(Map<String, Object?> manifest) async {
     if (releasePublicKeyHex.isEmpty || appVersion == 'dev') return;
-    if (manifest['version'] == appVersion) return; // already up to date
 
     final info = await verifyManifest(
       manifest.cast<String, dynamic>(),
       releasePublicKeyHex,
     );
     if (info == null) return; // missing fields / forged
+    if (!isNewerRelease(info.version, appVersion)) return;
 
     // Downgrade protection: reject seq ≤ our persisted floor.
     final lastSeq = await getLastUpdateSeq();
     if (info.seq <= lastSeq) return;
 
     // Also propagate the manifest to our meshes so we relay it onward.
+    versionManifest = manifest;
     for (final session in _sessions.values) {
       session._mesh?.versionManifest = manifest;
     }
@@ -668,6 +675,7 @@ class ChannelManager {
         onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
         onInference: onInference,
       );
+      _sessions[id]!.mesh?.versionManifest = versionManifest;
     }
     _activeId = id;
     onUpdate();
@@ -686,6 +694,29 @@ class ChannelManager {
       peerBundleLookup: () => bundleFn?.call(peerHex),
       ownDeviceKeys: ownKeysFn ?? () => [device.publicKey],
     );
+  }
+
+  bool _dmPeerAllowed(String peerRootHex, String peerHex) {
+    if (peerHex == identity.publicKeyHex || peerHex == peerRootHex) return true;
+    if ((ownDeviceKeys?.call() ?? const <Uint8List>[]).any(
+      (key) => hex.encode(key) == peerHex,
+    )) {
+      return true;
+    }
+    return peerBundleLookup
+            ?.call(peerRootHex)
+            ?.devices
+            .any((key) => hex.encode(key) == peerHex) ??
+        false;
+  }
+
+  /// Whether [peerHex] is authorised to participate in [channelId]. Group ids
+  /// are capabilities; DMs additionally admit only either root's active keys.
+  bool isPeerAllowedForChannel(String channelId, String peerHex) {
+    final session = _sessions[channelId];
+    final peer = session?.peerPubkey;
+    if (peer == null) return session != null;
+    return _dmPeerAllowed(hex.encode(peer), peerHex);
   }
 
   /// Opens (or focuses) the encrypted DM with [peerPubkey]. A blocked peer is
@@ -710,6 +741,8 @@ class ChannelManager {
           blobStore: blobStore,
           isDeviceRevoked: isDeviceRevoked,
           candidateCache: candidateCache,
+          peerAllowed: (peerHex) =>
+              _dmPeerAllowed(hex.encode(peerPubkey), peerHex),
           onPeerConnected: _broadcastContactsOnline,
           // For DMs we know the peer's root identity; fire with that (not the
           // connecting device's mesh key) so DM persistence resolves correctly.
@@ -721,6 +754,7 @@ class ChannelManager {
           onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
           onInference: onInference,
         );
+        _sessions[id]!.mesh?.versionManifest = versionManifest;
       } finally {
         _opening.remove(id);
       }
@@ -771,6 +805,13 @@ class ChannelManager {
     fallbackUrls = urls;
     for (final session in _sessions.values) {
       session.mesh?.fallbackUrls = urls;
+    }
+  }
+
+  void updateVersionManifest(Map<String, Object?> manifest) {
+    versionManifest = manifest;
+    for (final session in _sessions.values) {
+      session.mesh?.versionManifest = manifest;
     }
   }
 

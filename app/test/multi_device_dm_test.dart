@@ -116,4 +116,70 @@ void main() {
       expect(decrypted, Uint8List.fromList([7, 8, 9]));
     });
   });
+
+  group('DM mesh admission', () {
+    test('allows only roots and active device keys', () async {
+      final ownRoot = await Identity.generate();
+      final ownDevice = await Identity.generate();
+      final peerRoot = await Identity.generate();
+      final peerDevice = await Identity.generate();
+      final stranger = await Identity.generate();
+      final peerBundle = await DeviceBundle.publish(
+        root: peerRoot,
+        devices: [peerDevice.publicKey],
+      );
+      final manager = ChannelManager(
+        identity: ownRoot,
+        meshIdentity: ownDevice,
+        relayUrl: Uri.parse('http://localhost:8787'),
+        live: false,
+        onUpdate: () {},
+        peerBundleLookup: (rootHex) =>
+            rootHex == peerRoot.publicKeyHex ? peerBundle : null,
+        ownDeviceKeys: () => [ownDevice.publicKey],
+      );
+
+      await manager.openDm(peerRoot.publicKey);
+      final channelId = manager.activeId!;
+      expect(
+        manager.isPeerAllowedForChannel(channelId, ownRoot.publicKeyHex),
+        isTrue,
+      );
+      expect(
+        manager.isPeerAllowedForChannel(channelId, ownDevice.publicKeyHex),
+        isTrue,
+      );
+      expect(
+        manager.isPeerAllowedForChannel(channelId, peerRoot.publicKeyHex),
+        isTrue,
+      );
+      expect(
+        manager.isPeerAllowedForChannel(channelId, peerDevice.publicKeyHex),
+        isTrue,
+      );
+      expect(
+        manager.isPeerAllowedForChannel(channelId, stranger.publicKeyHex),
+        isFalse,
+      );
+      await manager.close();
+    });
+
+    test('group channel membership remains capability-based', () async {
+      final ownRoot = await Identity.generate();
+      final stranger = await Identity.generate();
+      final manager = ChannelManager(
+        identity: ownRoot,
+        relayUrl: Uri.parse('http://localhost:8787'),
+        live: false,
+        onUpdate: () {},
+      );
+
+      await manager.openGroup('group-id', Uint8List(32));
+      expect(
+        manager.isPeerAllowedForChannel('group-id', stranger.publicKeyHex),
+        isTrue,
+      );
+      await manager.close();
+    });
+  });
 }

@@ -4,8 +4,7 @@
 #
 #   git tag 0.1.1 && git push origin 0.1.1
 #
-# The Android APK is debug-signed (fine to sideload; for the Play Store add a
-# release signing config later). Linux/macOS/iOS are skipped for now.
+# Android releases use the stable CI keystore. Linux/macOS/iOS are skipped for now.
 name: release-app
 
 on:
@@ -32,11 +31,20 @@ jobs:
       code: ${{ steps.compute.outputs.code }}
     steps:
       - id: compute
+        env:
+          TAG: ${{ github.ref_name }}
+          RELEASE_PUBLIC_KEY: ${{ vars.RELEASE_PUBLIC_KEY }}
         run: |
-          TAG="${{ github.ref_name }}"
+          if ! [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags must be X.Y.Z or vX.Y.Z."
+            exit 1
+          fi
+          if ! [[ "$RELEASE_PUBLIC_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::RELEASE_PUBLIC_KEY must be configured as 64 hex characters."
+            exit 1
+          fi
           NAME="${TAG#v}"                 # strip an optional leading "v"
           IFS=. read -r MAJ MIN PAT <<< "$NAME"
-          PAT="${PAT%%-*}"                # drop any -prerelease suffix before maths
           # 10# forces base-10 so a zero-padded part can't be read as octal.
           CODE=$(( 10#${MAJ:-0} * 1000000 + 10#${MIN:-0} * 1000 + 10#${PAT:-0} ))
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
@@ -65,9 +73,9 @@ jobs:
           KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "ANDROID_KEYSTORE_BASE64 not set — release will be debug-signed (in-place updates won't install)."
-            exit 0
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "::error::Android release signing secrets are not fully configured."
+            exit 1
           fi
           echo "$KEYSTORE_B64" | base64 -d > app/hearth-release.jks
           cat > key.properties <<EOF
@@ -131,16 +139,10 @@ jobs:
           name: web
           path: hearth-web.zip
 
-  # GitHub releases are immutable once published (no asset changes, ever), so
-  # the flow is: upload everything to a DRAFT, then flip it to published only
-  # when all platforms built, then tell the relay. A partial build leaves a
-  # draft (re-runnable, or publishable by hand); it can never lock in a
-  # half-empty published release.
+  # GitHub releases are immutable once published, so all platform builds and the
+  # signed manifest must exist before this job creates and publishes the draft.
   release:
     needs: [android, windows, web]
-    # Run even if a platform failed so its assets land on the draft — but the
-    # publish step below only fires when everything built.
-    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -173,9 +175,9 @@ jobs:
         env:
           RELEASE_PRIVATE_KEY: ${{ secrets.RELEASE_PRIVATE_KEY }}
         run: |
-          if [ -z "$RELEASE_PRIVATE_KEY" ]; then
-            echo "RELEASE_PRIVATE_KEY not set — skipping manifest signing."
-            exit 0
+          if ! [[ "$RELEASE_PRIVATE_KEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::RELEASE_PRIVATE_KEY must be configured as 64 hex characters."
+            exit 1
           fi
           SEQ=$(date +%s)
           pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
@@ -200,25 +202,3 @@ jobs:
         run: |
           gh api -X PATCH "repos/${{ github.repository }}/releases/${{ steps.gh_release.outputs.id }}" \
             -F draft=false --jq .html_url
-      - name: Publish manifest to relay
-        # After the GH release is live — clients download assets from it, and
-        # draft assets aren't publicly fetchable. A failed publish step above
-        # stops the job, so ordering alone guarantees this never runs early.
-        if: |
-          needs.android.result == 'success' &&
-          needs.windows.result == 'success' &&
-          needs.web.result == 'success'
-        env:
-          RELEASE_SECRET: ${{ secrets.RELEASE_SECRET }}
-          RELAY_URL: ${{ vars.RELAY_URL }}
-        run: |
-          if [ -z "$RELEASE_SECRET" ] || [ -z "$RELAY_URL" ]; then
-            echo "RELEASE_SECRET / RELAY_URL not set — skipping."
-            exit 0
-          fi
-          echo "::add-mask::$RELAY_URL"
-          echo "Publishing manifest to the relay"
-          curl -fsS -X POST "$RELAY_URL/version" \
-            -H "authorization: Bearer $RELEASE_SECRET" \
-            -H "content-type: application/json" \
-            --data @dist/manifest.json

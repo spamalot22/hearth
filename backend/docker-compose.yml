@@ -22,12 +22,6 @@ services:
       # Media-search proxy keys — search degrades gracefully if unset.
       GIPHY_KEY: ${GIPHY_KEY:-}
       FREESOUND_KEY: ${FREESOUND_KEY:-}
-      # Auto-update: shared secret for POST /version (sign-release.ts pushes here).
-      RELEASE_SECRET: ${RELEASE_SECRET:-}
-      RELEASE_PUBLIC_KEY: ${RELEASE_PUBLIC_KEY:-}
-      GITHUB_REPO: ${GITHUB_REPO:-spamalot22/hearth}
-    volumes:
-      - relay-data:/app/data
     # Loopback only: reachable by a tunnel/funnel on the box, never the LAN. (Still
     # reachable as `relay:8787` inside the compose network, e.g. by cloudflared.)
     ports:
@@ -45,6 +39,3 @@ services:
       - relay
     profiles:
       - cloudflare
-
-volumes:
-  relay-data:

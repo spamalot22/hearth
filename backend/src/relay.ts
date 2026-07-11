@@ -19,7 +19,6 @@ import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
 import { addSoundRoutes } from './sound';
 import { TunnelHub, addTunnelRoutes } from './tunnel';
-import { VersionStore, addVersionRoutes } from './version';
 
 interface StoredMessage {
   seq: number;
@@ -76,7 +75,6 @@ function bearerToken(c: { req: { header(name: string): string | undefined } }): 
 export function createRelay(
   store: RelayStore = new RelayStore(),
   signalHub: SignalHub = new SignalHub(),
-  versionStore: VersionStore = new VersionStore(),
   tunnelHub: TunnelHub = new TunnelHub(),
 ): Hono {
   const app = new Hono();
@@ -141,11 +139,6 @@ export function createRelay(
 
   // Sound search proxy (Freesound token stays on the relay; CC0-filtered).
   addSoundRoutes(app);
-
-  // Signed release manifest (auto-update check).
-  addVersionRoutes(app, versionStore);
-
-  // Download proxy removed — repo is public, clients download directly from GitHub.
 
   // Relay tunnel for symmetric-NAT fallback (opaque ciphertext forwarding).
   addTunnelRoutes(app, tunnelHub, (token, nowMs) =>

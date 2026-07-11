@@ -52,7 +52,7 @@ void main() {
     });
   });
 
-  // verifyManifest is the single verification the relay check AND the P2P
+  // verifyManifest is the single verification the GitHub check AND the P2P
   // VersionControl path both route through — so these guard both against a
   // signing-format regression. The canonical/legacy split is exactly the
   // 2026-07-02 change that stranded pre-canonical clients (e.g. 0.5.26).
@@ -106,30 +106,120 @@ void main() {
   });
 
   group('checkForUpdate', () {
-    final relayUrl = Uri.parse('http://localhost:8787');
+    final manifestUrl = Uri.parse('https://example.test/manifest.json');
 
     test('returns UpToDate when releasePublicKeyHex is empty', () async {
       // The const releasePublicKeyHex defaults to '' in dev, so checkForUpdate
       // should short-circuit. We test this is the behaviour by calling it.
-      final result = await checkForUpdate(relayUrl);
+      final result = await checkForUpdate();
       expect(result, isA<UpToDate>());
     });
 
-    test('returns RelayUnreachable on timeout', () async {
+    test('offers a correctly signed newer GitHub release', () async {
+      final signer = await Identity.generate();
+      final manifest = await _manifest(signer, version: '0.7.16', seq: 200);
+      final client = MockClient((request) async {
+        expect(request.url, manifestUrl);
+        return http.Response(jsonEncode(manifest), 200);
+      });
+
+      final result = await checkForUpdate(
+        manifestUrl: manifestUrl,
+        client: client,
+        currentVersion: '0.7.15',
+        publicKeyHex: signer.publicKeyHex,
+        readLastSeq: () async => 100,
+        writeLastSeq: (_) async {},
+      );
+
+      expect(result, isA<UpdateAvailable>());
+      expect((result as UpdateAvailable).info.version, '0.7.16');
+      client.close();
+    });
+
+    test('never treats an older signed release as an update', () async {
+      final signer = await Identity.generate();
+      final manifest = await _manifest(signer, version: '0.7.14', seq: 999);
+      final client = MockClient(
+        (_) async => http.Response(jsonEncode(manifest), 200),
+      );
+
+      final result = await checkForUpdate(
+        manifestUrl: manifestUrl,
+        client: client,
+        currentVersion: '0.7.15',
+        publicKeyHex: signer.publicKeyHex,
+        readLastSeq: () async => 0,
+        writeLastSeq: (_) async {},
+      );
+
+      expect(result, isA<UpToDate>());
+      client.close();
+    });
+
+    test('records the sequence for the currently installed release', () async {
+      final signer = await Identity.generate();
+      final manifest = await _manifest(signer, version: 'v0.7.15', seq: 200);
+      final client = MockClient(
+        (_) async => http.Response(jsonEncode(manifest), 200),
+      );
+      var persisted = 0;
+
+      final result = await checkForUpdate(
+        manifestUrl: manifestUrl,
+        client: client,
+        currentVersion: '0.7.15',
+        publicKeyHex: signer.publicKeyHex,
+        readLastSeq: () async => 100,
+        writeLastSeq: (seq) async => persisted = seq,
+      );
+
+      expect(result, isA<UpToDate>());
+      expect(persisted, 200);
+      client.close();
+    });
+
+    test('returns unavailable on connection failure', () async {
+      final signer = await Identity.generate();
       final client = MockClient((_) async {
         throw http.ClientException('connection refused');
       });
-      final result = await checkForUpdate(relayUrl, client: client);
-      expect(result, isA<UpToDate>()); // dev build skips check
+      final result = await checkForUpdate(
+        manifestUrl: manifestUrl,
+        client: client,
+        currentVersion: '0.7.15',
+        publicKeyHex: signer.publicKeyHex,
+      );
+      expect(result, isA<UpdateCheckUnavailable>());
       client.close();
     });
 
-    test('returns UpToDate on 404', () async {
+    test('returns unavailable when GitHub has no manifest', () async {
+      final signer = await Identity.generate();
       final client = MockClient((_) async => http.Response('not found', 404));
-      final result = await checkForUpdate(relayUrl, client: client);
-      // Dev build short-circuits, but this tests the flow.
-      expect(result, isA<UpToDate>());
+      final result = await checkForUpdate(
+        manifestUrl: manifestUrl,
+        client: client,
+        currentVersion: '0.7.15',
+        publicKeyHex: signer.publicKeyHex,
+      );
+      expect(result, isA<UpdateCheckUnavailable>());
       client.close();
+    });
+  });
+
+  group('ReleaseVersion', () {
+    test('compares numeric components and accepts an optional v prefix', () {
+      expect(isNewerRelease('0.7.16', '0.7.15'), isTrue);
+      expect(isNewerRelease('0.10.0', '0.9.9'), isTrue);
+      expect(isNewerRelease('v0.7.15', '0.7.15'), isFalse);
+      expect(isNewerRelease('0.7.14', 'v0.7.15'), isFalse);
+    });
+
+    test('rejects malformed and prerelease tags', () {
+      expect(ReleaseVersion.tryParse('dev'), isNull);
+      expect(ReleaseVersion.tryParse('0.7.16-beta.1'), isNull);
+      expect(ReleaseVersion.tryParse('01.7.16'), isNull);
     });
   });
 
