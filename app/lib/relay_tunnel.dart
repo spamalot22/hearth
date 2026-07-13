@@ -16,6 +16,8 @@ class RelayTunnel implements FrameChannel {
     required this.selfPubkeyHex,
     required this.peerPubkeyHex,
     this.authToken,
+    this.authTokenProvider,
+    this.onReady,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
   }) : _client = client ?? http.Client();
@@ -24,6 +26,8 @@ class RelayTunnel implements FrameChannel {
   final String selfPubkeyHex;
   final String peerPubkeyHex;
   final String? authToken;
+  final String? Function()? authTokenProvider;
+  final void Function()? onReady;
   final Duration pollInterval;
   final http.Client _client;
 
@@ -31,6 +35,13 @@ class RelayTunnel implements FrameChannel {
   Timer? _timer;
   bool _closed = false;
   bool _polling = false;
+  bool _ready = false;
+  static const _requestTimeout = Duration(seconds: 10);
+
+  String? get _token => authTokenProvider?.call() ?? authToken;
+
+  /// True after at least one valid frame has arrived from the peer.
+  bool get isReady => _ready;
 
   @override
   String get peerHex => peerPubkeyHex;
@@ -40,6 +51,7 @@ class RelayTunnel implements FrameChannel {
 
   /// Starts polling for frames from the peer.
   void start() {
+    if (_closed || _timer != null) return;
     _timer = Timer.periodic(pollInterval, (_) => unawaited(_poll()));
   }
 
@@ -51,18 +63,21 @@ class RelayTunnel implements FrameChannel {
 
   Future<void> _post(String data) async {
     try {
-      await _client.post(
-        baseUrl.replace(path: '/tunnel'),
-        body: jsonEncode({
-          'from': selfPubkeyHex,
-          'to': peerPubkeyHex,
-          'data': data,
-        }),
-        headers: {
-          'Content-Type': 'application/json',
-          if (authToken != null) 'Authorization': 'Bearer $authToken',
-        },
-      );
+      final token = _token;
+      await _client
+          .post(
+            baseUrl.replace(path: '/tunnel'),
+            body: jsonEncode({
+              'from': selfPubkeyHex,
+              'to': peerPubkeyHex,
+              'data': data,
+            }),
+            headers: {
+              'Content-Type': 'application/json',
+              if (token != null) 'Authorization': 'Bearer $token',
+            },
+          )
+          .timeout(_requestTimeout);
     } catch (_) {}
   }
 
@@ -75,17 +90,27 @@ class RelayTunnel implements FrameChannel {
         'to': selfPubkeyHex,
       };
       final headers = <String, String>{};
-      if (authToken != null) headers['Authorization'] = 'Bearer $authToken';
-      final res = await _client.get(
-        baseUrl.replace(path: '/tunnel', queryParameters: params),
-        headers: headers,
-      );
+      final token = _token;
+      if (token != null) headers['Authorization'] = 'Bearer $token';
+      final res = await _client
+          .get(
+            baseUrl.replace(path: '/tunnel', queryParameters: params),
+            headers: headers,
+          )
+          .timeout(_requestTimeout);
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
-      final frames = (body['frames'] as List?)?.cast<String>() ?? [];
-      for (final raw in frames) {
+      final frames = body['frames'];
+      if (frames is! List) return;
+      for (final raw in frames.whereType<String>().take(100)) {
         final frame = SyncFrame.decode(raw);
-        if (frame != null && !_frames.isClosed) _frames.add(frame);
+        if (frame != null && !_frames.isClosed) {
+          if (!_ready) {
+            _ready = true;
+            onReady?.call();
+          }
+          _frames.add(frame);
+        }
       }
     } catch (_) {
       // Transient — the next tick retries.
@@ -97,7 +122,15 @@ class RelayTunnel implements FrameChannel {
   Future<void> close() async {
     _closed = true;
     _timer?.cancel();
+    _timer = null;
     _client.close();
-    if (!_frames.isClosed) await _frames.close();
+    if (!_frames.isClosed) {
+      final hadListener = _frames.hasListener;
+      final done = _frames.close();
+      // A single-subscription controller's close future never completes if its
+      // stream was never listened to. Closing is still synchronous in that
+      // case, so there is no listener to wait for.
+      if (hadListener) await done;
+    }
   }
 }

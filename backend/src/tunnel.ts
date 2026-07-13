@@ -27,6 +27,7 @@ const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 // (e.g. an attacker posting to random `to` values) would otherwise grow the map
 // without bound — the TTL only fires on drain.
 const MAX_PAIRS = 10_000;
+const MAX_TOTAL_FRAMES = 10_000;
 
 interface TunnelEntry {
   data: string;
@@ -36,6 +37,7 @@ interface TunnelEntry {
 export class TunnelHub {
   // Key: "from|to" -> buffered frames the sender posted for the receiver.
   private readonly buffers = new Map<string, TunnelEntry[]>();
+  private frameCount = 0;
 
   post(from: string, to: string, data: string, nowMs: number): void {
     const key = `${from}|${to}`;
@@ -44,12 +46,22 @@ export class TunnelHub {
     const buf = this.buffers.get(key) ?? [];
     this.buffers.delete(key);
     buf.push({ data, ts: nowMs });
-    if (buf.length > MAX_BUFFER) buf.splice(0, buf.length - MAX_BUFFER);
+    this.frameCount++;
+    if (buf.length > MAX_BUFFER) {
+      const removed = buf.length - MAX_BUFFER;
+      buf.splice(0, removed);
+      this.frameCount -= removed;
+    }
     this.buffers.set(key, buf);
     // Evict the least-recently-posted pair once over the cap.
-    if (this.buffers.size > MAX_PAIRS) {
+    while (
+      this.buffers.size > MAX_PAIRS ||
+      this.frameCount > MAX_TOTAL_FRAMES
+    ) {
       const oldest = this.buffers.keys().next().value;
-      if (oldest !== undefined) this.buffers.delete(oldest);
+      if (oldest === undefined) break;
+      this.frameCount -= this.buffers.get(oldest)?.length ?? 0;
+      this.buffers.delete(oldest);
     }
   }
 
@@ -59,6 +71,7 @@ export class TunnelHub {
     const buf = this.buffers.get(key);
     if (!buf) return [];
     const fresh = buf.filter((e) => nowMs - e.ts <= TUNNEL_TTL_MS);
+    this.frameCount -= buf.length;
     this.buffers.delete(key);
     return fresh.map((e) => e.data);
   }

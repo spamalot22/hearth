@@ -273,6 +273,16 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "cancel" -> {
+                        val id = (call.argument<Number>("id"))?.toLong()
+                        if (id == null) {
+                            result.error("args", "id required", null)
+                            return@setMethodCallHandler
+                        }
+                        dm.remove(id)
+                        result.success(true)
+                    }
+
                     else -> result.notImplemented()
                 }
             }

@@ -26,7 +26,7 @@ RUN npx esbuild src/server.ts \
       --outfile=dist/server.mjs
 
 # --- Stage 2: runtime (distroless, no shell) ---
-FROM gcr.io/distroless/nodejs24-debian12:latest
+FROM gcr.io/distroless/nodejs24-debian13:nonroot
 
 WORKDIR /app
 
@@ -35,5 +35,5 @@ COPY --from=build /app/dist ./
 ENV PORT=8787
 EXPOSE 8787
 
-# Distroless runs as non-root (uid 65534) by default.
+# The explicit nonroot variant runs as uid 65532.
 CMD ["server.mjs"]

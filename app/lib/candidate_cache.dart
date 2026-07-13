@@ -93,7 +93,17 @@ class CandidateCache {
   Map<String, int> _load(String channel) {
     final raw = _box.get(channel);
     if (raw == null) return {};
-    return (jsonDecode(raw) as Map).cast<String, int>();
+    try {
+      final decoded = (jsonDecode(raw) as Map).cast<String, Object?>();
+      return {
+        for (final entry in decoded.entries)
+          if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(entry.key) &&
+              entry.value is int)
+            entry.key: entry.value! as int,
+      };
+    } catch (_) {
+      return {};
+    }
   }
 
   void _save(String channel, Map<String, int> entries) {

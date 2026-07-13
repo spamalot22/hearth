@@ -4,6 +4,8 @@ import { createHash } from 'node:crypto';
 import { encode as dagCborEncode } from '@ipld/dag-cbor';
 import * as ed from '@noble/ed25519';
 
+import { MAX_CHANNEL_LENGTH } from './limits';
+
 /** Schema version of the signed content. Mirrors core's kHearthMessageVersion. */
 export const MESSAGE_VERSION = 1;
 
@@ -77,12 +79,22 @@ export async function verifyDeviceCert(
   author: Uint8Array,
   device: Uint8Array,
 ): Promise<boolean> {
+  if (
+    !cert || typeof cert.root !== 'string' || typeof cert.device !== 'string' ||
+    typeof cert.sig !== 'string' || typeof cert.name !== 'string' ||
+    cert.name.length < 1 || cert.name.length > 128 ||
+    !Number.isSafeInteger(cert.issued) || cert.issued < 0
+  ) return false;
   const root = b64urlToBytes(cert.root);
   const certDevice = b64urlToBytes(cert.device);
+  const signature = b64urlToBytes(cert.sig);
+  if (root.length !== 32 || certDevice.length !== 32 || signature.length !== 64) {
+    return false;
+  }
   if (!bytesEqual(root, author)) return false;
   if (!bytesEqual(certDevice, device)) return false;
   const bytes = deviceCertSignedBytes(root, certDevice, cert.name, cert.issued);
-  return ed.verifyAsync(b64urlToBytes(cert.sig), bytes, root);
+  return ed.verifyAsync(signature, bytes, root);
 }
 
 /**
@@ -128,6 +140,15 @@ export function verifySignature(
  * client additionally enforces device revocation.
  */
 export async function verifyWire(w: WireMessage): Promise<boolean> {
+  if (
+    !w || w.v !== MESSAGE_VERSION || typeof w.author !== 'string' ||
+    typeof w.channel !== 'string' || w.channel.length < 1 ||
+    w.channel.length > MAX_CHANNEL_LENGTH || !Array.isArray(w.prev) ||
+    w.prev.length > 256 || w.prev.some((parent) => typeof parent !== 'string') ||
+    !Number.isSafeInteger(w.timestamp) || w.timestamp < 0 ||
+    typeof w.payload !== 'string' || typeof w.sig !== 'string' ||
+    typeof w.id !== 'string'
+  ) return false;
   const fields: MessageFields = {
     version: w.v,
     author: b64urlToBytes(w.author),
@@ -136,11 +157,17 @@ export async function verifyWire(w: WireMessage): Promise<boolean> {
     timestampMs: w.timestamp,
     payload: b64urlToBytes(w.payload),
   };
+  if (
+    fields.author.length !== 32 || fields.prev.some((p) => p.length !== 34) ||
+    b64urlToBytes(w.id).length !== 34 || b64urlToBytes(w.sig).length !== 64
+  ) return false;
   const content = signedBytes(fields);
   if (!bytesEqual(computeId(content), b64urlToBytes(w.id))) return false;
-  if (w.device) {
+  if (w.device !== undefined) {
+    if (typeof w.device !== 'string') return false;
     const device = b64urlToBytes(w.device);
-    if (!w.cert) return false; // device-signed but no authorisation
+    if (device.length !== 32) return false;
+    if (!w.cert || typeof w.cert !== 'object') return false;
     if (!(await verifyDeviceCert(w.cert, fields.author, device))) return false;
     return verifySignature(content, b64urlToBytes(w.sig), device);
   }

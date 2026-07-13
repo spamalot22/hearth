@@ -179,7 +179,7 @@ class WebRtcMesh {
   /// Peers with any usable frame path, direct WebRTC or relay tunnel.
   Iterable<String> get connectedPeers => {
     ...connections.keys,
-    ..._tunnels.keys,
+    ..._tunnels.entries.where((e) => e.value.isReady).map((e) => e.key),
   };
 
   void _start() {
@@ -245,6 +245,21 @@ class WebRtcMesh {
     unawaited(_announce());
   }
 
+  /// Closes links that no longer satisfy a dynamic admission policy (for
+  /// example after learning that a device was revoked).
+  Future<void> enforcePeerPolicy() async {
+    for (final entry in _links.entries.toList()) {
+      if (peerAllowed?.call(entry.key) ?? true) continue;
+      await entry.value.dispose();
+    }
+    for (final entry in _tunnels.entries.toList()) {
+      if (peerAllowed?.call(entry.key) ?? true) continue;
+      _tunnels.remove(entry.key);
+      await entry.value.close();
+      onPeerLeft?.call(entry.key);
+    }
+  }
+
   /// Announce presence, then start offering to any peer we don't yet have.
   Future<void> _announce() async {
     if (_announcing || _closed) return;
@@ -285,11 +300,16 @@ class WebRtcMesh {
           _activeUrl = url;
           if (url == baseUrl) _primaryOkAt = DateTime.now();
           final body = jsonDecode(res.body) as Map<String, dynamic>;
-          _authToken = body['token'] as String?;
-          for (final peer in (body['peers'] as List).cast<String>().take(
-            _kMaxPeerFanout,
-          )) {
-            _maybeInitiate(peer);
+          final token = body['token'];
+          if (token is! String || token.isEmpty) continue;
+          _authToken = token;
+          final peers = body['peers'];
+          if (peers is List) {
+            for (final peer in peers.whereType<String>().take(
+              _kMaxPeerFanout,
+            )) {
+              _maybeInitiate(peer);
+            }
           }
           return; // success
         } catch (_) {
@@ -313,16 +333,28 @@ class WebRtcMesh {
       };
       final headers = <String, String>{};
       if (_authToken != null) headers['Authorization'] = 'Bearer $_authToken';
-      final res = await _client.get(
-        _activeUrl.replace(path: '/signal', queryParameters: params),
-        headers: headers,
-      );
+      final res = await _client
+          .get(
+            _activeUrl.replace(path: '/signal', queryParameters: params),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
-      _signalSince = (body['seq'] as num).toInt();
-      for (final raw in body['signals'] as List) {
-        await _handleSignal((raw as Map).cast<String, Object?>());
+      final signals = body['signals'];
+      if (signals is List) {
+        for (final raw in signals.take(256)) {
+          try {
+            if (raw is Map) {
+              await _handleSignal(raw.cast<String, Object?>());
+            }
+          } catch (_) {
+            // One malformed entry must not hide later signals in the batch.
+          }
+        }
       }
+      final seq = body['seq'];
+      if (seq is int && seq > _signalSince) _signalSince = seq;
     } catch (_) {
       // Transient — the next tick retries.
     } finally {
@@ -357,10 +389,12 @@ class WebRtcMesh {
   }
 
   Future<void> _handleSignal(Map<String, Object?> signal) async {
-    final from = signal['from'] as String?;
-    final kind = signal['kind'] as String?;
+    final fromValue = signal['from'];
+    final kindValue = signal['kind'];
     final data = signal['data'];
-    if (from == null || kind == null || data is! Map) return;
+    if (fromValue is! String || kindValue is! String || data is! Map) return;
+    final from = fromValue;
+    final kind = kindValue;
     if (!(peerAllowed?.call(from) ?? true)) return;
     final payload = data.cast<String, Object?>();
     // Drop anything not validly signed by the claimed sender — this is what
@@ -368,14 +402,20 @@ class WebRtcMesh {
     if (!await verifySignal(from, selfPubkeyHex, channel, kind, payload)) {
       return;
     }
-    switch (kind) {
-      case 'offer':
-        final link = _links[from] ?? _createLink(from, initiator: false);
-        await link.handleOffer(payload);
-      case 'answer':
-        await _links[from]?.handleAnswer(payload);
-      case 'ice':
-        await _links[from]?.handleIce(payload);
+    try {
+      switch (kind) {
+        case 'offer':
+          final link = _links[from] ?? _createLink(from, initiator: false);
+          await link.handleOffer(payload);
+        case 'answer':
+          await _links[from]?.handleAnswer(payload);
+        case 'ice':
+          await _links[from]?.handleIce(payload);
+      }
+    } catch (_) {
+      // One malformed signed SDP/candidate must not abort the mailbox batch or
+      // leave a permanently handshaking link behind.
+      await _links[from]?.dispose();
     }
   }
 
@@ -402,7 +442,10 @@ class WebRtcMesh {
           Duration(seconds: delaySec),
         );
         // After 3 consecutive failures, try the relay tunnel (symmetric NAT).
-        if (failures == 3 && !_closed) {
+        if (failures == 3 &&
+            !_closed &&
+            localStream == null &&
+            onRemoteStream == null) {
           _openTunnel(peerHex);
         }
         onPeerLeft?.call(peerHex);
@@ -489,18 +532,24 @@ class WebRtcMesh {
         _tunnels.containsKey(peerHex)) {
       return;
     }
-    final tunnel = RelayTunnel(
+    late final RelayTunnel tunnel;
+    tunnel = RelayTunnel(
       baseUrl: _activeUrl,
       selfPubkeyHex: selfPubkeyHex,
       peerPubkeyHex: peerHex,
       authToken: _authToken,
+      authTokenProvider: () => _authToken,
+      onReady: () {
+        if (_closed || _tunnels[peerHex] != tunnel) return;
+        onPeerConnectedHex?.call(peerHex);
+        unawaited(candidateCache?.touch(channel, peerHex) ?? Future.value());
+      },
     );
     _tunnels[peerHex] = tunnel;
     tunnel.start();
     if (!_closed && !_peerConnected.isClosed) {
       _peerConnected.add(tunnel);
     }
-    onPeerConnectedHex?.call(peerHex);
   }
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
@@ -512,20 +561,22 @@ class WebRtcMesh {
       'sig': await signSignal(identity, channel, kind, to, payload),
     };
     try {
-      await _client.post(
-        _activeUrl.replace(path: '/signal'),
-        headers: {
-          'content-type': 'application/json',
-          if (_authToken != null) 'Authorization': 'Bearer $_authToken',
-        },
-        body: jsonEncode({
-          'channel': channel,
-          'to': to,
-          'from': selfPubkeyHex,
-          'kind': kind,
-          'data': signed,
-        }),
-      );
+      await _client
+          .post(
+            _activeUrl.replace(path: '/signal'),
+            headers: {
+              'content-type': 'application/json',
+              if (_authToken != null) 'Authorization': 'Bearer $_authToken',
+            },
+            body: jsonEncode({
+              'channel': channel,
+              'to': to,
+              'from': selfPubkeyHex,
+              'kind': kind,
+              'data': signed,
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
     } catch (_) {
       // Best effort — a dropped candidate just slows ICE; renegotiation retries.
     }
@@ -582,6 +633,8 @@ class _PeerLink implements FrameChannel {
   bool _opened = false;
   bool _disposed = false;
   final List<RTCIceCandidate> _pendingCandidates = [];
+  static const int _maxPendingCandidates = 256;
+  static const int _maxDataChannelFrameBytes = 16 * 1024 * 1024;
 
   @override
   Stream<SyncFrame> get frames => _frames.stream;
@@ -688,6 +741,7 @@ class _PeerLink implements FrameChannel {
     );
     // Candidates can arrive before the remote description is set; buffer them.
     if (!_remoteSet) {
+      if (_pendingCandidates.length >= _maxPendingCandidates) return;
       _pendingCandidates.add(candidate);
       return;
     }
@@ -706,6 +760,15 @@ class _PeerLink implements FrameChannel {
   void _wireChannel(RTCDataChannel channel) {
     _channel = channel;
     channel.onMessage = (message) {
+      final wireLength = message.isBinary
+          ? message.binary.length
+          : message.text.length;
+      if (wireLength > _maxDataChannelFrameBytes) {
+        debugPrint(
+          '[hearth] dropped oversized frame ($wireLength bytes) from $peerHex',
+        );
+        return;
+      }
       final String text;
       if (message.isBinary) {
         text = utf8.decode(message.binary, allowMalformed: true);

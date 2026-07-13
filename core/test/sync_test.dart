@@ -174,6 +174,18 @@ void main() {
       await _pump();
       expect(b.length, 0);
     });
+
+    test('a malformed id does not poison subsequent peer frames', () async {
+      final b = _repo();
+      final link = _Link();
+      SyncEngine(b, 'general').addPeer(link);
+
+      link.incoming.add(const HaveFrame(['not-a-message-id']));
+      link.incoming.add(GiveFrame(await msg('still delivered')));
+
+      await _settle(() => b.length == 1);
+      expect(utf8.decode(b.ordered().single.payload), 'still delivered');
+    });
   });
 
   group('blob transfer', () {
@@ -238,6 +250,45 @@ void main() {
       expect(r.length, 0, reason: 'receive verifies before storing');
     });
 
+    test('drops a valid message for another channel', () async {
+      final r = _repo();
+      final m = await Message.create(
+        author: await Identity.generate(),
+        channel: 'elsewhere',
+        payload: _b('valid but misplaced'),
+      );
+      await SyncEngine(r, 'general').receive(m);
+      expect(r.length, 0);
+    });
+
+    test('applies a channel-level author policy', () async {
+      final r = _repo();
+      final allowed = await Identity.generate();
+      final outsider = await Identity.generate();
+      final engine = SyncEngine(
+        r,
+        'general',
+        messageAllowed: (message) =>
+            hex.encode(message.author) == allowed.publicKeyHex,
+      );
+      await engine.receive(
+        await Message.create(
+          author: outsider,
+          channel: 'general',
+          payload: _b('outsider'),
+        ),
+      );
+      await engine.receive(
+        await Message.create(
+          author: allowed,
+          channel: 'general',
+          payload: _b('allowed'),
+        ),
+      );
+      expect(r.length, 1);
+      expect(utf8.decode(r.ordered().single.payload), 'allowed');
+    });
+
     test('drops a device-signed message with an invalid cert', () async {
       final r = _repo();
       final root = await Identity.generate();
@@ -279,15 +330,47 @@ void main() {
           deviceCert: cert,
         );
         // The device is revoked — the callback says so.
-        final revokedSet = {hex.encode(device.publicKey)};
+        final revokedSet = {
+          '${root.publicKeyHex}:${hex.encode(device.publicKey)}',
+        };
         final engine = SyncEngine(
           r,
           'general',
-          isDeviceRevoked: revokedSet.contains,
+          isDeviceRevoked: (rootHex, deviceHex) =>
+              revokedSet.contains('$rootHex:$deviceHex'),
         );
         await engine.receive(m);
         expect(r.length, 0, reason: 'revoked device message should be dropped');
       },
     );
+
+    test('a revocation from another root cannot suppress a device', () async {
+      final r = _repo();
+      final root = await Identity.generate();
+      final otherRoot = await Identity.generate();
+      final device = await Identity.generate();
+      final cert = await DeviceCert.issue(
+        root: root,
+        deviceKey: device.publicKey,
+        name: 'phone',
+      );
+      final message = await Message.create(
+        author: root,
+        channel: 'general',
+        payload: _b('allowed'),
+        signingDevice: device,
+        deviceCert: cert,
+      );
+      final engine = SyncEngine(
+        r,
+        'general',
+        isDeviceRevoked: (rootHex, deviceHex) =>
+            rootHex == otherRoot.publicKeyHex &&
+            deviceHex == device.publicKeyHex,
+      );
+
+      await engine.receive(message);
+      expect(r.length, 1);
+    });
   });
 }

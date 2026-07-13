@@ -23,6 +23,7 @@ class MediaLibrary {
   MediaLibrary._(this._box);
 
   final Box<String> _box;
+  static final _blobHash = RegExp(r'^[0-9a-fA-F]{68}$');
 
   static Future<MediaLibrary> open() async {
     await Hive.initFlutter();
@@ -37,7 +38,7 @@ class MediaLibrary {
     String? name,
     String? emoji,
   }) async {
-    if (hash.isEmpty || _box.containsKey(hash)) return;
+    if (!_blobHash.hasMatch(hash) || _box.containsKey(hash)) return;
     await _box.put(
       hash,
       jsonEncode({'kind': kind.name, 'name': name, 'emoji': emoji}),
@@ -47,22 +48,29 @@ class MediaLibrary {
   /// Every item of [kind] you hold.
   List<MediaItem> byKind(MediaKind kind) {
     final items = <MediaItem>[];
-    for (final hash in _box.keys.cast<String>()) {
-      final raw = jsonDecode(_box.get(hash)!) as Map;
-      if (raw['kind'] == kind.name) {
-        items.add(
-          MediaItem(
-            hash,
-            kind,
-            raw['name'] as String?,
-            raw['emoji'] as String?,
-          ),
-        );
+    for (final key in _box.keys) {
+      if (key is! String || !_blobHash.hasMatch(key)) continue;
+      final hash = key;
+      try {
+        final raw = jsonDecode(_box.get(hash)!) as Map;
+        if (raw['kind'] == kind.name) {
+          items.add(
+            MediaItem(
+              hash,
+              kind,
+              raw['name'] as String?,
+              raw['emoji'] as String?,
+            ),
+          );
+        }
+      } catch (_) {
+        // Skip a corrupt entry without hiding the rest of the library.
       }
     }
     return items;
   }
 
   /// All blob hashes in the library (for prune-protection).
-  Set<String> allHashes() => _box.keys.cast<String>().toSet();
+  Set<String> allHashes() =>
+      _box.keys.whereType<String>().where(_blobHash.hasMatch).toSet();
 }

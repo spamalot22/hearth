@@ -62,6 +62,7 @@ class RelayTransport implements Transport {
   int _since = 0;
   bool _busy = false;
   bool _paused = false;
+  static const _requestTimeout = Duration(seconds: 10);
 
   /// The poll cursor (relay sequence number seen so far).
   int get since => _since;
@@ -97,11 +98,13 @@ class RelayTransport implements Transport {
 
   @override
   Future<void> send(Message message) async {
-    final res = await _client.post(
-      _url.replace(path: '/messages'),
-      headers: const {'content-type': 'application/json'},
-      body: jsonEncode(message.toJson()),
-    );
+    final res = await _client
+        .post(
+          _url.replace(path: '/messages'),
+          headers: const {'content-type': 'application/json'},
+          body: jsonEncode(message.toJson()),
+        )
+        .timeout(_requestTimeout);
     if (res.statusCode != 200) {
       throw TransportException(
         'send failed: HTTP ${res.statusCode} ${res.body}',
@@ -113,22 +116,27 @@ class RelayTransport implements Transport {
   /// that verify, and advances the cursor.
   Future<List<Message>> poll() async {
     final params = <String, String>{'channel': channel, 'since': '$_since'};
-    final res = await _client.get(
-      _url.replace(path: '/poll', queryParameters: params),
-    );
+    final res = await _client
+        .get(_url.replace(path: '/poll', queryParameters: params))
+        .timeout(_requestTimeout);
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
-    _since = (body['seq'] as num).toInt();
+    final seqValue = body['seq'];
+    if (seqValue is int && seqValue > _since) _since = seqValue;
 
     final verified = <Message>[];
-    for (final entry in body['messages'] as List<dynamic>) {
+    final entries = body['messages'];
+    if (entries is! List) return verified;
+    for (final entry in entries) {
       try {
         final message = Message.fromJson(
           (entry as Map).cast<String, Object?>(),
         );
-        if (await message.verify()) verified.add(message);
+        if (message.channel == channel && await message.verify()) {
+          verified.add(message);
+        }
       } catch (_) {
         // One malformed entry shouldn't abort the whole poll round.
       }

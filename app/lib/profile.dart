@@ -69,7 +69,12 @@ class DmRegistry {
   }
 
   /// Every peer pubkey (hex) with an established DM.
-  List<String> all() => _box.keys.cast<String>().toList();
+  static final _pubkey = RegExp(r'^[0-9a-fA-F]{64}$');
+
+  List<String> all() => _box.keys
+      .whereType<String>()
+      .where(_pubkey.hasMatch)
+      .toList(growable: false);
 
   /// Records [peerPubkeyHex] as an established DM (idempotent).
   Future<void> save(String peerPubkeyHex) => _box.put(peerPubkeyHex, '1');
@@ -92,7 +97,10 @@ class RequestStore {
     return RequestStore._(box);
   }
 
-  List<String> all() => _box.keys.cast<String>().toList();
+  List<String> all() => _box.keys
+      .whereType<String>()
+      .where(DmRegistry._pubkey.hasMatch)
+      .toList(growable: false);
 
   Future<void> save(String peerPubkeyHex) => _box.put(peerPubkeyHex, '1');
 
@@ -132,13 +140,19 @@ class PendingContactStore {
   Future<List<PendingContact>> live() async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final result = <PendingContact>[];
-    for (final key in _box.keys.cast<String>().toList()) {
+    for (final key in _box.keys.whereType<String>().toList()) {
+      if (!DmRegistry._pubkey.hasMatch(key)) {
+        await _box.delete(key);
+        continue;
+      }
       final raw = _box.get(key);
       if (raw == null) continue;
       final sep = raw.indexOf('|');
       final rv = sep < 0 ? raw : raw.substring(0, sep);
       final ts = sep < 0 ? 0 : int.tryParse(raw.substring(sep + 1)) ?? 0;
-      if (now - ts > _expiryMs) {
+      if (!RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(rv) ||
+          ts > now + 5 * 60 * 1000 ||
+          now - ts > _expiryMs) {
         await _box.delete(key);
         continue;
       }

@@ -3,8 +3,10 @@ import { Hono } from 'hono';
 import { randomBytes } from 'node:crypto';
 
 import {
+  MAX_CHANNEL_LENGTH,
   MAX_CHANNELS,
   MAX_MAILBOX_SIGNALS,
+  MAX_TOTAL_SIGNALS,
   RateLimiter,
   SIGNAL_RATE_LIMIT,
   SIGNAL_RATE_WINDOW_MS,
@@ -29,6 +31,14 @@ const TOKEN_TTL_MS = 60_000; // 60 seconds (signal/search/tunnel only)
 const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/i;
 const SIGNAL_KINDS = new Set(['offer', 'answer', 'ice']);
+const MAX_PRESENCE_PER_CHANNEL = 256;
+const MAX_TOKENS = 1000;
+const MAX_SIGNAL_MAILBOXES = 10_000;
+
+function validChannel(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length > 0 && value.length <= MAX_CHANNEL_LENGTH;
+}
 
 /** Extracts a Bearer token from the Authorization header, or null. */
 function bearerToken(c: { req: { header(name: string): string | undefined } }): string | null {
@@ -52,6 +62,7 @@ export class SignalHub {
   private readonly mailboxes = new Map<string, StoredSignal[]>();
   // Auth tokens: token -> { pubkey, expiresMs }
   private readonly tokens = new Map<string, { pubkey: string; expiresMs: number }>();
+  private signalCount = 0;
   private seq = 0;
 
   /** Marks [pubkey] present in [channel] and returns the other live peers. */
@@ -69,7 +80,13 @@ export class SignalHub {
       this.presence.delete(channel);
     }
     this.presence.set(channel, chan);
+    chan.delete(pubkey);
     chan.set(pubkey, nowMs);
+    while (chan.size > MAX_PRESENCE_PER_CHANNEL) {
+      const oldest = chan.keys().next().value;
+      if (oldest === undefined) break;
+      chan.delete(oldest);
+    }
     return this.peers(channel, pubkey, nowMs);
   }
 
@@ -78,9 +95,14 @@ export class SignalHub {
     const token = randomBytes(16).toString('hex');
     this.tokens.set(token, { pubkey, expiresMs: nowMs + TOKEN_TTL_MS });
     // Prune expired tokens lazily (keep map bounded).
-    if (this.tokens.size > 1000) {
+    if (this.tokens.size > MAX_TOKENS) {
       for (const [t, v] of this.tokens) {
         if (v.expiresMs < nowMs) this.tokens.delete(t);
+      }
+      while (this.tokens.size > MAX_TOKENS) {
+        const oldest = this.tokens.keys().next().value;
+        if (oldest === undefined) break;
+        this.tokens.delete(oldest);
       }
     }
     return token;
@@ -128,6 +150,7 @@ export class SignalHub {
   ): number {
     const key = this.mailboxKey(channel, to);
     const box = this.mailboxes.get(key) ?? [];
+    this.mailboxes.delete(key);
     const stored: StoredSignal = {
       seq: ++this.seq,
       from,
@@ -136,10 +159,22 @@ export class SignalHub {
       ts: nowMs,
     };
     box.push(stored);
+    this.signalCount++;
     if (box.length > MAX_MAILBOX_SIGNALS) {
-      box.splice(0, box.length - MAX_MAILBOX_SIGNALS);
+      const removed = box.length - MAX_MAILBOX_SIGNALS;
+      box.splice(0, removed);
+      this.signalCount -= removed;
     }
     this.mailboxes.set(key, box);
+    while (
+      this.mailboxes.size > MAX_SIGNAL_MAILBOXES ||
+      this.signalCount > MAX_TOTAL_SIGNALS
+    ) {
+      const oldest = this.mailboxes.keys().next().value;
+      if (oldest === undefined) break;
+      this.signalCount -= this.mailboxes.get(oldest)?.length ?? 0;
+      this.mailboxes.delete(oldest);
+    }
     return stored.seq;
   }
 
@@ -155,7 +190,12 @@ export class SignalHub {
     const box = this.mailboxes.get(key);
     if (!box) return [];
     const fresh = box.filter((s) => nowMs - s.ts <= SIGNAL_TTL_MS);
-    if (fresh.length !== box.length) this.mailboxes.set(key, fresh);
+    this.signalCount -= box.length - fresh.length;
+    if (fresh.length === 0) {
+      this.mailboxes.delete(key);
+    } else {
+      this.mailboxes.set(key, fresh);
+    }
     return fresh.filter((s) => s.seq > since);
   }
 }
@@ -180,19 +220,23 @@ export function addSignalingRoutes(
     } catch {
       return c.json({ error: 'invalid json' }, 400);
     }
-    if (!body.channel || !body.pubkey) {
+    if (!validChannel(body.channel) || typeof body.pubkey !== 'string') {
       return c.json({ error: 'channel and pubkey required' }, 400);
     }
     if (!HEX_PUBKEY.test(body.pubkey)) {
       return c.json({ error: 'invalid pubkey' }, 400);
     }
     // Verify identity: sig over "announce|channel|pubkey|ts".
-    if (body.sig && body.ts) {
-      if (!HEX_SIGNATURE.test(body.sig)) {
+    const ts = body.ts;
+    if (
+      typeof body.sig === 'string' && typeof ts === 'number' &&
+      Number.isSafeInteger(ts)
+    ) {
+      if (!HEX_SIGNATURE.test(body.sig) || ts < 0) {
         return c.json({ error: 'invalid signature' }, 403);
       }
       const msg = new TextEncoder().encode(
-        `announce|${body.channel}|${body.pubkey}|${body.ts}`,
+        `announce|${body.channel}|${body.pubkey}|${ts}`,
       );
       let valid = false;
       try {
@@ -206,7 +250,7 @@ export function addSignalingRoutes(
       }
       if (!valid) return c.json({ error: 'invalid signature' }, 403);
       // Reject stale timestamps (>30s old).
-      if (Math.abs(now() - body.ts) > 30_000) {
+      if (Math.abs(now() - ts) > 30_000) {
         return c.json({ error: 'timestamp too old' }, 403);
       }
       const peers = hub.announce(body.channel, body.pubkey, now());
@@ -232,7 +276,10 @@ export function addSignalingRoutes(
     } catch {
       return c.json({ error: 'invalid json' }, 400);
     }
-    if (!body.channel || !body.to || !body.from || !body.kind) {
+    if (
+      !validChannel(body.channel) || typeof body.to !== 'string' ||
+      typeof body.from !== 'string' || typeof body.kind !== 'string'
+    ) {
       return c.json({ error: 'channel, to, from, kind required' }, 400);
     }
     if (!HEX_PUBKEY.test(body.to) || !HEX_PUBKEY.test(body.from)) {
@@ -268,8 +315,11 @@ export function addSignalingRoutes(
     const channel = c.req.query('channel');
     const forPubkey = c.req.query('for');
     const token = bearerToken(c);
-    if (!channel || !forPubkey) {
+    if (!validChannel(channel) || !forPubkey) {
       return c.json({ error: 'channel and for required' }, 400);
+    }
+    if (!HEX_PUBKEY.test(forPubkey)) {
+      return c.json({ error: 'invalid pubkey' }, 400);
     }
     if (!token) return c.json({ error: 'token required' }, 403);
     const owner = hub.verifyToken(token, now());
@@ -277,7 +327,7 @@ export function addSignalingRoutes(
       return c.json({ error: 'invalid or expired token' }, 403);
     }
     const sinceRaw = Number(c.req.query('since') ?? '0');
-    const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
+    const since = Number.isSafeInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
     const signals = hub.signalsSince(channel, forPubkey, since, now());
     const seq = signals.length ? signals[signals.length - 1]!.seq : since;
     return c.json({ signals, seq });

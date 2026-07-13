@@ -181,5 +181,30 @@ void main() {
       );
       await manager.close();
     });
+
+    test('rejects relay messages authored by a DM outsider', () async {
+      final me = await Identity.generate();
+      final peer = await Identity.generate();
+      final outsider = await Identity.generate();
+      final manager = ChannelManager(
+        identity: me,
+        relayUrl: Uri.parse('http://localhost:8787'),
+        live: false,
+        onUpdate: () {},
+      );
+      await manager.openDm(peer.publicKey);
+      final session = manager.active!;
+
+      await session.engine.receive(
+        await Message.create(
+          author: outsider,
+          channel: session.channelId,
+          payload: Uint8List.fromList([1, 2, 3]),
+        ),
+      );
+
+      expect(session.repository.length, 0);
+      await manager.close();
+    });
   });
 }

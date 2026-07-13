@@ -57,11 +57,18 @@ class RendezvousIntro {
   }
 
   Future<bool> verifyForPeer(String peerHex) async {
-    if (cert.deviceKeyHex != peerHex || bundle.rootKeyHex != cert.rootKeyHex) {
+    try {
+      if (cert.deviceKeyHex != peerHex ||
+          bundle.rootKeyHex != cert.rootKeyHex) {
+        return false;
+      }
+      if (!bundle.devices.any((key) => hex.encode(key) == peerHex)) {
+        return false;
+      }
+      return await cert.verify() && await bundle.verify();
+    } catch (_) {
       return false;
     }
-    if (!bundle.devices.any((key) => hex.encode(key) == peerHex)) return false;
-    return await cert.verify() && await bundle.verify();
   }
 }
 

@@ -70,11 +70,13 @@ void main() {
           recipientDevice: excluded,
           senderDeviceEd: sender.publicKey,
         ),
-        throwsA(isA<FormatException>().having(
-          (e) => e.message,
-          'message',
-          contains('no wrap found'),
-        )),
+        throwsA(
+          isA<FormatException>().having(
+            (e) => e.message,
+            'message',
+            contains('no wrap found'),
+          ),
+        ),
       );
     });
 
@@ -132,6 +134,18 @@ void main() {
           recipientDeviceKeys: [],
         ),
         throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('rejects a truncated version header cleanly', () async {
+      final recipient = await Identity.generate();
+      await expectLater(
+        MultiDeviceBox.decrypt(
+          Uint8List.fromList([1]),
+          recipientDevice: recipient,
+          senderDeviceEd: recipient.publicKey,
+        ),
+        throwsA(isA<FormatException>()),
       );
     });
   });

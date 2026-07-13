@@ -154,30 +154,46 @@ class Message {
   /// Does **not** check device revocation — that's per-user state the sync/app
   /// layer enforces (drop messages from a device you've revoked).
   Future<bool> verify() async {
-    final content = signedBytes();
-    final expectedId = await _idFor(content);
-    if (!_constTimeEquals(expectedId, id)) return false;
-    final dev = device;
-    if (dev == null) {
-      // Classic: the root identity signed directly.
+    try {
+      if (version != kHearthMessageVersion ||
+          author.length != 32 ||
+          signature.length != 64 ||
+          id.length != 34 ||
+          channel.isEmpty ||
+          channel.length > 256 ||
+          timestampMs < 0 ||
+          prev.length > 256 ||
+          prev.any((parent) => parent.length != 34)) {
+        return false;
+      }
+      final content = signedBytes();
+      final expectedId = await _idFor(content);
+      if (!_constTimeEquals(expectedId, id)) return false;
+      final dev = device;
+      if (dev == null) {
+        // Classic: the root identity signed directly.
+        return Identity.verifySignature(
+          content,
+          signature: signature,
+          publicKey: author,
+        );
+      }
+      if (dev.length != 32) return false;
+      // Device-signed: the cert must bind this device to this author, and the
+      // device must have signed the content.
+      final c = cert;
+      if (c == null) return false;
+      if (!_constTimeEquals(c.rootKey, author)) return false;
+      if (!_constTimeEquals(c.deviceKey, dev)) return false;
+      if (!await c.verify()) return false;
       return Identity.verifySignature(
         content,
         signature: signature,
-        publicKey: author,
+        publicKey: dev,
       );
+    } catch (_) {
+      return false;
     }
-    // Device-signed: the cert must bind this device to this author, and the
-    // device must have signed the content.
-    final c = cert;
-    if (c == null) return false;
-    if (!_constTimeEquals(c.rootKey, author)) return false;
-    if (!_constTimeEquals(c.deviceKey, dev)) return false;
-    if (!await c.verify()) return false;
-    return Identity.verifySignature(
-      content,
-      signature: signature,
-      publicKey: dev,
-    );
   }
 
   static Future<Uint8List> _idFor(List<int> content) async {

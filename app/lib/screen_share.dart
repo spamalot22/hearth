@@ -20,6 +20,11 @@ enum ScreenResolution {
   final int? maxHeight;
 }
 
+/// Stable screen-mesh namespace. The suffix is the authenticated device key
+/// from the voice link, not the root identity (which is public-only at runtime).
+String screenMeshChannel(String channelId, String sharerDeviceHex) =>
+    'screen:$channelId:$sharerDeviceHex';
+
 /// `getDisplayMedia` constraints selecting a specific desktop [source] at [res].
 /// Video-only for v1 — shared audio (and echo prevention) is a later follow-up.
 Map<String, dynamic> _displayConstraints(
@@ -72,7 +77,7 @@ class ScreenBroadcast {
     );
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
-      channel: 'screen:$channelId:${identity.publicKeyHex}',
+      channel: screenMeshChannel(channelId, identity.publicKeyHex),
       identity: identity,
       localStream: stream,
       forceInitiator: true, // the sharer offers to every viewer
@@ -101,6 +106,8 @@ class ScreenBroadcast {
     }
     await _stream.dispose();
   }
+
+  Future<void> enforcePeerPolicy() => _mesh.enforcePeerPolicy();
 }
 
 /// An *incoming* screen share being watched: a receive-only [WebRtcMesh] on the
@@ -139,7 +146,7 @@ class ScreenView {
     late final ScreenView view;
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
-      channel: 'screen:$channelId:$sharerHex',
+      channel: screenMeshChannel(channelId, sharerHex),
       identity: identity,
       forceInitiator: false, // answer-only; the sharer offers
       peerAllowed: peerAllowed,
@@ -170,4 +177,6 @@ class ScreenView {
     renderer.srcObject = null;
     await renderer.dispose();
   }
+
+  Future<void> enforcePeerPolicy() => _mesh.enforcePeerPolicy();
 }

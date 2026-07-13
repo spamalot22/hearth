@@ -40,6 +40,10 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Hearth uses the camera to scan channel invites and contact cards.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Hearth uses the microphone for voice chat and voice messages.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

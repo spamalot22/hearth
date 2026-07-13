@@ -127,6 +127,49 @@ void main() {
     });
 
     test(
+      'poll skips malformed/wrong-channel entries and never rewinds',
+      () async {
+        final good = await Message.create(
+          author: author,
+          channel: 'general',
+          payload: _b('good'),
+        );
+        final misplaced = await Message.create(
+          author: author,
+          channel: 'elsewhere',
+          payload: _b('misplaced'),
+        );
+        var first = true;
+        final client = MockClient((req) async {
+          if (first) {
+            first = false;
+            return http.Response(
+              jsonEncode({
+                'messages': [123, misplaced.toJson(), good.toJson()],
+                'seq': 5,
+              }),
+              200,
+            );
+          }
+          return http.Response(
+            jsonEncode({'messages': <Object?>[], 'seq': 3}),
+            200,
+          );
+        });
+        final transport = RelayTransport(
+          baseUrl: Uri.parse('http://relay.test'),
+          channel: 'general',
+          client: client,
+        );
+
+        expect((await transport.poll()).map((m) => m.idHex), [good.idHex]);
+        expect(transport.since, 5);
+        await transport.poll();
+        expect(transport.since, 5);
+      },
+    );
+
+    test(
       'incoming stream emits verified messages as they are polled',
       () async {
         final m1 = await Message.create(

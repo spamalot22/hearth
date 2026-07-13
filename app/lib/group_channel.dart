@@ -119,15 +119,24 @@ class ChannelRegistry {
     return ChannelRegistry._(box);
   }
 
-  List<GroupChannel> all() => _box.keys
-      .cast<String>()
-      .map(
-        (id) => GroupChannel._fromRegistry(
+  List<GroupChannel> all() {
+    final channels = <GroupChannel>[];
+    for (final key in _box.keys) {
+      if (key is! String) continue;
+      final id = key;
+      try {
+        if (!GroupChannel._idRe.hasMatch(id)) continue;
+        final channel = GroupChannel._fromRegistry(
           id,
           (jsonDecode(_box.get(id)!) as Map).cast<String, Object?>(),
-        ),
-      )
-      .toList();
+        );
+        if (channel.key.length == 32) channels.add(channel);
+      } catch (_) {
+        // One corrupt registry entry must not prevent the app from starting.
+      }
+    }
+    return channels;
+  }
 
   Future<void> save(GroupChannel channel) =>
       _box.put(channel.id, jsonEncode(channel._toRegistry()));

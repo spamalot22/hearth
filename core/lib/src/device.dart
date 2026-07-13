@@ -76,12 +76,16 @@ class DeviceCert {
   }) async {
     if (deviceKey.length != 32) {
       throw ArgumentError.value(
-          deviceKey.length, 'deviceKey', 'must be 32 bytes (Ed25519 pubkey)');
+        deviceKey.length,
+        'deviceKey',
+        'must be 32 bytes (Ed25519 pubkey)',
+      );
     }
-    if (name.isEmpty) {
-      throw ArgumentError.value(name, 'name', 'must not be empty');
+    if (name.isEmpty || name.length > 128) {
+      throw ArgumentError.value(name, 'name', 'must be 1-128 characters');
     }
     final ts = issuedMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    if (ts < 0) throw ArgumentError.value(ts, 'issuedMs', 'must be positive');
     final sig = await root.sign(
       _signedBytes(root.publicKey, deviceKey, name, ts),
     );
@@ -96,14 +100,28 @@ class DeviceCert {
 
   /// True iff [signature] is a valid signature by [rootKey] over this cert's
   /// fields — i.e. the root really did authorise this device.
-  Future<bool> verify() => Identity.verifySignature(
-    _signedBytes(rootKey, deviceKey, name, issuedMs),
-    signature: signature,
-    publicKey: rootKey,
-  );
+  Future<bool> verify() async {
+    if (rootKey.length != 32 ||
+        deviceKey.length != 32 ||
+        signature.length != 64 ||
+        name.isEmpty ||
+        name.length > 128 ||
+        issuedMs < 0) {
+      return false;
+    }
+    try {
+      return await Identity.verifySignature(
+        _signedBytes(rootKey, deviceKey, name, issuedMs),
+        signature: signature,
+        publicKey: rootKey,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
 
-  String get deviceKeyHex => hex.encode(deviceKey);
   String get rootKeyHex => hex.encode(rootKey);
+  String get deviceKeyHex => hex.encode(deviceKey);
 
   Map<String, Object?> toJson() => {
     'root': base64Url.encode(rootKey),
@@ -163,9 +181,13 @@ class DeviceRevocation {
   }) async {
     if (deviceKey.length != 32) {
       throw ArgumentError.value(
-          deviceKey.length, 'deviceKey', 'must be 32 bytes (Ed25519 pubkey)');
+        deviceKey.length,
+        'deviceKey',
+        'must be 32 bytes (Ed25519 pubkey)',
+      );
     }
     final ts = revokedMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    if (ts < 0) throw ArgumentError.value(ts, 'revokedMs', 'must be positive');
     final sig = await root.sign(_signedBytes(root.publicKey, deviceKey, ts));
     return DeviceRevocation(
       rootKey: root.publicKey,
@@ -175,12 +197,25 @@ class DeviceRevocation {
     );
   }
 
-  Future<bool> verify() => Identity.verifySignature(
-    _signedBytes(rootKey, deviceKey, revokedMs),
-    signature: signature,
-    publicKey: rootKey,
-  );
+  Future<bool> verify() async {
+    if (rootKey.length != 32 ||
+        deviceKey.length != 32 ||
+        signature.length != 64 ||
+        revokedMs < 0) {
+      return false;
+    }
+    try {
+      return await Identity.verifySignature(
+        _signedBytes(rootKey, deviceKey, revokedMs),
+        signature: signature,
+        publicKey: rootKey,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
 
+  String get rootKeyHex => hex.encode(rootKey);
   String get deviceKeyHex => hex.encode(deviceKey);
 
   Map<String, Object?> toJson() => {
@@ -255,12 +290,22 @@ class DeviceBundle {
     required List<Uint8List> devices,
     int? publishedMs,
   }) async {
+    if (devices.length > 255) {
+      throw ArgumentError('max 255 device keys');
+    }
+    final seen = <String>{};
     for (final d in devices) {
       if (d.length != 32) {
         throw ArgumentError('each device key must be 32 bytes');
       }
+      if (!seen.add(base64Url.encode(d))) {
+        throw ArgumentError('device keys must be unique');
+      }
     }
     final ts = publishedMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    if (ts < 0) {
+      throw ArgumentError.value(ts, 'publishedMs', 'must be positive');
+    }
     final sig = await root.sign(_signedBytes(root.publicKey, devices, ts));
     return DeviceBundle(
       rootKey: root.publicKey,
@@ -271,11 +316,29 @@ class DeviceBundle {
   }
 
   /// True iff the signature is valid for these fields.
-  Future<bool> verify() => Identity.verifySignature(
-    _signedBytes(rootKey, devices, publishedMs),
-    signature: signature,
-    publicKey: rootKey,
-  );
+  Future<bool> verify() async {
+    if (rootKey.length != 32 ||
+        signature.length != 64 ||
+        publishedMs < 0 ||
+        devices.length > 255) {
+      return false;
+    }
+    final seen = <String>{};
+    for (final device in devices) {
+      if (device.length != 32 || !seen.add(base64Url.encode(device))) {
+        return false;
+      }
+    }
+    try {
+      return await Identity.verifySignature(
+        _signedBytes(rootKey, devices, publishedMs),
+        signature: signature,
+        publicKey: rootKey,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
 
   String get rootKeyHex => hex.encode(rootKey);
 

@@ -11,10 +11,7 @@ void main() {
       final d1 = (await Identity.generate()).publicKey;
       final d2 = (await Identity.generate()).publicKey;
 
-      final bundle = await DeviceBundle.publish(
-        root: root,
-        devices: [d1, d2],
-      );
+      final bundle = await DeviceBundle.publish(root: root, devices: [d1, d2]);
 
       expect(await bundle.verify(), isTrue);
       expect(bundle.rootKey, root.publicKey);
@@ -27,10 +24,7 @@ void main() {
       final root = await Identity.generate();
       final d1 = (await Identity.generate()).publicKey;
 
-      final bundle = await DeviceBundle.publish(
-        root: root,
-        devices: [d1],
-      );
+      final bundle = await DeviceBundle.publish(root: root, devices: [d1]);
 
       // Tamper: swap the device key.
       final tampered = DeviceBundle(
@@ -83,6 +77,15 @@ void main() {
           root: await Identity.generate(),
           devices: [Uint8List(16)], // too short
         ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('rejects duplicate device keys', () async {
+      final root = await Identity.generate();
+      final device = (await Identity.generate()).publicKey;
+      await expectLater(
+        DeviceBundle.publish(root: root, devices: [device, device]),
         throwsA(isA<ArgumentError>()),
       );
     });

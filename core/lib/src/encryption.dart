@@ -252,12 +252,14 @@ class MultiDeviceBox {
       final senderX = await senderDevice.x25519PublicKey();
       final wrapKey = await _deriveWrapKey(shared, senderX, deviceX);
       final wrapped = await _aead.encrypt(contentKeyBytes, secretKey: wrapKey);
-      wraps.add(Uint8List.fromList([
-        ...deviceEd,
-        ...wrapped.nonce,
-        ...wrapped.mac.bytes,
-        ...wrapped.cipherText,
-      ]));
+      wraps.add(
+        Uint8List.fromList([
+          ...deviceEd,
+          ...wrapped.nonce,
+          ...wrapped.mac.bytes,
+          ...wrapped.cipherText,
+        ]),
+      );
     }
 
     // 3. Assemble: version ‖ count ‖ wraps ‖ content nonce ‖ content mac ‖ ciphertext
@@ -278,7 +280,7 @@ class MultiDeviceBox {
     required Identity recipientDevice,
     required Uint8List senderDeviceEd,
   }) async {
-    if (boxed.isEmpty || boxed[0] != _version) {
+    if (boxed.length < 2 || boxed[0] != _version) {
       throw const FormatException('unsupported MultiDeviceBox version');
     }
     final numDevices = boxed[1];
@@ -304,10 +306,12 @@ class MultiDeviceBox {
       final shared = await recipientDevice.x25519SharedSecret(senderX);
       final recipientX = await recipientDevice.x25519PublicKey();
       final wrapKey = await _deriveWrapKey(shared, senderX, recipientX);
-      contentKeyBytes = Uint8List.fromList(await _aead.decrypt(
-        SecretBox(wrappedKey, nonce: wrapNonce, mac: Mac(wrapMac)),
-        secretKey: wrapKey,
-      ));
+      contentKeyBytes = Uint8List.fromList(
+        await _aead.decrypt(
+          SecretBox(wrappedKey, nonce: wrapNonce, mac: Mac(wrapMac)),
+          secretKey: wrapKey,
+        ),
+      );
       break;
     }
     if (contentKeyBytes == null) {

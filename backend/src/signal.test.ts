@@ -47,6 +47,14 @@ describe('SignalHub', () => {
     hub.postSignal('general', 'bob', 'alice', 'offer', { sdp: 'x' }, 0);
     expect(hub.signalsSince('general', 'bob', 0, 40_000)).toHaveLength(0);
   });
+
+  it('bounds the live token map by evicting the oldest token', () => {
+    const hub = new SignalHub();
+    const oldest = hub.issueToken('oldest', 1000);
+    for (let i = 0; i < 1000; i++) hub.issueToken(`peer-${i}`, 1000);
+
+    expect(hub.verifyToken(oldest, 1001)).toBeNull();
+  });
 });
 
 describe('signalling routes', () => {
@@ -131,5 +139,32 @@ describe('signalling routes', () => {
       aliceToken,
     );
     expect(badKind.status).toBe(400);
+  });
+
+  it('rejects oversized signalling channel identifiers', async () => {
+    const hub = new SignalHub();
+    const app = createRelay(undefined, hub);
+    const aliceToken = hub.issueToken(aliceHex, Date.now());
+    const oversized = 'x'.repeat(257);
+
+    const posted = await postJson(
+      app,
+      '/signal',
+      {
+        channel: oversized,
+        to: bobHex,
+        from: aliceHex,
+        kind: 'offer',
+        data: {},
+      },
+      aliceToken,
+    );
+    expect(posted.status).toBe(400);
+
+    const polled = await app.request(
+      `/signal?channel=${oversized}&for=${aliceHex}`,
+      { headers: { authorization: `Bearer ${aliceToken}` } },
+    );
+    expect(polled.status).toBe(400);
   });
 });

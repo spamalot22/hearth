@@ -10,6 +10,7 @@ import 'candidate_cache.dart';
 import 'content.dart';
 import 'mesh_control.dart';
 import 'message_storage_hive.dart';
+import 'relay_tunnel.dart';
 import 'update_checker.dart';
 import 'webrtc_mesh.dart';
 
@@ -213,7 +214,8 @@ class ChannelSession {
     required void Function() onUpdate,
     required ChannelCipher cipher,
     required BlobStore? blobStore,
-    bool Function(String deviceKeyHex)? isDeviceRevoked,
+    bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked,
+    bool Function(Message message)? messageAllowed,
     CandidateCache? candidateCache,
     List<int>? peerPubkey,
     void Function()? onPeerConnected,
@@ -235,6 +237,7 @@ class ChannelSession {
       channelId,
       blobStore: blobStore,
       isDeviceRevoked: isDeviceRevoked,
+      messageAllowed: messageAllowed,
     );
     final updatesSub = engine.updates.listen((_) => onUpdate());
     // A fetched blob arriving just triggers a refresh; refreshContent loads it
@@ -252,7 +255,10 @@ class ChannelSession {
         identity: meshIdentity ?? identity,
         candidateCache: candidateCache,
         peerAllowed: peerAllowed,
-        onPeerConnectedHex: onPeerConnectedHex,
+        onPeerConnectedHex: (peerHex) {
+          onPeerConnectedHex?.call(peerHex);
+          onUpdate();
+        },
         onPeerLeft: (_) {
           // Resume relay polling when the last P2P peer drops.
           if (mesh?.peers.isEmpty ?? true) courier?.resume();
@@ -276,7 +282,10 @@ class ChannelSession {
       );
       peersSub = mesh.peerConnected.listen((peer) {
         engine.addPeer(peer);
-        courier?.pause(); // P2P is live — no need to poll the relay.
+        // A provisional tunnel still depends on the relay. Keep the courier
+        // polling until a direct P2P link exists, so an offline peer cannot
+        // suppress normal relay delivery merely by failing ICE three times.
+        if (peer is! RelayTunnel) courier?.pause();
         onPeerConnected?.call();
         onUpdate(); // Refresh UI so new peer appears in member list.
       });
@@ -539,9 +548,9 @@ class ChannelManager {
   /// so a blocked DM never opens (and thus never receives/stores messages).
   final bool Function(String peerHex)? isBlocked;
 
-  /// Whether a device key (hex) has been revoked. Passed to each channel's
-  /// [SyncEngine] so messages from revoked devices are dropped on receipt.
-  final bool Function(String deviceKeyHex)? isDeviceRevoked;
+  /// Whether a root identity revoked one of its device keys. Passed to each
+  /// [SyncEngine] so revocations cannot affect another identity's devices.
+  final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
 
   /// Looks up a peer's device bundle by root hex. Used by MultiDeviceDmCipher.
   final DeviceBundle? Function(String rootHex)? peerBundleLookup;
@@ -669,6 +678,7 @@ class ChannelManager {
         blobStore: blobStore,
         isDeviceRevoked: isDeviceRevoked,
         candidateCache: candidateCache,
+        peerAllowed: _groupPeerAllowed,
         onPeerConnected: _broadcastContactsOnline,
         onContactsOnline: _handleContactsOnline,
         onVersionControl: _handleVersionControl,
@@ -697,17 +707,30 @@ class ChannelManager {
   }
 
   bool _dmPeerAllowed(String peerRootHex, String peerHex) {
-    if (peerHex == identity.publicKeyHex || peerHex == peerRootHex) return true;
-    if ((ownDeviceKeys?.call() ?? const <Uint8List>[]).any(
+    String? rootHex;
+    if (peerHex == identity.publicKeyHex) {
+      rootHex = identity.publicKeyHex;
+    } else if (peerHex == peerRootHex) {
+      rootHex = peerRootHex;
+    } else if ((ownDeviceKeys?.call() ?? const <Uint8List>[]).any(
       (key) => hex.encode(key) == peerHex,
     )) {
-      return true;
-    }
-    return peerBundleLookup
+      rootHex = identity.publicKeyHex;
+    } else if (peerBundleLookup
             ?.call(peerRootHex)
             ?.devices
             .any((key) => hex.encode(key) == peerHex) ??
-        false;
+        false) {
+      rootHex = peerRootHex;
+    }
+    return rootHex != null &&
+        !(isDeviceRevoked?.call(rootHex, peerHex) ?? false);
+  }
+
+  bool _groupPeerAllowed(String peerHex) {
+    final rootHex = deviceToRoot[peerHex];
+    return rootHex == null ||
+        !(isDeviceRevoked?.call(rootHex, peerHex) ?? false);
   }
 
   /// Whether [peerHex] is authorised to participate in [channelId]. Group ids
@@ -715,7 +738,7 @@ class ChannelManager {
   bool isPeerAllowedForChannel(String channelId, String peerHex) {
     final session = _sessions[channelId];
     final peer = session?.peerPubkey;
-    if (peer == null) return session != null;
+    if (peer == null) return session != null && _groupPeerAllowed(peerHex);
     return _dmPeerAllowed(hex.encode(peer), peerHex);
   }
 
@@ -740,6 +763,11 @@ class ChannelManager {
           peerPubkey: peerPubkey,
           blobStore: blobStore,
           isDeviceRevoked: isDeviceRevoked,
+          messageAllowed: (message) {
+            final authorHex = hex.encode(message.author);
+            return authorHex == identity.publicKeyHex ||
+                authorHex == hex.encode(peerPubkey);
+          },
           candidateCache: candidateCache,
           peerAllowed: (peerHex) =>
               _dmPeerAllowed(hex.encode(peerPubkey), peerHex),
@@ -818,6 +846,12 @@ class ChannelManager {
   void reconnect() {
     for (final session in _sessions.values) {
       session.reconnect();
+    }
+  }
+
+  Future<void> enforcePeerPolicies() async {
+    for (final session in _sessions.values) {
+      await session.mesh?.enforcePeerPolicy();
     }
   }
 }

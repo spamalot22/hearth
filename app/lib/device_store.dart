@@ -19,6 +19,7 @@ class DeviceStore {
     _loadCerts();
     _loadRevocations();
     _loadBundles();
+    _loadDeviceHistory();
   }
 
   final Box<String> _box;
@@ -64,7 +65,9 @@ class DeviceStore {
       _revocationsCache = list
           .map((j) => DeviceRevocation.fromJson(j.cast<String, Object?>()))
           .toList();
-      _revokedCache = _revocationsCache.map((r) => r.deviceKeyHex).toSet();
+      _revokedCache = _revocationsCache
+          .map((r) => _revocationKey(r.rootKeyHex, r.deviceKeyHex))
+          .toSet();
     } catch (_) {
       _revocationsCache = [];
       _revokedCache = {};
@@ -76,6 +79,11 @@ class DeviceStore {
 
   /// Adds a cert if we haven't seen this device key before. Returns true if new.
   Future<bool> addCert(DeviceCert cert) async {
+    try {
+      if (!await cert.verify()) return false;
+    } catch (_) {
+      return false;
+    }
     if (_certsCache.any((c) => c.deviceKeyHex == cert.deviceKeyHex)) {
       return false;
     }
@@ -86,6 +94,11 @@ class DeviceStore {
 
   /// Replaces the cert for a given device key (e.g. rename).
   Future<void> updateCert(DeviceCert cert) async {
+    try {
+      if (!await cert.verify()) return;
+    } catch (_) {
+      return;
+    }
     _certsCache.removeWhere((c) => c.deviceKeyHex == cert.deviceKeyHex);
     _certsCache.add(cert);
     await _persistCerts();
@@ -100,8 +113,15 @@ class DeviceStore {
   List<DeviceRevocation> get revocations =>
       List.unmodifiable(_revocationsCache);
 
-  /// The set of revoked device key hex strings (O(1) lookup).
-  Set<String> get revokedDeviceKeys => _revokedCache;
+  static String _revocationKey(String rootKeyHex, String deviceKeyHex) =>
+      '$rootKeyHex:$deviceKeyHex';
+
+  /// Device keys revoked by [rootKeyHex]. Revocations are scoped to the root
+  /// that signed them, so another identity cannot globally suppress a key.
+  Set<String> revokedDevicesFor(String rootKeyHex) => _revocationsCache
+      .where((rev) => rev.rootKeyHex == rootKeyHex)
+      .map((rev) => rev.deviceKeyHex)
+      .toSet();
 
   /// Returns the root key hex for a given device key hex, or null if unknown.
   /// Looks up from known certs (our own devices) and known bundles (peers).
@@ -122,9 +142,25 @@ class DeviceStore {
 
   /// Adds a revocation if not already known. Returns true if new.
   Future<bool> addRevocation(DeviceRevocation rev) async {
-    if (_revokedCache.contains(rev.deviceKeyHex)) return false;
+    try {
+      if (!await rev.verify()) return false;
+    } catch (_) {
+      return false;
+    }
+    final knownForRoot =
+        _deviceHistory[rev.rootKeyHex]?.contains(rev.deviceKeyHex) ?? false;
+    final ownCert = _certsCache.any(
+      (cert) =>
+          cert.rootKeyHex == rev.rootKeyHex &&
+          cert.deviceKeyHex == rev.deviceKeyHex,
+    );
+    if (!knownForRoot && !ownCert) {
+      return false; // another root cannot revoke a device it never authorised
+    }
+    final key = _revocationKey(rev.rootKeyHex, rev.deviceKeyHex);
+    if (_revokedCache.contains(key)) return false;
     _revocationsCache.add(rev);
-    _revokedCache.add(rev.deviceKeyHex);
+    _revokedCache.add(key);
     await _box.put(
       _revocationsKey,
       jsonEncode(_revocationsCache.map((r) => r.toJson()).toList()),
@@ -133,14 +169,17 @@ class DeviceStore {
   }
 
   /// Whether a specific device has been revoked.
-  bool isRevoked(String deviceKeyHex) => _revokedCache.contains(deviceKeyHex);
+  bool isRevoked(String rootKeyHex, String deviceKeyHex) =>
+      _revokedCache.contains(_revocationKey(rootKeyHex, deviceKeyHex));
 
   // --- Device bundles (per-peer) ---
 
   static const _bundlesKey = 'bundles';
+  static const _deviceHistoryKey = 'deviceHistory';
 
   // rootKeyHex → DeviceBundle (the latest for each peer).
   Map<String, DeviceBundle> _bundlesCache = {};
+  Map<String, Set<String>> _deviceHistory = {};
 
   void _loadBundles() {
     final raw = _box.get(_bundlesKey);
@@ -161,6 +200,35 @@ class DeviceStore {
     }
   }
 
+  void _loadDeviceHistory() {
+    _deviceHistory = {};
+    final raw = _box.get(_deviceHistoryKey);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final map = (jsonDecode(raw) as Map).cast<String, dynamic>();
+        for (final entry in map.entries) {
+          if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(entry.key) ||
+              entry.value is! List) {
+            continue;
+          }
+          _deviceHistory[entry.key] = (entry.value as List)
+              .whereType<String>()
+              .where(RegExp(r'^[0-9a-fA-F]{64}$').hasMatch)
+              .toSet();
+        }
+      } catch (_) {
+        _deviceHistory = {};
+      }
+    }
+    // Current bundles seed the history for stores created before this index
+    // existed. Removed devices remain in the persisted history thereafter.
+    for (final entry in _bundlesCache.entries) {
+      (_deviceHistory[entry.key] ??= {}).addAll(
+        entry.value.devices.map(hex.encode),
+      );
+    }
+  }
+
   /// The latest device bundle for [rootKeyHex], or null if none received.
   DeviceBundle? bundleFor(String rootKeyHex) => _bundlesCache[rootKeyHex];
 
@@ -168,6 +236,11 @@ class DeviceStore {
   /// (monotonic) and not unreasonably far in the future (prevents timestamp
   /// poisoning where a far-future bundle permanently blocks updates).
   Future<bool> setBundle(DeviceBundle bundle) async {
+    try {
+      if (!await bundle.verify()) return false;
+    } catch (_) {
+      return false;
+    }
     final rootHex = bundle.rootKeyHex;
     final existing = _bundlesCache[rootHex];
     if (existing != null && existing.publishedMs >= bundle.publishedMs) {
@@ -179,12 +252,21 @@ class DeviceStore {
       return false; // far-future timestamp — likely poisoned or clock-skewed
     }
     _bundlesCache[rootHex] = bundle;
+    (_deviceHistory[rootHex] ??= {}).addAll(bundle.devices.map(hex.encode));
     await _persistBundles();
+    await _persistDeviceHistory();
     return true;
   }
 
   Future<void> _persistBundles() => _box.put(
     _bundlesKey,
     jsonEncode(_bundlesCache.map((k, v) => MapEntry(k, v.toJson()))),
+  );
+
+  Future<void> _persistDeviceHistory() => _box.put(
+    _deviceHistoryKey,
+    jsonEncode(
+      _deviceHistory.map((root, devices) => MapEntry(root, devices.toList())),
+    ),
   );
 }

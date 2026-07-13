@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono, type MiddlewareHandler } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 
 import { addGifRoutes } from './gif';
@@ -7,8 +8,10 @@ import {
   IP_RATE_LIMIT,
   IP_RATE_WINDOW_MS,
   MAX_BODY_BYTES,
+  MAX_CHANNEL_LENGTH,
   MAX_CHANNEL_MESSAGES,
   MAX_CHANNELS,
+  MAX_TOTAL_MESSAGES,
   MESSAGE_RATE_LIMIT,
   MESSAGE_RATE_WINDOW_MS,
   RateLimiter,
@@ -32,18 +35,27 @@ interface StoredMessage {
 export class RelayStore {
   private readonly byChannel = new Map<string, StoredMessage[]>();
   private seq = 0;
+  private messageCount = 0;
 
   append(message: WireMessage): number {
     const list = this.byChannel.get(message.channel) ?? [];
+    this.byChannel.delete(message.channel);
     const stored: StoredMessage = { seq: ++this.seq, message };
     list.push(stored);
+    this.messageCount++;
     if (list.length > MAX_CHANNEL_MESSAGES) {
-      list.splice(0, list.length - MAX_CHANNEL_MESSAGES);
+      const removed = list.length - MAX_CHANNEL_MESSAGES;
+      list.splice(0, removed);
+      this.messageCount -= removed;
     }
     this.byChannel.set(message.channel, list);
     // LRU eviction: if over the cap, drop the oldest-accessed channel.
-    if (this.byChannel.size > MAX_CHANNELS) {
+    while (
+      this.byChannel.size > MAX_CHANNELS ||
+      this.messageCount > MAX_TOTAL_MESSAGES
+    ) {
       const oldest = this.byChannel.keys().next().value!;
+      this.messageCount -= this.byChannel.get(oldest)?.length ?? 0;
       this.byChannel.delete(oldest);
     }
     return stored.seq;
@@ -82,14 +94,15 @@ export function createRelay(
   // Allow the web app (served from a different localhost port) to call us.
   app.use('/*', cors());
 
-  // Reject oversized bodies early — signals and messages are tiny.
-  app.use('/*', async (c, next) => {
-    const len = Number(c.req.header('content-length') ?? '0');
-    if (Number.isFinite(len) && len > MAX_BODY_BYTES) {
-      return c.json({ error: 'payload too large' }, 413);
-    }
-    await next();
-  });
+  // Enforce the limit while reading streams too; Content-Length can be absent
+  // for chunked requests and must not be the only resource boundary.
+  app.use(
+    '/*',
+    bodyLimit({
+      maxSize: MAX_BODY_BYTES,
+      onError: (c) => c.json({ error: 'payload too large' }, 413),
+    }),
+  );
 
   app.get('/health', (c) => c.json({ ok: true }));
 
@@ -173,12 +186,14 @@ export function createRelay(
   // The channel ID (256-bit random capability) is the auth — no token needed.
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
-    if (!channel) return c.json({ error: 'channel required' }, 400);
+    if (!channel || channel.length > MAX_CHANNEL_LENGTH) {
+      return c.json({ error: 'valid channel required' }, 400);
+    }
     // No token required: the channel ID itself is a 256-bit unguessable
     // capability — knowing it proves membership. Token-gating was
     // defence-in-depth but prevents background poll after token expiry.
     const sinceRaw = Number(c.req.query('since') ?? '0');
-    const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
+    const since = Number.isSafeInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
     const fresh = store.since(channel, since);
     const messages = fresh.map((m) => ({ seq: m.seq, ...m.message }));
     const seq = fresh.length ? fresh[fresh.length - 1]!.seq : since;

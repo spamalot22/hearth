@@ -20,6 +20,7 @@ const MethodChannel _downloader = MethodChannel('hearth/downloader');
 // android.app.DownloadManager status codes.
 const int _dlSuccessful = 8;
 const int _dlFailed = 16;
+const int _maxUpdateBytes = 1024 * 1024 * 1024;
 
 /// Deletes any leftover update APKs/ZIPs from previous downloads.
 Future<void> cleanupOldUpdates() async {
@@ -89,25 +90,39 @@ Future<void> downloadAndInstall(
       );
     }
     final total = resp.contentLength ?? 0;
+    if (total > _maxUpdateBytes) {
+      throw StateError('update download is larger than the safety limit');
+    }
     // Hash while streaming to disk so the whole file never sits in memory.
     final digestSink = AccumulatorSink<Digest>();
     final hashInput = sha256.startChunkedConversion(digestSink);
     final sink = outFile.openWrite();
     var received = 0;
-    await for (final chunk in resp.stream) {
-      hashInput.add(chunk);
-      sink.add(chunk);
-      received += chunk.length;
-      if (total > 0) onProgress?.call(received / total);
+    try {
+      await for (final chunk in resp.stream) {
+        received += chunk.length;
+        if (received > _maxUpdateBytes) {
+          throw StateError('update download exceeded the safety limit');
+        }
+        hashInput.add(chunk);
+        sink.add(chunk);
+        if (total > 0) onProgress?.call(received / total);
+      }
+    } finally {
+      await sink.close();
+      hashInput.close();
     }
-    await sink.close();
-    hashInput.close();
 
     if (digestSink.events.single.toString() != expectedHash) {
       await outFile.delete();
       throw StateError('update hash mismatch — download rejected');
     }
     await _install(outFile.path);
+  } catch (_) {
+    try {
+      if (await outFile.exists()) await outFile.delete();
+    } catch (_) {}
+    rethrow;
   } finally {
     client.close();
   }
@@ -133,6 +148,11 @@ Future<void> _awaitAndroidDownload(
     final status = (s['status'] as num?)?.toInt() ?? 0;
     final total = (s['total'] as num?)?.toDouble() ?? 0;
     final done = (s['downloaded'] as num?)?.toDouble() ?? 0;
+    if (total > _maxUpdateBytes || done > _maxUpdateBytes) {
+      await _downloader.invokeMethod<void>('cancel', {'id': id});
+      await _clearPending();
+      throw StateError('update download exceeded the safety limit');
+    }
     if (total > 0) onProgress?.call((done / total).clamp(0.0, 1.0));
     if (status == _dlSuccessful) {
       final path = s['path'] as String?;
@@ -306,40 +326,59 @@ Future<void> _install(String path) async {
 /// relaunches. We then quit.
 Future<void> _installWindows(String zipPath) async {
   final exeDir = File(Platform.resolvedExecutable).parent.path;
-  // The script below rmdir's exeDir, so refuse to run if it's a drive root or a
-  // suspiciously short path — a portable build launched from an odd location
-  // must not self-destruct its parent. A normal install lives in a dedicated
-  // subfolder (the running hearth.exe is inside exeDir).
+  // A portable build can live beside unrelated user files. Never delete its
+  // parent directory; update known release files in place instead.
   if (RegExp(r'^[A-Za-z]:\\?$').hasMatch(exeDir) || exeDir.length < 4) {
     throw StateError('refusing to self-update from unexpected dir: $exeDir');
   }
-  final extractDir = '${Directory.systemTemp.path}\\hearth_update';
-  final batPath = '${Directory.systemTemp.path}\\hearth_update.bat';
-  final script = StringBuffer()
-    ..writeln('@echo off')
-    ..writeln('timeout /t 2 /nobreak >nul')
-    ..writeln('rmdir /S /Q "$extractDir" 2>nul')
-    ..writeln(
-      'powershell -NoProfile -Command "Expand-Archive -LiteralPath '
-      "'$zipPath' -DestinationPath '$extractDir' -Force\"",
-    )
-    // Abort if the extract failed (don't wipe a working install).
-    ..writeln(
-      'if not exist "$extractDir\\hearth.exe" (echo Extract failed & exit /b 1)',
-    )
-    // Wipe old install (handles removed DLLs), then copy new build in.
-    ..writeln('rmdir /S /Q "$exeDir" 2>nul')
-    ..writeln('mkdir "$exeDir"')
-    ..writeln('xcopy /E /Y /I "$extractDir\\*" "$exeDir" >nul')
-    ..writeln('rmdir /S /Q "$extractDir" 2>nul')
-    ..writeln('start "" "$exeDir\\hearth.exe"')
-    ..writeln('del "%~f0"');
-  await File(batPath).writeAsString(script.toString());
+  final scriptPath =
+      '${Directory.systemTemp.path}${Platform.pathSeparator}'
+      'hearth_update_${pid}_${DateTime.now().microsecondsSinceEpoch}.ps1';
+  await File(scriptPath).writeAsString(buildWindowsUpdateScript());
   await Process.start(
-    'cmd',
-    ['/c', batPath],
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      scriptPath,
+      '-ZipPath',
+      zipPath,
+      '-InstallDir',
+      exeDir,
+    ],
     mode: ProcessStartMode.detached,
-    runInShell: true,
+    runInShell: false,
   );
   exit(0);
 }
+
+@visibleForTesting
+String buildWindowsUpdateScript() => r'''
+param(
+  [Parameter(Mandatory = $true)][string]$ZipPath,
+  [Parameter(Mandatory = $true)][string]$InstallDir
+)
+
+$ErrorActionPreference = 'Stop'
+$scriptPath = $MyInvocation.MyCommand.Path
+$extractDir = Join-Path ([IO.Path]::GetTempPath()) ("hearth_update_" + [guid]::NewGuid().ToString("N"))
+
+try {
+  Start-Sleep -Seconds 2
+  Expand-Archive -LiteralPath $ZipPath -DestinationPath $extractDir -Force
+  $newExe = Join-Path $extractDir 'hearth.exe'
+  if (-not (Test-Path -LiteralPath $newExe -PathType Leaf)) {
+    throw 'Update archive does not contain hearth.exe'
+  }
+
+  # Copy in place: a portable install may share its folder with user files.
+  Get-ChildItem -LiteralPath $extractDir | Copy-Item -Destination $InstallDir -Recurse -Force
+  Start-Process -FilePath (Join-Path $InstallDir 'hearth.exe')
+} finally {
+  Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
+}
+''';

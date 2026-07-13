@@ -9,11 +9,20 @@
 /** Reject request bodies larger than this (signals/messages are tiny). */
 export const MAX_BODY_BYTES = 64 * 1024;
 
+/** Maximum channel/capability identifier length accepted by relay routes. */
+export const MAX_CHANNEL_LENGTH = 256;
+
 /** Keep at most this many signals per (channel, recipient) mailbox. */
 export const MAX_MAILBOX_SIGNALS = 64;
 
+/** Global signal count across mailboxes (prevents aggregate memory exhaustion). */
+export const MAX_TOTAL_SIGNALS = 10_000;
+
 /** Keep at most this many courier messages per channel. */
 export const MAX_CHANNEL_MESSAGES = 5000;
+
+/** Global courier-message count across all channels. */
+export const MAX_TOTAL_MESSAGES = 20_000;
 
 /** Maximum unique channels before LRU eviction kicks in. */
 export const MAX_CHANNELS = 10_000;
@@ -45,6 +54,7 @@ export const TUNNEL_RATE_WINDOW_MS = 60_000;
  */
 export class RateLimiter {
   private readonly hits = new Map<string, number[]>();
+  private static readonly MAX_KEYS = 10_000;
 
   constructor(
     private readonly limit: number,
@@ -61,6 +71,7 @@ export class RateLimiter {
       return false;
     }
     fresh.push(nowMs);
+    this.hits.delete(key);
     this.hits.set(key, fresh);
     // Lazy prune: when the map grows large, drop keys with no recent hits.
     if (this.hits.size > 10_000) {
@@ -68,6 +79,11 @@ export class RateLimiter {
         if (v.length === 0 || nowMs - v[v.length - 1]! > this.windowMs) {
           this.hits.delete(k);
         }
+      }
+      while (this.hits.size > RateLimiter.MAX_KEYS) {
+        const oldest = this.hits.keys().next().value;
+        if (oldest === undefined) break;
+        this.hits.delete(oldest);
       }
     }
     return true;

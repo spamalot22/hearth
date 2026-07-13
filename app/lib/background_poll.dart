@@ -2,11 +2,14 @@
 // Background fetch: polls the relay for new messages when the app is backgrounded
 // (Android/iOS). Fires a local notification if new messages arrived.
 // Uses background_fetch which leverages JobScheduler on Android (minimum 15 min).
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:background_fetch/background_fetch.dart';
+import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    hide Message;
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 
@@ -113,21 +116,29 @@ Future<void> _pollFromStorage() async {
       final since = cursorBox.get(channelId) ?? 0;
       final params = <String, String>{'channel': channelId, 'since': '$since'};
 
-      final res = await http.get(
-        relay.replace(path: '/poll', queryParameters: params),
-      );
+      final res = await http
+          .get(relay.replace(path: '/poll', queryParameters: params))
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) continue;
 
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       final messages = body['messages'] as List? ?? [];
-      final seq = body['seq'] as int? ?? since;
-      await cursorBox.put(channelId, seq);
+      final seqValue = body['seq'];
+      final seq = seqValue is int && seqValue > since ? seqValue : since;
+      if (!hasBaseline || seq > since) await cursorBox.put(channelId, seq);
       if (!hasBaseline) continue; // baseline just set — nothing to report yet
       // Count new messages, excluding our own (the relay echoes them back).
       var count = 0;
-      for (final m in messages) {
-        if (m is Map && m['author'] == selfAuthor) continue;
-        count++;
+      for (final raw in messages) {
+        try {
+          if (raw is! Map) continue;
+          final message = Message.fromJson(raw.cast<String, Object?>());
+          if (message.channel != channelId || !await message.verify()) continue;
+          if (raw['author'] == selfAuthor) continue;
+          count++;
+        } catch (_) {
+          // A relay is untrusted; malformed or forged entries never notify.
+        }
       }
       if (count > 0) newPerChannel[channelId] = count;
     }

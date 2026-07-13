@@ -118,25 +118,59 @@ Future<UpdateInfo?> verifyManifest(
   Map<String, dynamic> manifest,
   String publicKeyHex,
 ) async {
-  final version = manifest['version'] as String?;
-  final seq = manifest['seq'] as int?;
-  final sig = manifest['sig'] as String?;
-  final assets = manifest['assets'] as Map<String, dynamic>?;
-  if (version == null || seq == null || sig == null || assets == null) {
-    return null;
-  }
-  final bool valid;
   try {
-    valid = await Identity.verifySignature(
+    final version = manifest['version'];
+    final seq = manifest['seq'];
+    final sig = manifest['sig'];
+    final assetsValue = manifest['assets'];
+    if (version is! String ||
+        version.isEmpty ||
+        seq is! int ||
+        seq < 0 ||
+        sig is! String ||
+        !RegExp(r'^[0-9a-fA-F]{128}$').hasMatch(sig) ||
+        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(publicKeyHex) ||
+        assetsValue is! Map ||
+        assetsValue.isEmpty ||
+        assetsValue.length > 16) {
+      return null;
+    }
+    final assets = <String, dynamic>{};
+    for (final entry in assetsValue.entries) {
+      final name = entry.key;
+      final value = entry.value;
+      if (name is! String ||
+          name.isEmpty ||
+          name.length > 64 ||
+          value is! Map) {
+        return null;
+      }
+      final file = value['file'];
+      final hash = value['sha256'];
+      if (file is! String ||
+          file.isEmpty ||
+          file.length > 128 ||
+          hash is! String ||
+          !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(hash)) {
+        return null;
+      }
+      assets[name] = {'file': file, 'sha256': hash};
+    }
+    final valid = await Identity.verifySignature(
       manifestSigningBytes(version, seq, assets),
       signature: _hexDecode(sig),
       publicKey: _hexDecode(publicKeyHex),
     );
+    if (!valid) return null;
+    return UpdateInfo(
+      version: version,
+      seq: seq,
+      assets: assets,
+      signature: sig,
+    );
   } catch (_) {
     return null;
   }
-  if (!valid) return null;
-  return UpdateInfo(version: version, seq: seq, assets: assets, signature: sig);
 }
 
 /// Checks GitHub Releases for the latest signed update manifest.

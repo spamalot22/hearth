@@ -17,9 +17,11 @@ Future<Map<String, dynamic>> _manifest(
   int seq = 100,
   bool legacyScheme = false,
 }) async {
+  final androidHash = List.filled(64, 'a').join();
+  final windowsHash = List.filled(64, 'b').join();
   final assets = {
-    'android': {'file': 'a.apk', 'sha256': 'aa'},
-    'windows': {'file': 'w.zip', 'sha256': 'ww'},
+    'android': {'file': 'a.apk', 'sha256': androidHash},
+    'windows': {'file': 'w.zip', 'sha256': windowsHash},
   };
   final bytes = legacyScheme
       ? utf8.encode(
@@ -40,14 +42,17 @@ void main() {
     // Must stay byte-identical to backend/src/manifest.test.ts's `expected`
     // literal, or release signatures won't verify cross-language.
     test('is the canonical newline form with sorted asset keys', () {
+      final androidHash = List.filled(64, 'a').join();
+      final windowsHash = List.filled(64, 'b').join();
       final bytes = manifestSigningBytes('0.5.9', 3, {
         // windows-first to prove the output sorts to android first
-        'windows': {'file': 'w.zip', 'sha256': 'ww'},
-        'android': {'file': 'a.apk', 'sha256': 'aa'},
+        'windows': {'file': 'w.zip', 'sha256': windowsHash},
+        'android': {'file': 'a.apk', 'sha256': androidHash},
       });
       expect(
         utf8.decode(bytes),
-        'hearth/manifest/v1\n0.5.9\n3\nandroid\na.apk\naa\nwindows\nw.zip\nww',
+        'hearth/manifest/v1\n0.5.9\n3\nandroid\na.apk\n$androidHash\n'
+        'windows\nw.zip\n$windowsHash',
       );
     });
   });
@@ -101,6 +106,13 @@ void main() {
       final id = await Identity.generate();
       final m = await _manifest(id)
         ..['sig'] = 'not-hex';
+      expect(await verifyManifest(m, id.publicKeyHex), isNull);
+    });
+
+    test('rejects malformed field types without throwing', () async {
+      final id = await Identity.generate();
+      final m = await _manifest(id)
+        ..['assets'] = ['not', 'a', 'map'];
       expect(await verifyManifest(m, id.publicKeyHex), isNull);
     });
   });

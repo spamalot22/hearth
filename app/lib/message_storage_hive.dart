@@ -25,10 +25,18 @@ class HiveMessageStorage implements MessageStorage {
       _box.put(message.idHex, jsonEncode(message.toJson()));
 
   @override
-  Future<List<Message>> loadAll() async => _box.values
-      .map(
-        (raw) =>
-            Message.fromJson((jsonDecode(raw) as Map).cast<String, Object?>()),
-      )
-      .toList();
+  Future<List<Message>> loadAll() async {
+    final messages = <Message>[];
+    for (final raw in _box.values) {
+      try {
+        final message = Message.fromJson(
+          (jsonDecode(raw) as Map).cast<String, Object?>(),
+        );
+        if (await message.verify()) messages.add(message);
+      } catch (_) {
+        // Skip one corrupt/tampered record without hiding the whole channel.
+      }
+    }
+    return messages;
+  }
 }

@@ -318,6 +318,8 @@ class VoiceSession {
     }
   }
 
+  Future<void> enforcePeerPolicy() => _mesh.enforcePeerPolicy();
+
   void _onControl(String peerHex, MeshControl control) {
     if (control is SoundboardControl && control.blob.isNotEmpty) {
       onSoundboard?.call(control.blob);

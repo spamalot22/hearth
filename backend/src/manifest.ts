@@ -39,6 +39,7 @@ export function parseSignedManifest(raw: unknown): SignedManifest | null {
     !m.version ||
     typeof seq !== 'number' ||
     !Number.isSafeInteger(seq) ||
+    seq < 0 ||
     typeof m.sig !== 'string' ||
     !HEX_SIG.test(m.sig) ||
     !m.assets ||
@@ -47,6 +48,7 @@ export function parseSignedManifest(raw: unknown): SignedManifest | null {
   ) {
     return null;
   }
+  if (Object.keys(m.assets as Record<string, unknown>).length > 16) return null;
   const assets: Record<string, { file: string; sha256: string }> = {};
   for (const [name, value] of Object.entries(
     m.assets as Record<string, unknown>,
@@ -57,8 +59,10 @@ export function parseSignedManifest(raw: unknown): SignedManifest | null {
     const asset = value as Record<string, unknown>;
     if (
       !name ||
+      name.length > 64 ||
       typeof asset.file !== 'string' ||
       !asset.file ||
+      asset.file.length > 128 ||
       typeof asset.sha256 !== 'string' ||
       !HEX_32.test(asset.sha256)
     ) {

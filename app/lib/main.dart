@@ -79,12 +79,20 @@ RandomAccessFile? _instanceLock;
 const String kSourceUrl = 'https://github.com/spamalot22/hearth';
 
 class _ModelInfo {
-  const _ModelInfo(this.id, this.name, this.size, this.description, this.url);
+  const _ModelInfo(
+    this.id,
+    this.name,
+    this.size,
+    this.description,
+    this.url,
+    this.maxBytes,
+  );
   final String id;
   final String name;
   final String size;
   final String description;
   final String url;
+  final int maxBytes;
 }
 
 const _kAvailableModels = [
@@ -94,6 +102,7 @@ const _kAvailableModels = [
     '~637 MB',
     'Fast, lightweight. Good for testing.',
     'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
+    1024 * 1024 * 1024,
   ),
   _ModelInfo(
     'phi3',
@@ -101,6 +110,7 @@ const _kAvailableModels = [
     '~2.3 GB',
     'Good balance of quality and speed.',
     'https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf',
+    4 * 1024 * 1024 * 1024,
   ),
   _ModelInfo(
     'mistral7b',
@@ -108,6 +118,7 @@ const _kAvailableModels = [
     '~4.1 GB',
     'High quality. Needs 8 GB+ RAM.',
     'https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf',
+    6 * 1024 * 1024 * 1024,
   ),
 ];
 
@@ -1405,12 +1416,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onInference: _handleMeshControl,
       onDmConnected: _onDmConnected,
       isBlocked: _blocked.contains,
-      isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
+      isDeviceRevoked: (rootHex, deviceHex) =>
+          _deviceStore?.isRevoked(rootHex, deviceHex) ?? false,
       peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
       ownDeviceKeys: () {
         final store = _deviceStore;
         if (store == null) return [widget.deviceKeys.publicKey];
-        final revoked = store.revokedDeviceKeys;
+        final revoked = store.revokedDevicesFor(widget.identity.publicKeyHex);
         return store.certs
             .where((c) => !revoked.contains(c.deviceKeyHex))
             .map((c) => c.deviceKey)
@@ -1608,16 +1620,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   // --- inference (P2P AI bot) ---
 
-  final Map<String, Completer<String?>> _pendingInference = {};
+  final Map<String, ({String channelId, Completer<String?> completer})>
+  _pendingInference = {};
+
+  String _newInferenceRequestId() {
+    final rng = Random.secure();
+    return List.generate(
+      16,
+      (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ).join();
+  }
 
   /// Broadcasts an inference request to all connected peers.
   void _requestInference(String prompt) {
-    final id = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
-    final completer = Completer<String?>();
-    _pendingInference[id] = completer;
     // Capture the session now — response should post here even if user switches.
     final session = _channels?.active;
     if (session == null) return;
+    final id = _newInferenceRequestId();
+    final completer = Completer<String?>();
+    _pendingInference[id] = (
+      channelId: session.channelId,
+      completer: completer,
+    );
     session.broadcast(InferenceRequest(id: id, prompt: prompt));
     // Also try locally if we have a model.
     if (_bot != null) {
@@ -1657,19 +1681,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     MeshControl control,
   ) {
     if (control is VoicePresenceControl) {
+      // Presence is valid only for the channel carrying this authenticated
+      // control. Never accept or disclose a different channel capability.
+      if (control.channelId.isNotEmpty && control.channelId != channelId) {
+        return;
+      }
+      final rootHex = _rootHexForPeer(fromHex);
       setState(() {
         if (control.channelId.isEmpty) {
-          // Peer left voice — remove from all channels.
-          for (final set in _voicePresence.values) {
-            set.remove(fromHex);
+          // A leave applies only to the authenticated channel carrying it. A
+          // peer in another shared channel must not clear unrelated presence.
+          _voicePresence[channelId]?.remove(rootHex);
+          if (!_voicePresence.values.any((set) => set.contains(rootHex))) {
+            _voicePresenceTs.remove(rootHex);
           }
-          _voicePresenceTs.remove(fromHex);
         } else {
-          (_voicePresence[control.channelId] ??= {}).add(fromHex);
-          _voicePresenceTs[fromHex] = DateTime.now();
+          (_voicePresence[channelId] ??= {}).add(rootHex);
+          _voicePresenceTs[rootHex] = DateTime.now();
           // Remove from other channels (can only be in one).
           for (final entry in _voicePresence.entries) {
-            if (entry.key != control.channelId) entry.value.remove(fromHex);
+            if (entry.key != channelId) entry.value.remove(rootHex);
           }
         }
         // Prune stale entries (>30s without refresh).
@@ -1681,18 +1712,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       });
       return;
     }
-    if (control is ReadWatermarkControl && control.messageId.isNotEmpty) {
+    if (control is ReadWatermarkControl &&
+        control.channelId == channelId &&
+        RegExp(r'^[0-9a-fA-F]{68}$').hasMatch(control.messageId)) {
+      final rootHex = _rootHexForPeer(fromHex);
       setState(() {
-        (_readWatermarks[control.channelId] ??= {})[fromHex] =
-            control.messageId;
+        (_readWatermarks[channelId] ??= {})[rootHex] = control.messageId;
         // Cache the timestamp for O(1) tick rendering — but only if we haven't
         // already resolved this id, so repeat watermarks don't each trigger an
         // O(n) scan of the message history. (_backfillWatermarkTs covers ids
         // that aren't in our DAG yet, on the next refresh.)
-        final cache = _watermarkTs[control.channelId] ??= {};
+        final cache = _watermarkTs[channelId] ??= {};
         if (!cache.containsKey(control.messageId)) {
           final session = _channels?.sessions
-              .where((s) => s.channelId == control.channelId)
+              .where((s) => s.channelId == channelId)
               .firstOrNull;
           if (session != null) {
             final ordered = session.repository.ordered();
@@ -1704,15 +1737,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     if (control is InferenceRequest) {
+      if (control.id.length > 128 ||
+          control.prompt.isEmpty ||
+          control.prompt.length > 8000) {
+        return;
+      }
       // A peer wants inference — respond if we have a model and compute is on.
       final bot = _bot;
       if (bot == null || bot.busy) return;
       final now = DateTime.now();
-      final last = _inferCooldown[fromHex];
+      final requesterRoot = _rootHexForPeer(fromHex);
+      final last = _inferCooldown[requesterRoot];
       if (last != null && now.difference(last) < const Duration(seconds: 10)) {
         return; // too soon since this peer's last request
       }
-      _inferCooldown[fromHex] = now;
+      _inferCooldown[requesterRoot] = now;
       unawaited(
         bot
             .generate(control.prompt)
@@ -1736,9 +1775,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     } else if (control is InferenceResponse) {
       // A peer responded to our request.
-      final completer = _pendingInference[control.id];
-      if (completer != null && !completer.isCompleted) {
-        completer.complete(control.text);
+      final pending = _pendingInference[control.id];
+      if (pending != null &&
+          pending.channelId == channelId &&
+          control.text.length <= 16000 &&
+          !pending.completer.isCompleted) {
+        pending.completer.complete(control.text);
       }
     } else if (control is DeviceRevocationControl) {
       _handleDeviceRevocation(control.revocation);
@@ -1749,13 +1791,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void _handleDeviceRevocation(DeviceRevocation rev) {
     final store = _deviceStore;
     if (store == null) return;
-    // Only accept revocations for our own root (other people's revocations
-    // don't matter for Phase A — we'll enforce them in Phase B).
-    if (hex.encode(rev.rootKey) != widget.identity.publicKeyHex) return;
     unawaited(() async {
       try {
-        if (!await rev.verify()) return;
-        await store.addRevocation(rev);
+        if (!await store.addRevocation(rev)) return;
+        await _channels?.enforcePeerPolicies();
+        await _voice?.enforcePeerPolicy();
+        await _broadcast?.enforcePeerPolicy();
+        for (final view in _screenViews.values.toList()) {
+          await view.enforcePeerPolicy();
+        }
         if (mounted) setState(() {});
       } catch (_) {
         // Persistence failure — revocation will be re-learned on next sync.
@@ -2018,7 +2062,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     for (final entry in session.seenCerts.entries) {
       // Only learn certs for our own root identity.
       if (session.deviceRoots[entry.key] != myRoot) continue;
-      if (store.isRevoked(entry.key)) continue;
+      if (store.isRevoked(myRoot, entry.key)) continue;
       unawaited(store.addCert(entry.value));
     }
   }
@@ -3148,7 +3192,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       debugCerts ?? store!.certs,
       widget.deviceKeys.publicKeyHex,
     );
-    final revoked = store?.revokedDeviceKeys ?? const <String>{};
+    final revoked =
+        store?.revokedDevicesFor(widget.identity.publicKeyHex) ??
+        const <String>{};
     final thisDeviceHex = widget.deviceKeys.publicKeyHex;
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -3391,24 +3437,73 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ) async {
     final path = await InferenceBot.pathFor(model.id);
     final file = File(path);
-    setTabState(() {
+    final partial = File('$path.part');
+    final client = HttpClient();
+    void updateTab(void Function() update) {
+      if (!mounted) return;
+      try {
+        setTabState(update);
+      } catch (_) {
+        // The settings route may have closed while the download continued.
+      }
+    }
+
+    updateTab(() {
       _downloadingModel = model.id;
       _downloadProgress = 0;
     });
     try {
-      final request = await HttpClient().getUrl(Uri.parse(model.url));
+      if (await partial.exists()) await partial.delete();
+      final request = await client.getUrl(Uri.parse(model.url));
       final response = await request.close();
-      final total = response.contentLength;
-      var received = 0;
-      final sink = file.openWrite();
-      await for (final chunk in response) {
-        sink.add(chunk);
-        received += chunk.length;
-        if (total > 0) {
-          setTabState(() => _downloadProgress = received / total);
-        }
+      if (response.statusCode != HttpStatus.ok) {
+        throw HttpException(
+          'model download failed: HTTP ${response.statusCode}',
+          uri: Uri.parse(model.url),
+        );
       }
-      await sink.close();
+      final total = response.contentLength;
+      if (total > model.maxBytes) {
+        throw StateError('model download is larger than expected');
+      }
+      var received = 0;
+      final sink = partial.openWrite();
+      try {
+        await for (final chunk in response) {
+          received += chunk.length;
+          if (received > model.maxBytes) {
+            throw StateError('model download exceeded its size limit');
+          }
+          sink.add(chunk);
+          if (total > 0) {
+            final progress = (received / total).clamp(0.0, 1.0);
+            if (progress - (_downloadProgress ?? 0) >= 0.01) {
+              updateTab(() => _downloadProgress = progress);
+            }
+          }
+        }
+      } finally {
+        await sink.close();
+      }
+      if (await partial.length() < 1024 * 1024) {
+        throw const FormatException('downloaded model is unexpectedly small');
+      }
+      final raf = await partial.open();
+      late final List<int> magic;
+      try {
+        magic = await raf.read(4);
+      } finally {
+        await raf.close();
+      }
+      if (magic.length != 4 ||
+          magic[0] != 0x47 ||
+          magic[1] != 0x47 ||
+          magic[2] != 0x55 ||
+          magic[3] != 0x46) {
+        throw const FormatException('downloaded file is not a GGUF model');
+      }
+      if (await file.exists()) await file.delete();
+      await partial.rename(path);
       // Auto-select the newly downloaded model.
       await _settings?.setActiveModel(model.id);
       _bot = await InferenceBot.tryCreate(modelId: model.id);
@@ -3419,14 +3514,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     } catch (e) {
       // Clean up partial download.
-      if (await file.exists()) await file.delete();
+      try {
+        if (await partial.exists()) await partial.delete();
+      } catch (_) {}
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Download failed: $e')));
       }
     } finally {
-      setTabState(() {
+      client.close(force: true);
+      updateTab(() {
         _downloadingModel = null;
         _downloadProgress = null;
       });
@@ -3479,12 +3577,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onInference: _handleMeshControl,
       onDmConnected: _onDmConnected,
       isBlocked: _blocked.contains,
-      isDeviceRevoked: (hex) => _deviceStore?.isRevoked(hex) ?? false,
+      isDeviceRevoked: (rootHex, deviceHex) =>
+          _deviceStore?.isRevoked(rootHex, deviceHex) ?? false,
       peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
       ownDeviceKeys: () {
         final store = _deviceStore;
         if (store == null) return [widget.deviceKeys.publicKey];
-        final revoked = store.revokedDeviceKeys;
+        final revoked = store.revokedDevicesFor(widget.identity.publicKeyHex);
         return store.certs
             .where((c) => !revoked.contains(c.deviceKeyHex))
             .map((c) => c.deviceKey)
@@ -3548,23 +3647,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _send() async {
     final raw = _input.text.trim();
     if (raw.isEmpty) return;
+    // Turn any @name matching a channel member into a <@hex> mention token.
+    final session = _channels?.active;
+    final text = session != null ? _resolveMentionsInText(raw, session) : raw;
+    final editing = _editing;
+    final sent = editing != null
+        ? await _publish(EditContent(editing.idHex, text))
+        : await _publish(TextContent(text, replyTo: _replyTo?.idHex));
+    if (!sent) return; // keep the draft so a first-contact send can be retried
+
     _input.clear();
     _typingTimer?.cancel();
     if (_typingLocally) {
       _typingLocally = false;
       _channels?.active?.sendTyping(false);
     }
-    // Turn any @name matching a channel member into a <@hex> mention token.
-    final session = _channels?.active;
-    final text = session != null ? _resolveMentionsInText(raw, session) : raw;
-    final editing = _editing;
     if (editing != null) {
-      await _publish(EditContent(editing.idHex, text));
       setState(() => _editing = null);
       _composerFocus.requestFocus();
       return;
     }
-    await _publish(TextContent(text, replyTo: _replyTo?.idHex));
     setState(() => _replyTo = null);
     _composerFocus.requestFocus();
     // @bot trigger — broadcast an inference request to the mesh.
@@ -4044,9 +4146,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         deviceCert: widget.deviceKeys.cert,
       );
 
-  Future<void> _publish(Content content) async {
+  Future<bool> _publish(Content content) async {
     final session = _channels?.active;
-    if (_sending || session == null) return;
+    if (_sending || session == null) return false;
     // Request web notification permission on first user action.
     if (kIsWeb && !_webNotifRequested) {
       _webNotifRequested = true;
@@ -4060,6 +4162,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       // Persist + gossip to peers; the updates stream re-renders it.
       await session.publish(message);
+      return true;
     } catch (e) {
       if (mounted) {
         final msg = e is StateError
@@ -4067,6 +4170,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             : 'send failed';
         _setError(msg);
       }
+      return false;
     } finally {
       if (mounted) {
         setState(() => _sending = false);
@@ -4487,7 +4591,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final voice = _voice;
     if (voice != null) {
       for (final peer in voice.peerHexes) {
-        if (_blocked.contains(peer) && voice.volumeOf(peer) > 0) {
+        if (_blocked.contains(_rootHexForPeer(peer)) &&
+            voice.volumeOf(peer) > 0) {
           unawaited(voice.setVolume(peer, 0.0));
         }
       }
@@ -4500,8 +4605,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _broadcastVoicePresence(String channelId) {
+    final actualChannel = channelId.isEmpty ? _voice?.channelId : channelId;
+    if (actualChannel == null) return;
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
-      session.broadcast(VoicePresenceControl(channelId: channelId));
+      if (session.channelId == actualChannel) {
+        session.broadcast(VoicePresenceControl(channelId: channelId));
+        return;
+      }
     }
   }
 
@@ -4510,7 +4620,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_ytIsHost && _ytVideoId != null) {
       _voice?.sendControl(
         YoutubeControl(
-          host: widget.identity.publicKeyHex,
+          host: widget.deviceKeys.publicKeyHex,
           videoId: '',
           playing: false,
           position: 0,
@@ -4553,7 +4663,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     try {
       final broadcast = await ScreenBroadcast.start(
         channelId: session.channelId,
-        identity: widget.identity,
+        identity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
         source: choice.source,
         resolution: choice.resolution,
@@ -4568,7 +4678,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       _broadcast = broadcast;
       voice.sendControl(
-        ScreenShareControl(sharer: widget.identity.publicKeyHex, active: true),
+        ScreenShareControl(
+          sharer: widget.deviceKeys.publicKeyHex,
+          active: true,
+        ),
       );
       _sharedTo = voice.peerHexes.toSet();
       setState(() {});
@@ -4584,7 +4697,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _sharedTo.clear();
     // Announce the stop while the voice mesh is still up, so viewers drop it.
     _voice?.sendControl(
-      ScreenShareControl(sharer: widget.identity.publicKeyHex, active: false),
+      ScreenShareControl(sharer: widget.deviceKeys.publicKeyHex, active: false),
     );
     if (mounted) setState(() {});
     await broadcast.stop();
@@ -4597,7 +4710,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final view = await ScreenView.watch(
         channelId: channelId,
         sharerHex: sharerHex,
-        identity: widget.identity,
+        identity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
@@ -4649,7 +4762,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (current.difference(_sharedTo).isEmpty) return; // no new peers
     _sharedTo = current;
     voice.sendControl(
-      ScreenShareControl(sharer: widget.identity.publicKeyHex, active: true),
+      ScreenShareControl(sharer: widget.deviceKeys.publicKeyHex, active: true),
     );
   }
 
@@ -4681,7 +4794,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _ytController ??= _newYtController();
     setState(() {
       _ytVideoId = id;
-      _ytHostHex = widget.identity.publicKeyHex;
+      _ytHostHex = widget.deviceKeys.publicKeyHex;
       _ytIsHost = true;
       _ytPlaying = true;
       _ytPosition = 0;
@@ -4695,7 +4808,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Applies the host's watch-party state (I'm a follower).
   void _onYoutubeControl(String senderHex, YoutubeControl control) {
-    if (!mounted || senderHex == widget.identity.publicKeyHex) return;
+    if (!mounted || senderHex == widget.deviceKeys.publicKeyHex) return;
     if (control.videoId.isEmpty) {
       if (senderHex == _ytHostHex) _endWatchParty(); // host closed it
       return;
@@ -4703,7 +4816,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Two near-simultaneous starts: the higher pubkey wins, so both sides
     // converge on one host instead of yielding to each other. If I'm hosting and
     // a lower-key peer also started, keep hosting — my next broadcast wins them.
-    if (_ytIsHost && senderHex.compareTo(widget.identity.publicKeyHex) < 0) {
+    if (_ytIsHost && senderHex.compareTo(widget.deviceKeys.publicKeyHex) < 0) {
       return;
     }
     // Never trust a network-supplied id: it's interpolated into the player's
@@ -4754,7 +4867,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!_ytIsHost || id == null) return;
     _voice?.sendControl(
       YoutubeControl(
-        host: widget.identity.publicKeyHex,
+        host: widget.deviceKeys.publicKeyHex,
         videoId: id,
         playing: _ytPlaying,
         position: _ytPosition,
@@ -5243,11 +5356,20 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// What to call someone: your petname, else their self-asserted (suggested)
   /// name, else their `hearth#fingerprint`.
   String _displayName(Uint8List author) {
-    final key = hex.encode(author);
+    final originalKey = hex.encode(author);
+    final key = _rootHexForPeer(originalKey);
+    final displayKey = key == originalKey
+        ? author
+        : Uint8List.fromList(hex.decode(key));
     return _contacts?.nameFor(key) ??
         _suggested[key] ??
-        'hearth#${_fingerprint(author)}';
+        'hearth#${_fingerprint(displayKey)}';
   }
+
+  String _rootHexForPeer(String peerHex) =>
+      _deviceStore?.rootForDevice(peerHex) ??
+      _channels?.deviceToRoot[peerHex] ??
+      peerHex;
 
   /// The viewer's `@name` label for a mention's [pubkeyHex] (resolved to their
   /// own petname/suggested name, so a mention reads correctly for everyone).
@@ -6011,7 +6133,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Hide messages from revoked devices (already stored, filter at display).
       if (m.device != null) {
         final devHex = hex.encode(m.device!);
-        if (_deviceStore?.isRevoked(devHex) ?? false) return false;
+        if (_deviceStore?.isRevoked(hex.encode(m.author), devHex) ?? false) {
+          return false;
+        }
       }
       return true;
     }).toList();

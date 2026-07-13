@@ -16,7 +16,13 @@ import 'repository.dart';
 /// This is the seam between the app and the mesh: the UI [publish]es and listens
 /// to [updates]; the transport hands connected peers to [addPeer].
 class SyncEngine {
-  SyncEngine(this.repository, this.channel, {this.blobStore, this.isDeviceRevoked});
+  SyncEngine(
+    this.repository,
+    this.channel, {
+    this.blobStore,
+    this.isDeviceRevoked,
+    this.messageAllowed,
+  });
 
   final MessageRepository repository;
 
@@ -27,9 +33,14 @@ class SyncEngine {
   /// Optional content-addressed store for media blobs fetched from peers.
   final BlobStore? blobStore;
 
-  /// Optional callback: returns true if the device key (hex) has been revoked.
-  /// When set, messages signed by a revoked device are silently dropped.
-  final bool Function(String deviceKeyHex)? isDeviceRevoked;
+  /// Optional callback: returns true if [deviceKeyHex] was revoked by its
+  /// authorising [rootKeyHex]. Revocations are root-scoped so one identity
+  /// cannot suppress an unrelated identity that uses a different device key.
+  final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
+
+  /// Optional channel-level author policy, used by DMs to reject otherwise
+  /// valid messages signed by unrelated identities.
+  final bool Function(Message message)? messageAllowed;
 
   final Set<SyncSession> _sessions = {};
   final StreamController<void> _updates = StreamController<void>.broadcast();
@@ -53,6 +64,7 @@ class SyncEngine {
       blobStore: blobStore,
       onBlob: _onBlob,
       isDeviceRevoked: isDeviceRevoked,
+      messageAllowed: messageAllowed,
     );
     _sessions.add(session);
     session.start();
@@ -68,6 +80,9 @@ class SyncEngine {
   /// Persists a locally-authored [message] and gossips it to every peer. For
   /// *local* messages only — they're trusted, so no signature check.
   Future<void> publish(Message message) async {
+    if (message.channel != channel) {
+      throw ArgumentError.value(message.channel, 'message', 'wrong channel');
+    }
     if (await repository.add(message)) _onNewMessage(message, null);
   }
 
@@ -76,9 +91,16 @@ class SyncEngine {
   /// ([SyncSession] verifies every GIVE), so we never trust the relay to have
   /// checked it. On success it's stored and gossiped onward like any message.
   Future<void> receive(Message message) async {
+    if (message.channel != channel) return;
     if (!await message.verify()) return; // forged / invalid device-cert chain
+    if (!(messageAllowed?.call(message) ?? true)) return;
     if (message.device != null && isDeviceRevoked != null) {
-      if (isDeviceRevoked!(hex.encode(message.device!))) return;
+      if (isDeviceRevoked!(
+        hex.encode(message.author),
+        hex.encode(message.device!),
+      )) {
+        return;
+      }
     }
     if (await repository.add(message)) _onNewMessage(message, null);
   }
@@ -135,6 +157,7 @@ class SyncSession {
     this.blobStore,
     this.onBlob,
     this.isDeviceRevoked,
+    this.messageAllowed,
   }) {
     _sub = _link.frames.listen(_enqueue);
   }
@@ -144,7 +167,8 @@ class SyncSession {
   final FrameChannel _link;
   final BlobStore? blobStore;
   final void Function(String hash)? onBlob;
-  final bool Function(String deviceKeyHex)? isDeviceRevoked;
+  final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
+  final bool Function(Message message)? messageAllowed;
 
   /// Called after this session stores a *new* message, so the engine can spread
   /// it to other peers.
@@ -173,7 +197,10 @@ class SyncSession {
 
   // Serialise handling so concurrent gives don't race on _wanted or add().
   void _enqueue(SyncFrame frame) {
-    _tail = _tail.then((_) => _handle(frame));
+    _tail = _tail.then((_) => _handle(frame)).catchError((Object _) {
+      // A malformed peer frame must not poison the serial queue and prevent
+      // every subsequent valid frame from being processed.
+    });
   }
 
   Future<void> _handle(SyncFrame frame) async {
@@ -183,7 +210,9 @@ class SyncSession {
       case WantFrame(:final ids):
         // Cap responses to prevent amplification.
         for (final idHex in ids.take(_maxHaveHeads)) {
-          final message = repository.get(_bytes(idHex));
+          final id = _idBytes(idHex);
+          if (id == null) continue;
+          final message = repository.get(id);
           if (message != null) _link.send(GiveFrame(message));
         }
       case GiveFrame(:final message):
@@ -192,12 +221,12 @@ class SyncSession {
         final bytes = await blobStore?.get(hash);
         if (bytes != null) _link.send(GiveBlobFrame(hash, bytes));
       case GiveBlobFrame(:final hash, :final bytes):
+        // Reject oversized blobs before spending CPU hashing them.
+        if (bytes.length > maxBlobBytes) return;
         // Content-addressed: the bytes must hash to the requested id.
         if (await blobHash(bytes) != hash) return;
         final store = blobStore;
         if (store == null) return;
-        // Reject oversized blobs (10 MB cap).
-        if (bytes.length > maxBlobBytes) return;
         await store.put(bytes);
         onBlob?.call(hash);
     }
@@ -206,9 +235,15 @@ class SyncSession {
   Future<void> _receive(Message message) async {
     if (message.channel != channel) return; // not our channel
     if (!await message.verify()) return; // forged or tampered
+    if (!(messageAllowed?.call(message) ?? true)) return;
     // Reject messages from revoked devices.
     if (message.device != null && isDeviceRevoked != null) {
-      if (isDeviceRevoked!(hex.encode(message.device!))) return;
+      if (isDeviceRevoked!(
+        hex.encode(message.author),
+        hex.encode(message.device!),
+      )) {
+        return;
+      }
     }
     _wanted.remove(message.idHex);
     if (await repository.add(message)) {
@@ -224,7 +259,9 @@ class SyncSession {
     final missing = <String>[];
     for (final idHex in ids) {
       if (_wanted.length >= _maxPendingWants) break;
-      if (repository.contains(_bytes(idHex)) || !_wanted.add(idHex)) continue;
+      final id = _idBytes(idHex);
+      if (id == null) continue;
+      if (repository.contains(id) || !_wanted.add(idHex)) continue;
       missing.add(idHex);
     }
     if (missing.isNotEmpty) _link.send(WantFrame(missing));
@@ -233,6 +270,8 @@ class SyncSession {
   static List<String> _hex(List<Uint8List> ids) =>
       ids.map(hex.encode).toList(growable: false);
 
-  static Uint8List _bytes(String idHex) =>
-      Uint8List.fromList(hex.decode(idHex));
+  static final RegExp _idPattern = RegExp(r'^[0-9a-fA-F]{68}$');
+
+  static Uint8List? _idBytes(String idHex) =>
+      _idPattern.hasMatch(idHex) ? Uint8List.fromList(hex.decode(idHex)) : null;
 }

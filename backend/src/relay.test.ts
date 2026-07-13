@@ -7,6 +7,7 @@ import {
   signedBytes,
   type MessageFields,
   type WireMessage,
+  verifyWire,
 } from './message';
 import { createRelay } from './relay';
 
@@ -104,6 +105,18 @@ describe('relay', () => {
     expect(res.status).toBe(400);
   });
 
+  it('returns false for non-string parent ids without throwing', async () => {
+    const wire = await makeWire('hello');
+    (wire as unknown as { prev: unknown[] }).prev = [123];
+    await expect(verifyWire(wire)).resolves.toBe(false);
+  });
+
+  it('rejects oversized poll channel identifiers', async () => {
+    const app = createRelay();
+    const channel = 'x'.repeat(257);
+    expect((await app.request(`/poll?channel=${channel}`)).status).toBe(400);
+  });
+
   it('returns only messages newer than `since`', async () => {
     const app = createRelay();
     await post(app, await makeWire('m1'));
@@ -132,6 +145,26 @@ describe('relay', () => {
     });
 
     expect(res.status).toBe(413);
+  });
+
+  it('rejects an oversized streaming body without Content-Length', async () => {
+    const app = createRelay();
+    const chunk = new TextEncoder().encode('x'.repeat(70 * 1024));
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(chunk);
+        controller.close();
+      },
+    });
+    const request = new Request('http://localhost/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+      // Required by Node's Request implementation for streaming request bodies.
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+
+    expect((await app.request(request)).status).toBe(413);
   });
 
   it('rate-limits the media-search proxy', async () => {
