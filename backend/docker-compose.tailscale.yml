@@ -16,10 +16,23 @@
 #   FREESOUND_KEY  (optional) sound-search proxy key
 #   TAG            (optional) relay image tag (default: latest)
 services:
+  tailscale-config:
+    # Stage the inline Compose config into a regular directory. Tailscale watches
+    # the parent directory and does not reliably support single-file mounts.
+    image: tailscale/tailscale:v1.98.9@sha256:f15d5d3f4a68773a853180b72496f70ba614b64de0878c43fe3da39fe0afba47
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["cp -f /funnel.json /config/funnel.json && chmod 0444 /config/funnel.json"]
+    configs:
+      - source: ts-funnel
+        target: /funnel.json
+    volumes:
+      - tailscale-config:/config
+    restart: "no"
+
   tailscale:
-    image: tailscale/tailscale:latest
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+    # Keep this deliberate: Watchtower replacing `latest` previously left the
+    # node connected but without its Funnel configuration.
+    image: tailscale/tailscale:v1.98.9@sha256:f15d5d3f4a68773a853180b72496f70ba614b64de0878c43fe3da39fe0afba47
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY to a Tailscale auth key}
       TS_HOSTNAME: ${TS_HOSTNAME:-hearth-relay}
@@ -28,9 +41,10 @@ services:
       TS_SERVE_CONFIG: /config/funnel.json
     volumes:
       - tailscale-state:/var/lib/tailscale
-    configs:
-      - source: ts-funnel
-        target: /config/funnel.json
+      - tailscale-config:/config:ro
+    depends_on:
+      tailscale-config:
+        condition: service_completed_successfully
     # Funnel needs kernel mode → a real TUN device. The host must provide /dev/net/tun
     # (load the `tun` kernel module on the host if missing; Proxmox LXC: lxc.mount.entry).
     devices:
@@ -66,4 +80,5 @@ configs:
       }
 
 volumes:
+  tailscale-config:
   tailscale-state:
