@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CreateCustomCredentialRequest
 import androidx.credentials.CreateCredentialRequest
@@ -38,6 +40,11 @@ class MainActivity : FlutterActivity() {
 
         /** Bundle key for the base64-encoded seed inside the credential data. */
         private const val KEY_SEED = "seed"
+
+        private const val UPDATE_CLEANUP_PREFS = "hearth_update_cleanup"
+        private const val CLEANUP_DOWNLOAD_ID = "download_id"
+        private const val CLEANUP_NOT_BEFORE_MS = "not_before_ms"
+        private const val MAX_CLEANUP_DELAY_MS = 24 * 60 * 60 * 1000L
     }
 
     /** Activity-scoped coroutine scope, cancelled in onDestroy. */
@@ -45,6 +52,9 @@ class MainActivity : FlutterActivity() {
 
     /** Credential Manager singleton (lazy — only created when first used). */
     private val credentialManager by lazy { CredentialManager.create(this) }
+
+    /** Keeps cleanup armed while this process remains alive. */
+    private val cleanupHandler by lazy { Handler(Looper.getMainLooper()) }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -191,6 +201,90 @@ class MainActivity : FlutterActivity() {
     // DownloadManager — system-managed APK downloads for auto-update
     // ─────────────────────────────────────────────────────────────────────────
 
+    private fun scheduleDownloadCleanup(
+        dm: DownloadManager,
+        id: Long,
+        requestedDelayMs: Long,
+    ) {
+        val delayMs = requestedDelayMs.coerceIn(0L, MAX_CLEANUP_DELAY_MS)
+        val prefs = getSharedPreferences(UPDATE_CLEANUP_PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.edit()
+            .putLong(CLEANUP_DOWNLOAD_ID, id)
+            .putLong(CLEANUP_NOT_BEFORE_MS, System.currentTimeMillis() + delayMs)
+            .commit()
+        check(saved) { "failed to persist update cleanup" }
+        armScheduledDownloadCleanup(dm)
+    }
+
+    private fun armScheduledDownloadCleanup(dm: DownloadManager) {
+        val prefs = getSharedPreferences(UPDATE_CLEANUP_PREFS, Context.MODE_PRIVATE)
+        if (!prefs.contains(CLEANUP_DOWNLOAD_ID)) return
+        val id = prefs.getLong(CLEANUP_DOWNLOAD_ID, -1L)
+        if (id < 0L) return
+        val notBeforeMs = prefs.getLong(CLEANUP_NOT_BEFORE_MS, 0L)
+        val remainingMs = (notBeforeMs - System.currentTimeMillis()).coerceAtLeast(0L)
+        cleanupHandler.postDelayed({ finishScheduledDownloadCleanup(dm, id) }, remainingMs)
+    }
+
+    private fun finishScheduledDownloadCleanup(dm: DownloadManager, id: Long) {
+        val prefs = getSharedPreferences(UPDATE_CLEANUP_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getLong(CLEANUP_DOWNLOAD_ID, -1L) != id) return
+        val remainingMs = (
+            prefs.getLong(CLEANUP_NOT_BEFORE_MS, 0L) - System.currentTimeMillis()
+        ).coerceAtLeast(0L)
+        if (remainingMs > 0L) {
+            cleanupHandler.postDelayed({ finishScheduledDownloadCleanup(dm, id) }, remainingMs)
+            return
+        }
+        try {
+            dm.remove(id)
+            prefs.edit().clear().commit()
+        } catch (_: Exception) {
+            // Keep the persisted record so the next app launch retries cleanup.
+        }
+    }
+
+    private fun cancelDownload(dm: DownloadManager, id: Long) {
+        val prefs = getSharedPreferences(UPDATE_CLEANUP_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getLong(CLEANUP_DOWNLOAD_ID, -1L) == id) {
+            prefs.edit().clear().commit()
+        }
+        dm.remove(id)
+    }
+
+    private fun cleanupOldUpdateDownloads(dm: DownloadManager, keepId: Long?) {
+        val prefs = getSharedPreferences(UPDATE_CLEANUP_PREFS, Context.MODE_PRIVATE)
+        // Preserve an active download and an APK still being read by the installer.
+        if (keepId != null || prefs.contains(CLEANUP_DOWNLOAD_ID)) return
+        val downloadsDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
+        val staleIds = mutableListOf<Long>()
+        dm.query(DownloadManager.Query()).use { cursor ->
+            if (cursor != null) {
+                val idColumn = cursor.getColumnIndex(DownloadManager.COLUMN_ID)
+                val uriColumn = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                while (idColumn >= 0 && uriColumn >= 0 && cursor.moveToNext()) {
+                    val path = cursor.getString(uriColumn)?.let { Uri.parse(it).path }
+                    if (path != null && isHearthUpdateApk(File(path), downloadsDir)) {
+                        staleIds.add(cursor.getLong(idColumn))
+                    }
+                }
+            }
+        }
+        if (staleIds.isNotEmpty()) dm.remove(*staleIds.toLongArray())
+        downloadsDir.listFiles()
+            ?.filter { isHearthUpdateApk(it, downloadsDir) }
+            ?.forEach { it.delete() }
+    }
+
+    private fun isHearthUpdateApk(file: File, downloadsDir: File): Boolean {
+        if (!file.isFile || file.name != "hearth-android.apk") return false
+        return try {
+            file.canonicalFile.parentFile == downloadsDir.canonicalFile
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun setupDownloaderChannel(flutterEngine: FlutterEngine) {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hearth/downloader")
             .setMethodCallHandler { call, result ->
@@ -273,18 +367,49 @@ class MainActivity : FlutterActivity() {
                         }
                     }
 
+                    "scheduleCleanup" -> {
+                        val id = (call.argument<Number>("id"))?.toLong()
+                        val delayMs = (call.argument<Number>("delayMs"))?.toLong()
+                        if (id == null || delayMs == null) {
+                            result.error("args", "id and delayMs required", null)
+                            return@setMethodCallHandler
+                        }
+                        try {
+                            scheduleDownloadCleanup(dm, id, delayMs)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("cleanup", e.message, null)
+                        }
+                    }
+
+                    "cleanupOld" -> {
+                        val keepId = (call.argument<Number>("keepId"))?.toLong()
+                        try {
+                            cleanupOldUpdateDownloads(dm, keepId)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("cleanup", e.message, null)
+                        }
+                    }
+
                     "cancel" -> {
                         val id = (call.argument<Number>("id"))?.toLong()
                         if (id == null) {
                             result.error("args", "id required", null)
                             return@setMethodCallHandler
                         }
-                        dm.remove(id)
-                        result.success(true)
+                        try {
+                            cancelDownload(dm, id)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            result.error("cancel", e.message, null)
+                        }
                     }
 
                     else -> result.notImplemented()
                 }
             }
+        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        armScheduledDownloadCleanup(dm)
     }
 }

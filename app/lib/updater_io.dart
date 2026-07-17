@@ -21,6 +21,7 @@ const MethodChannel _downloader = MethodChannel('hearth/downloader');
 const int _dlSuccessful = 8;
 const int _dlFailed = 16;
 const int _maxUpdateBytes = 1024 * 1024 * 1024;
+const Duration _androidCleanupDelay = Duration(minutes: 2);
 
 /// Deletes any leftover update APKs/ZIPs from previous downloads.
 Future<void> cleanupOldUpdates() async {
@@ -34,6 +35,14 @@ Future<void> cleanupOldUpdates() async {
       }
     }
   } catch (_) {}
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    try {
+      final pending = await _loadPending();
+      await _downloader.invokeMethod<void>('cleanupOld', {
+        'keepId': pending?.$1,
+      });
+    } catch (_) {}
+  }
 }
 
 /// Downloads this platform's release asset directly from GitHub Releases,
@@ -149,19 +158,23 @@ Future<void> _awaitAndroidDownload(
     final total = (s['total'] as num?)?.toDouble() ?? 0;
     final done = (s['downloaded'] as num?)?.toDouble() ?? 0;
     if (total > _maxUpdateBytes || done > _maxUpdateBytes) {
-      await _downloader.invokeMethod<void>('cancel', {'id': id});
+      await _cancelAndroidDownload(id);
       await _clearPending();
       throw StateError('update download exceeded the safety limit');
     }
     if (total > 0) onProgress?.call((done / total).clamp(0.0, 1.0));
     if (status == _dlSuccessful) {
       final path = s['path'] as String?;
-      await _clearPending(); // terminal — clear before verify so we don't loop
-      if (path == null) throw StateError('downloaded file not found');
-      await _verifyAndInstallApk(path, expectedHash);
+      if (path == null) {
+        await _cancelAndroidDownload(id);
+        await _clearPending();
+        throw StateError('downloaded file not found');
+      }
+      await verifyAndInstallDownloadedApk(id, path, expectedHash);
       return;
     }
     if (status == _dlFailed) {
+      await _cancelAndroidDownload(id);
       await _clearPending();
       throw StateError('download failed (reason ${s['reason']})');
     }
@@ -169,22 +182,70 @@ Future<void> _awaitAndroidDownload(
   }
 }
 
-/// Stream-hashes the downloaded APK, rejects it on mismatch, else installs it.
-Future<void> _verifyAndInstallApk(String path, String expectedHash) async {
+/// Stream-hashes a downloaded APK, registers durable cleanup, then installs it.
+@visibleForTesting
+Future<void> verifyAndInstallDownloadedApk(
+  int id,
+  String path,
+  String expectedHash, {
+  Future<OpenResult> Function(String path)? openFile,
+  Future<void> Function()? clearPending,
+}) async {
   final file = File(path);
-  final digestSink = AccumulatorSink<Digest>();
-  final input = sha256.startChunkedConversion(digestSink);
-  await for (final chunk in file.openRead()) {
-    input.add(chunk);
+  final clear = clearPending ?? _clearPending;
+  var didClearPending = false;
+
+  Future<void> clearOnce() async {
+    if (didClearPending) return;
+    await clear();
+    didClearPending = true;
   }
-  input.close();
-  if (digestSink.events.single.toString() != expectedHash) {
+
+  try {
+    final digestSink = AccumulatorSink<Digest>();
+    final input = sha256.startChunkedConversion(digestSink);
+    await for (final chunk in file.openRead()) {
+      input.add(chunk);
+    }
+    input.close();
+    if (digestSink.events.single.toString() != expectedHash) {
+      throw StateError('update hash mismatch — download rejected');
+    }
+
+    // DownloadManager owns the APK. Persist cleanup natively before opening the
+    // installer so it still runs if Android replaces or kills this process.
+    await _downloader.invokeMethod<void>('scheduleCleanup', {
+      'id': id,
+      'delayMs': _androidCleanupDelay.inMilliseconds,
+    });
+    // Terminal state: clear before opening so a successful install cannot cause
+    // the same completed download to relaunch on the next app start.
+    await clearOnce();
+    final result = openFile == null
+        ? await OpenFilex.open(path)
+        : await openFile(path);
+    if (result.type != ResultType.done) {
+      throw StateError('failed to open Android installer: ${result.message}');
+    }
+  } catch (_) {
+    await _cancelAndroidDownload(id, path: path);
     try {
-      await file.delete();
+      await clearOnce();
     } catch (_) {}
-    throw StateError('update hash mismatch — download rejected');
+    rethrow;
   }
-  await OpenFilex.open(path);
+}
+
+Future<void> _cancelAndroidDownload(int id, {String? path}) async {
+  try {
+    await _downloader.invokeMethod<void>('cancel', {'id': id});
+  } catch (_) {}
+  if (path != null) {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
 }
 
 /// If an update download was in flight when the app closed, decide what to do on
@@ -202,6 +263,7 @@ Future<UpdateInfo?> resumePendingUpdate() async {
     final hash = (_platformAsset(info.assets)?['sha256'] as String?)
         ?.toLowerCase();
     if (hash == null) {
+      await _cancelAndroidDownload(id);
       await _clearPending();
       return null;
     }
@@ -215,14 +277,17 @@ Future<UpdateInfo?> resumePendingUpdate() async {
     final status = (s['status'] as num?)?.toInt() ?? 0;
     if (status == _dlSuccessful) {
       final path = s['path'] as String?;
-      await _clearPending();
       if (path != null) {
         try {
-          await _verifyAndInstallApk(path, hash);
+          await verifyAndInstallDownloadedApk(id, path, hash);
         } catch (_) {}
+      } else {
+        await _cancelAndroidDownload(id);
+        await _clearPending();
       }
       return null;
     } else if (status == _dlFailed) {
+      await _cancelAndroidDownload(id);
       await _clearPending();
       return null;
     }
@@ -246,6 +311,7 @@ Future<void> attachPendingDownload({
   final hash = (_platformAsset(info.assets)?['sha256'] as String?)
       ?.toLowerCase();
   if (hash == null) {
+    await _cancelAndroidDownload(id);
     await _clearPending();
     return;
   }
@@ -303,22 +369,11 @@ Map<String, dynamic>? _platformAsset(Map<String, dynamic> assets) {
 }
 
 Future<void> _install(String path) async {
-  switch (defaultTargetPlatform) {
-    case TargetPlatform.android:
-      // Hands the APK to the system installer (needs REQUEST_INSTALL_PACKAGES +
-      // the user's "install unknown apps" grant for Hearth).
-      await OpenFilex.open(path);
-      // Clean up after a short delay (the system installer reads the file async).
-      Future.delayed(const Duration(minutes: 2), () {
-        try {
-          File(path).deleteSync();
-        } catch (_) {}
-      });
-    case TargetPlatform.windows:
-      await _installWindows(path);
-    default:
-      throw UnsupportedError('Auto-install not supported on this platform.');
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    await _installWindows(path);
+    return;
   }
+  throw UnsupportedError('Auto-install not supported on this platform.');
 }
 
 /// Windows can't overwrite a running .exe, so we hand off to a detached script

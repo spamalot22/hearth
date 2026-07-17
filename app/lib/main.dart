@@ -162,7 +162,7 @@ void main() async {
   // Init local notifications for background message toasts.
   await _initNotifications();
   // Clean up leftover update files from previous versions.
-  if (!kIsWeb) unawaited(cleanupOldUpdates());
+  if (!kIsWeb) await cleanupOldUpdates();
   runApp(HearthApp(keyStore: SecureKeyStore()));
 }
 
@@ -375,8 +375,14 @@ List<DeviceCert> sortedSettingsDeviceCerts(
   return sorted;
 }
 
-/// The Hearth theme for a given [brightness] — the ember seed with warm surfaces
-/// (charcoal in dark, parchment in light) so both modes feel fireside.
+Duration _motionDuration(BuildContext context, Duration duration) {
+  final media = MediaQuery.maybeOf(context);
+  return media?.disableAnimations == true ? Duration.zero : duration;
+}
+
+/// The Hearth theme for a given [brightness]. Ember remains the brand and action
+/// colour, while cool secondary accents and neutral surfaces keep dense chat UI
+/// readable and give status, voice, and navigation their own visual roles.
 ThemeData hearthTheme(Brightness brightness) {
   final dark = brightness == Brightness.dark;
   final scheme =
@@ -384,31 +390,167 @@ ThemeData hearthTheme(Brightness brightness) {
         seedColor: const Color(0xFFF2792B), // ember
         brightness: brightness,
       ).copyWith(
-        surface: dark ? const Color(0xFF1C1714) : const Color(0xFFFBF6F0),
-        surfaceContainerLowest: dark ? const Color(0xFF120E0B) : Colors.white,
+        primary: dark ? const Color(0xFFFF9659) : const Color(0xFFA8400B),
+        onPrimary: dark ? const Color(0xFF3F1400) : Colors.white,
+        primaryContainer: dark
+            ? const Color(0xFF672707)
+            : const Color(0xFFFFDBCA),
+        onPrimaryContainer: dark
+            ? const Color(0xFFFFDBCA)
+            : const Color(0xFF351000),
+        secondary: dark ? const Color(0xFF67D4C2) : const Color(0xFF006B5F),
+        onSecondary: dark ? const Color(0xFF00372F) : Colors.white,
+        secondaryContainer: dark
+            ? const Color(0xFF174A43)
+            : const Color(0xFFA4F2E3),
+        onSecondaryContainer: dark
+            ? const Color(0xFFC8F5EC)
+            : const Color(0xFF00201C),
+        tertiary: dark ? const Color(0xFFAFC6FF) : const Color(0xFF3E5F9B),
+        onTertiary: dark ? const Color(0xFF102B58) : Colors.white,
+        tertiaryContainer: dark
+            ? const Color(0xFF293F68)
+            : const Color(0xFFD8E4FF),
+        onTertiaryContainer: dark
+            ? const Color(0xFFD9E5FF)
+            : const Color(0xFF071B3D),
+        surface: dark ? const Color(0xFF15171A) : const Color(0xFFF8F9FB),
+        onSurface: dark ? const Color(0xFFE7E9ED) : const Color(0xFF1B1C1F),
+        onSurfaceVariant: dark
+            ? const Color(0xFFC2C6CD)
+            : const Color(0xFF454950),
+        surfaceContainerLowest: dark ? const Color(0xFF101215) : Colors.white,
         surfaceContainerLow: dark
-            ? const Color(0xFF1C1714)
-            : const Color(0xFFF6EFE7),
+            ? const Color(0xFF171A1F)
+            : const Color(0xFFF2F3F6),
         surfaceContainer: dark
-            ? const Color(0xFF221B16)
-            : const Color(0xFFF1E8DD),
+            ? const Color(0xFF1C2026)
+            : const Color(0xFFECEEF2),
         surfaceContainerHigh: dark
-            ? const Color(0xFF2A221B)
-            : const Color(0xFFEBE0D3),
+            ? const Color(0xFF232830)
+            : const Color(0xFFE5E7EC),
         surfaceContainerHighest: dark
-            ? const Color(0xFF342A21)
-            : const Color(0xFFE3D6C6),
+            ? const Color(0xFF2C323B)
+            : const Color(0xFFDDE0E6),
+        outline: dark ? const Color(0xFF8B9099) : const Color(0xFF73777F),
+        outlineVariant: dark
+            ? const Color(0xFF3B4048)
+            : const Color(0xFFC4C7CE),
       );
-  return ThemeData(
+  final base = ThemeData(
     useMaterial3: true,
     colorScheme: scheme,
     scaffoldBackgroundColor: dark
-        ? const Color(0xFF16110D)
-        : const Color(0xFFFDF9F3),
-    appBarTheme: const AppBarTheme(
+        ? const Color(0xFF121417)
+        : const Color(0xFFF5F6F8),
+  );
+  TextStyle? textStyle(TextStyle? style, {FontWeight? weight}) =>
+      style?.copyWith(letterSpacing: 0, fontWeight: weight ?? style.fontWeight);
+
+  final textTheme = base.textTheme.copyWith(
+    displayLarge: textStyle(base.textTheme.displayLarge),
+    displayMedium: textStyle(base.textTheme.displayMedium),
+    displaySmall: textStyle(base.textTheme.displaySmall),
+    headlineLarge: textStyle(base.textTheme.headlineLarge),
+    headlineMedium: textStyle(base.textTheme.headlineMedium),
+    headlineSmall: textStyle(
+      base.textTheme.headlineSmall,
+      weight: FontWeight.w600,
+    ),
+    titleLarge: textStyle(base.textTheme.titleLarge, weight: FontWeight.w600),
+    titleMedium: textStyle(base.textTheme.titleMedium, weight: FontWeight.w600),
+    titleSmall: textStyle(base.textTheme.titleSmall, weight: FontWeight.w600),
+    bodyLarge: textStyle(base.textTheme.bodyLarge),
+    bodyMedium: textStyle(base.textTheme.bodyMedium),
+    bodySmall: textStyle(base.textTheme.bodySmall),
+    labelLarge: textStyle(base.textTheme.labelLarge, weight: FontWeight.w600),
+    labelMedium: textStyle(base.textTheme.labelMedium, weight: FontWeight.w600),
+    labelSmall: textStyle(base.textTheme.labelSmall, weight: FontWeight.w600),
+  );
+  final controlShape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(8),
+  );
+
+  return base.copyWith(
+    textTheme: textTheme,
+    appBarTheme: AppBarTheme(
+      backgroundColor: scheme.surfaceContainerLowest,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
       scrolledUnderElevation: 2,
+      titleTextStyle: textTheme.titleMedium?.copyWith(color: scheme.onSurface),
+    ),
+    drawerTheme: DrawerThemeData(
+      backgroundColor: scheme.surfaceContainerLowest,
+      surfaceTintColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.horizontal(right: Radius.circular(8)),
+      ),
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: scheme.surfaceContainerHigh,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide(color: scheme.outlineVariant),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide(color: scheme.outlineVariant),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide(color: scheme.primary, width: 1.5),
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        minimumSize: const Size(40, 40),
+        shape: controlShape,
+        textStyle: textTheme.labelLarge,
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(40, 40),
+        shape: controlShape,
+        side: BorderSide(color: scheme.outlineVariant),
+        textStyle: textTheme.labelLarge,
+      ),
+    ),
+    textButtonTheme: TextButtonThemeData(
+      style: TextButton.styleFrom(shape: controlShape),
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      style: IconButton.styleFrom(
+        minimumSize: const Size.square(40),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    ),
+    listTileTheme: ListTileThemeData(
+      iconColor: scheme.onSurfaceVariant,
+      textColor: scheme.onSurface,
+      shape: controlShape,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+    ),
+    dividerTheme: DividerThemeData(
+      color: scheme.outlineVariant,
+      thickness: 0.5,
+      space: 24,
+    ),
+    snackBarTheme: SnackBarThemeData(
+      behavior: SnackBarBehavior.floating,
+      backgroundColor: scheme.inverseSurface,
+      contentTextStyle: TextStyle(color: scheme.onInverseSurface),
+      shape: controlShape,
+    ),
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(
+        color: scheme.inverseSurface,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      textStyle: TextStyle(color: scheme.onInverseSurface),
     ),
   );
 }
@@ -476,6 +618,8 @@ class _HearthAppState extends State<HearthApp> {
         theme: hearthTheme(Brightness.light),
         darkTheme: hearthTheme(Brightness.dark),
         themeMode: mode,
+        themeAnimationDuration: const Duration(milliseconds: 280),
+        themeAnimationCurve: Curves.easeOutCubic,
         home: _Bootstrap(
           keyStore: widget.keyStore,
           relayUrl: widget.relayUrl ?? kRelayUrl,
@@ -5257,6 +5401,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final speaking = voice.speaking(key);
     final isMuted =
         key != 'self' && (_voiceMuted.contains(key) || _blocked.contains(key));
+    final scheme = Theme.of(context).colorScheme;
     return InkWell(
       onTap: key == 'self' || isMuted
           ? null
@@ -5283,7 +5428,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             _SpeakingRings(
               active: speaking && !isMuted,
               level: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
-              color: Colors.greenAccent,
+              color: scheme.secondary,
               child: _avatar(author, radius: 14),
             ),
             const SizedBox(width: 8),
@@ -5295,15 +5440,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               ),
             ),
             if (isMuted)
-              const Icon(Icons.mic_off, size: 16, color: Colors.redAccent)
+              Icon(Icons.mic_off, size: 16, color: scheme.error)
             else
               SizedBox(
                 width: 44,
                 child: LinearProgressIndicator(
                   value: (voice.levelOf(key) * 4).clamp(0.0, 1.0),
                   minHeight: 4,
-                  backgroundColor: Colors.white24,
-                  color: Colors.greenAccent,
+                  borderRadius: BorderRadius.circular(2),
+                  backgroundColor: scheme.surfaceContainerHighest,
+                  color: scheme.secondary,
                 ),
               ),
           ],
@@ -5693,17 +5839,39 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       key: _scaffoldKey,
       appBar: AppBar(
         flexibleSpace: _EmberGlow(accent: _channelAccent(session)),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(session == null ? 'Hearth' : _channelTitle(session)),
-            Text(
-              'hearth#${widget.identity.fingerprint}',
-              key: const Key('identity-fingerprint'),
-              style: Theme.of(context).textTheme.bodySmall,
+        title: AnimatedSwitcher(
+          duration: _motionDuration(context, const Duration(milliseconds: 220)),
+          switchInCurve: Curves.easeOutCubic,
+          switchOutCurve: Curves.easeInCubic,
+          transitionBuilder: (child, animation) => FadeTransition(
+            opacity: animation,
+            child: SlideTransition(
+              position: Tween<Offset>(
+                begin: const Offset(0, 0.12),
+                end: Offset.zero,
+              ).animate(animation),
+              child: child,
             ),
-          ],
+          ),
+          child: Column(
+            key: ValueKey(session?.channelId ?? 'hearth-home'),
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                session == null ? 'Hearth' : _channelTitle(session),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              Text(
+                'hearth#${widget.identity.fingerprint}',
+                key: const Key('identity-fingerprint'),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           if (session != null)
@@ -5737,7 +5905,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     children: [
                       Expanded(
                         child: PageTransitionSwitcher(
-                          duration: const Duration(milliseconds: 300),
+                          duration: _motionDuration(
+                            context,
+                            const Duration(milliseconds: 260),
+                          ),
                           transitionBuilder: (child, primary, secondary) =>
                               SharedAxisTransition(
                                 animation: primary,
@@ -5758,7 +5929,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   )
                 else
                   PageTransitionSwitcher(
-                    duration: const Duration(milliseconds: 300),
+                    duration: _motionDuration(
+                      context,
+                      const Duration(milliseconds: 260),
+                    ),
                     transitionBuilder: (child, primary, secondary) =>
                         SharedAxisTransition(
                           animation: primary,
@@ -6304,43 +6478,65 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Widget _emptyState(BuildContext context) {
     final theme = Theme.of(context);
     return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0.8, end: 1.0),
-            duration: const Duration(seconds: 2),
-            curve: Curves.easeInOut,
-            builder: (context, value, child) =>
-                Transform.scale(scale: value, child: child),
-            child: Icon(
-              Icons.local_fire_department,
-              size: 64,
-              color: theme.colorScheme.primary,
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0, end: 1),
+          duration: _motionDuration(context, const Duration(milliseconds: 520)),
+          curve: Curves.easeOutCubic,
+          builder: (context, value, child) => Opacity(
+            opacity: value,
+            child: Transform.translate(
+              offset: Offset(0, 12 * (1 - value)),
+              child: Transform.scale(scale: 0.94 + 0.06 * value, child: child),
             ),
           ),
-          const SizedBox(height: 16),
-          Text('Welcome to Hearth', style: theme.textTheme.headlineSmall),
-          const SizedBox(height: 8),
-          Text(
-            'Create a channel, or join one with an invite.',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 72,
+                height: 72,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primaryContainer.withValues(
+                    alpha: 0.55,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.45),
+                  ),
+                ),
+                child: Icon(
+                  Icons.local_fire_department,
+                  size: 42,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Text('Welcome to Hearth', style: theme.textTheme.headlineSmall),
+              const SizedBox(height: 8),
+              Text(
+                'Create a channel, or join one with an invite.',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: () => unawaited(_createChannel()),
+                icon: const Icon(Icons.add),
+                label: const Text('Create a channel'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: () => unawaited(_joinViaInvite()),
+                icon: const Icon(Icons.link),
+                label: const Text('Join via invite'),
+              ),
+            ],
           ),
-          const SizedBox(height: 24),
-          FilledButton.icon(
-            onPressed: () => unawaited(_createChannel()),
-            icon: const Icon(Icons.add),
-            label: const Text('Create a channel'),
-          ),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: () => unawaited(_joinViaInvite()),
-            icon: const Icon(Icons.link),
-            label: const Text('Join via invite'),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -6362,22 +6558,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   _brandHeader(),
                   _drawerHeader('Channels'),
                   for (final s in groups)
-                    ListTile(
-                      leading: Icon(Icons.tag, color: _channelAccent(s)),
-                      title: Text(_channelTitle(s)),
-                      selected: s.channelId == channels?.activeId,
-                      selectedColor: _channelAccent(s),
-                      selectedTileColor: _channelAccent(s).withAlpha(28),
-                      trailing: _unreadBadge(s),
-                      onTap: () {
-                        channels?.activate(s.channelId);
-                        _markRead(s);
-                        _replyTo = null;
-                        Navigator.pop(context);
-                      },
-                    ),
+                    _drawerSessionTile(s, icon: Icons.tag),
                   ListTile(
-                    leading: const Icon(Icons.add),
+                    leading: Icon(
+                      Icons.add,
+                      color: Theme.of(context).colorScheme.secondary,
+                    ),
                     title: const Text('Create a channel'),
                     onTap: () {
                       Navigator.pop(context);
@@ -6385,7 +6571,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                   ),
                   ListTile(
-                    leading: const Icon(Icons.link),
+                    leading: Icon(
+                      Icons.link,
+                      color: Theme.of(context).colorScheme.tertiary,
+                    ),
                     title: const Text('Add via invite or card'),
                     onTap: () {
                       Navigator.pop(context);
@@ -6396,7 +6585,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     _drawerHeader('Message requests'),
                     for (final peerHex in requests)
                       ListTile(
-                        leading: const Icon(Icons.mark_email_unread_outlined),
+                        leading: Icon(
+                          Icons.mark_email_unread_outlined,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
                         title: Text(
                           _displayName(Uint8List.fromList(hex.decode(peerHex))),
                         ),
@@ -6409,7 +6601,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ],
                   _drawerHeader('Direct messages'),
                   ListTile(
-                    leading: const Icon(Icons.add),
+                    leading: Icon(
+                      Icons.add,
+                      color: Theme.of(context).colorScheme.secondary,
+                    ),
                     title: const Text('New message'),
                     onTap: () {
                       Navigator.pop(context);
@@ -6417,7 +6612,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                   ),
                   ListTile(
-                    leading: const Icon(Icons.qr_code_2),
+                    leading: Icon(
+                      Icons.qr_code_2,
+                      color: Theme.of(context).colorScheme.tertiary,
+                    ),
                     title: const Text('Share my contact'),
                     onTap: () {
                       Navigator.pop(context);
@@ -6425,26 +6623,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     },
                   ),
                   for (final s in dms)
-                    ListTile(
-                      leading: Icon(
-                        Icons.alternate_email,
-                        color: _channelAccent(s),
-                      ),
-                      title: Text(_channelTitle(s)),
-                      selected: s.channelId == channels?.activeId,
-                      selectedColor: _channelAccent(s),
-                      selectedTileColor: _channelAccent(s).withAlpha(28),
-                      trailing: _unreadBadge(s),
-                      onTap: () {
-                        channels?.activate(s.channelId);
-                        _markRead(s);
-                        _replyTo = null;
-                        Navigator.pop(context);
-                      },
-                    ),
+                    _drawerSessionTile(s, icon: Icons.alternate_email),
                   _drawerHeader('Contacts'),
                   ListTile(
-                    leading: const Icon(Icons.people_outline),
+                    leading: Icon(
+                      Icons.people_outline,
+                      color: Theme.of(context).colorScheme.secondary,
+                    ),
                     title: const Text('Manage contacts'),
                     trailing: Text(
                       '${_contacts?.entries().length ?? 0}',
@@ -6461,19 +6646,88 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
             ListTile(
               dense: true,
-              leading: const Icon(Icons.settings_outlined, size: 20),
+              leading: Icon(
+                Icons.settings_outlined,
+                size: 20,
+                color: Theme.of(context).colorScheme.primary,
+              ),
               title: const Text('Settings'),
               onTap: () => unawaited(_openSettingsAfterDrawerCloses()),
             ),
             ListTile(
               dense: true,
-              leading: const Icon(Icons.code, size: 20),
+              leading: Icon(
+                Icons.code,
+                size: 20,
+                color: Theme.of(context).colorScheme.tertiary,
+              ),
               title: const Text('Source code'),
               subtitle: Text(
                 'AGPL-3.0 · ${appVersion == 'dev' ? 'dev build' : 'v$appVersion'}',
               ),
               trailing: _connectionIndicator(),
               onTap: () => unawaited(_openSourceCode()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _drawerSessionTile(ChannelSession session, {required IconData icon}) {
+    final accent = _channelAccent(session);
+    final selected = session.channelId == _channels?.activeId;
+    final duration = _motionDuration(
+      context,
+      const Duration(milliseconds: 180),
+    );
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: Material(
+        color: selected
+            ? accent.withValues(
+                alpha: Theme.of(context).brightness == Brightness.dark
+                    ? 0.16
+                    : 0.10,
+              )
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        animationDuration: duration,
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: duration,
+              curve: Curves.easeOutCubic,
+              width: 3,
+              height: selected ? 24 : 0,
+              decoration: BoxDecoration(
+                color: accent,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Expanded(
+              child: ListTile(
+                leading: AnimatedScale(
+                  scale: selected ? 1.06 : 1,
+                  duration: duration,
+                  curve: Curves.easeOutCubic,
+                  child: Icon(icon, color: selected ? accent : null),
+                ),
+                title: Text(
+                  _channelTitle(session),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                selected: selected,
+                selectedColor: accent,
+                trailing: _unreadBadge(session),
+                onTap: () {
+                  _channels?.activate(session.channelId);
+                  _markRead(session);
+                  _replyTo = null;
+                  Navigator.pop(context);
+                },
+              ),
             ),
           ],
         ),
@@ -6489,13 +6743,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         width: double.infinity,
         padding: const EdgeInsets.fromLTRB(16, 24, 16, 16),
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              theme.colorScheme.primaryContainer,
-              theme.colorScheme.surfaceContainerLowest,
-            ],
+          color: theme.colorScheme.surfaceContainerLow,
+          border: Border(
+            bottom: BorderSide(color: theme.colorScheme.outlineVariant),
           ),
         ),
         child: Row(
@@ -6506,10 +6756,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 onTap: () => unawaited(_setMyAvatar()),
                 child: _myAvatar != null
                     ? _avatar(widget.identity.publicKey, radius: 15)
-                    : Icon(
-                        Icons.local_fire_department,
-                        color: theme.colorScheme.primary,
-                        size: 28,
+                    : Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: theme.colorScheme.primary.withValues(
+                              alpha: 0.45,
+                            ),
+                          ),
+                        ),
+                        child: Icon(
+                          Icons.local_fire_department,
+                          color: theme.colorScheme.primary,
+                          size: 22,
+                        ),
                       ),
               ),
             ),
@@ -6606,10 +6869,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _drawerHeader(String title) => Padding(
-    padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-    child: Text(title, style: Theme.of(context).textTheme.titleSmall),
-  );
+  Widget _drawerHeader(String title) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 6),
+      child: Text(
+        title,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
 
   /// Renders a message's content — text, an inline GIF, a sticker, or a sound.
   /// True if [text] is 1–3 emoji with no other characters.
@@ -7464,6 +7736,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   ) {
     final mine = listEquals(message.author, widget.identity.publicKey);
     final authorHex = hex.encode(message.author);
+    final maxBubbleWidth = min(MediaQuery.sizeOf(context).width * 0.72, 640.0);
 
     // Blocked users in group channels: show redacted placeholder.
     if (!mine && !session.isDm && _blocked.contains(authorHex)) {
@@ -7472,9 +7745,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 2),
           child: Container(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.72,
-            ),
+            constraints: BoxConstraints(maxWidth: maxBubbleWidth),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: Theme.of(
@@ -7484,6 +7755,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 topLeft: Radius.circular(12),
                 topRight: Radius.circular(12),
                 bottomRight: Radius.circular(12),
+              ),
+              border: Border.all(
+                color: Theme.of(context).colorScheme.outlineVariant,
               ),
             ),
             child: Text(
@@ -7533,18 +7807,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     final scheme = Theme.of(context).colorScheme;
     const radius = Radius.circular(12);
-    final bubble = Container(
-      constraints: BoxConstraints(
-        maxWidth: MediaQuery.of(context).size.width * 0.72,
+    final accent = _channelAccent(session);
+    final mineColor = Color.alphaBlend(
+      accent.withValues(
+        alpha: Theme.of(context).brightness == Brightness.dark ? 0.22 : 0.14,
       ),
+      scheme.surfaceContainerHigh,
+    );
+    final bubble = Container(
+      constraints: BoxConstraints(maxWidth: maxBubbleWidth),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: mine ? scheme.primaryContainer : scheme.surfaceContainerHigh,
+        color: mine ? mineColor : scheme.surfaceContainerHigh,
         borderRadius: BorderRadius.only(
           topLeft: radius,
           topRight: radius,
           bottomLeft: mine ? radius : Radius.zero,
           bottomRight: mine ? Radius.zero : radius,
+        ),
+        border: Border.all(
+          color: mine ? accent.withValues(alpha: 0.38) : scheme.outlineVariant,
         ),
       ),
       child: Column(
@@ -7796,192 +8078,264 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           top: BorderSide(color: scheme.outlineVariant, width: 0.5),
         ),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (_editing != null)
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
-              color: scheme.surfaceContainerHigh.withAlpha(120),
-              child: Row(
-                children: [
-                  Icon(Icons.edit_outlined, size: 16, color: scheme.primary),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Editing message',
-                      style: TextStyle(fontSize: 11, color: scheme.primary),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 16),
-                    onPressed: () {
-                      setState(() => _editing = null);
-                      _input.clear();
-                    },
-                  ),
-                ],
-              ),
+          AnimatedSize(
+            duration: _motionDuration(
+              context,
+              const Duration(milliseconds: 180),
             ),
-          if (_replyTo != null)
-            Container(
-              padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
-              color: scheme.surfaceContainerHigh.withAlpha(120),
-              child: Row(
-                children: [
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_editing != null)
                   Container(
-                    width: 3,
-                    height: 28,
-                    color: _userColor(_replyTo!.author),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.fromLTRB(10, 4, 2, 4),
+                    decoration: BoxDecoration(
+                      color: scheme.primaryContainer.withValues(alpha: 0.42),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: scheme.primary.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Row(
                       children: [
-                        Text(
-                          _displayName(_replyTo!.author),
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                            color: _userColor(_replyTo!.author),
+                        Icon(
+                          Icons.edit_outlined,
+                          size: 16,
+                          color: scheme.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'Editing message',
+                            style: Theme.of(context).textTheme.labelMedium
+                                ?.copyWith(color: scheme.primary),
                           ),
                         ),
-                        Text(
-                          _replyPreview(session),
-                          style: const TextStyle(fontSize: 11),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          tooltip: 'Cancel editing',
+                          onPressed: () {
+                            setState(() => _editing = null);
+                            _input.clear();
+                          },
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 16),
-                    onPressed: () => setState(() => _replyTo = null),
+                if (_replyTo != null)
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 6),
+                    padding: const EdgeInsets.fromLTRB(10, 4, 2, 4),
+                    decoration: BoxDecoration(
+                      color: scheme.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: scheme.outlineVariant),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 3,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: _userColor(_replyTo!.author),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _displayName(_replyTo!.author),
+                                style: Theme.of(context).textTheme.labelSmall
+                                    ?.copyWith(
+                                      color: _userColor(_replyTo!.author),
+                                    ),
+                              ),
+                              Text(
+                                _replyPreview(session),
+                                style: Theme.of(context).textTheme.bodySmall,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          tooltip: 'Cancel reply',
+                          onPressed: () => setState(() => _replyTo = null),
+                        ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
+              ],
             ),
+          ),
           if (_recordStart != null)
             _recordingBar(context, session)
           else
-            Row(
-              children: [
-                IconButton(
-                  onPressed: () => unawaited(_insertEmoji()),
-                  icon: const Icon(Icons.emoji_emotions_outlined),
-                  tooltip: 'Emoji',
-                  focusNode: FocusNode(skipTraversal: true),
-                ),
-                IconButton(
-                  onPressed: () => unawaited(_sendGif()),
-                  icon: const Icon(Icons.gif_box_outlined),
-                  tooltip: 'GIF',
-                  focusNode: FocusNode(skipTraversal: true),
-                ),
-                IconButton(
-                  onPressed: () => unawaited(_sendSticker()),
-                  icon: const Icon(Icons.image_outlined),
-                  tooltip: 'Sticker',
-                  focusNode: FocusNode(skipTraversal: true),
-                ),
-                IconButton(
-                  onPressed: () => unawaited(_sendFile()),
-                  icon: const Icon(Icons.attach_file),
-                  tooltip: 'Attach file',
-                  focusNode: FocusNode(skipTraversal: true),
-                ),
-                if (!session.isDm)
-                  IconButton(
-                    onPressed: () => unawaited(_insertMention(session)),
-                    icon: const Icon(Icons.alternate_email),
-                    tooltip: 'Mention',
-                    focusNode: FocusNode(skipTraversal: true),
-                  ),
-                Expanded(
-                  child: _composerOnFire
-                      ? _FlameBox(
-                          child: TextField(
-                            controller: _input,
-                            focusNode: _composerFocus,
-                            onSubmitted: (_) {
-                              unawaited(_send());
-                              _composerFocus.requestFocus();
-                            },
-                            decoration: InputDecoration(
-                              hintText: 'Message ${_channelTitle(session)}',
-                              filled: true,
-                              fillColor: Theme.of(
-                                context,
-                              ).colorScheme.surfaceContainerHighest,
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(24),
-                                borderSide: BorderSide.none,
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(24),
-                                borderSide: BorderSide(
-                                  color: _channelAccent(session),
-                                  width: 1.5,
-                                ),
-                              ),
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 16,
-                                vertical: 10,
-                              ),
-                            ),
-                          ),
-                        )
-                      : TextField(
-                          controller: _input,
-                          focusNode: _composerFocus,
-                          onSubmitted: (_) {
-                            unawaited(_send());
-                            _composerFocus.requestFocus();
-                          },
-                          decoration: InputDecoration(
-                            hintText: 'Message ${_channelTitle(session)}',
-                            filled: true,
-                            fillColor: Theme.of(
-                              context,
-                            ).colorScheme.surfaceContainerHighest,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              borderSide: BorderSide.none,
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              borderSide: BorderSide(
-                                color: _channelAccent(session),
-                                width: 1.5,
-                              ),
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 10,
-                            ),
-                          ),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compact = constraints.maxWidth < 680;
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    IconButton(
+                      onPressed: () => unawaited(_insertEmoji()),
+                      icon: const Icon(Icons.emoji_emotions_outlined),
+                      tooltip: 'Emoji',
+                    ),
+                    if (compact)
+                      IconButton(
+                        key: const Key('composer-more-tools'),
+                        onPressed: () => unawaited(_showComposerTools(session)),
+                        icon: const Icon(Icons.add_circle_outline),
+                        tooltip: 'Message tools',
+                      )
+                    else ...[
+                      IconButton(
+                        onPressed: () => unawaited(_sendGif()),
+                        icon: const Icon(Icons.gif_box_outlined),
+                        tooltip: 'GIF',
+                      ),
+                      IconButton(
+                        onPressed: () => unawaited(_sendSticker()),
+                        icon: const Icon(Icons.image_outlined),
+                        tooltip: 'Sticker',
+                      ),
+                      IconButton(
+                        onPressed: () => unawaited(_sendFile()),
+                        icon: const Icon(Icons.attach_file),
+                        tooltip: 'Attach file',
+                      ),
+                      if (!session.isDm)
+                        IconButton(
+                          onPressed: () => unawaited(_insertMention(session)),
+                          icon: const Icon(Icons.alternate_email),
+                          tooltip: 'Mention',
                         ),
-                ),
-                if (!kIsWeb)
-                  IconButton(
-                    onPressed: () => unawaited(_startVoiceRecording()),
-                    icon: const Icon(Icons.mic_none),
-                    tooltip: 'Voice message',
-                    focusNode: FocusNode(skipTraversal: true),
-                  ),
-                const SizedBox(width: 8),
-                _SendButton(
-                  color: _channelAccent(session),
-                  onPressed: _sending ? null : () => unawaited(_send()),
-                ),
-              ],
+                    ],
+                    Expanded(child: _composerTextField(context, session)),
+                    if (!kIsWeb)
+                      IconButton(
+                        onPressed: () => unawaited(_startVoiceRecording()),
+                        icon: const Icon(Icons.mic_none),
+                        tooltip: 'Voice message',
+                      ),
+                    const SizedBox(width: 4),
+                    _SendButton(
+                      color: _channelAccent(session),
+                      onPressed: _sending ? null : () => unawaited(_send()),
+                    ),
+                  ],
+                );
+              },
             ),
         ],
       ),
     );
+  }
+
+  Widget _composerTextField(BuildContext context, ChannelSession session) {
+    final scheme = Theme.of(context).colorScheme;
+    final radius = BorderRadius.circular(12);
+    final field = TextField(
+      controller: _input,
+      focusNode: _composerFocus,
+      textCapitalization: TextCapitalization.sentences,
+      textInputAction: TextInputAction.send,
+      onSubmitted: (_) {
+        unawaited(_send());
+        _composerFocus.requestFocus();
+      },
+      decoration: InputDecoration(
+        hintText: 'Message ${_channelTitle(session)}',
+        filled: true,
+        fillColor: scheme.surfaceContainerHighest,
+        isDense: true,
+        border: OutlineInputBorder(
+          borderRadius: radius,
+          borderSide: BorderSide(color: scheme.outlineVariant),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: radius,
+          borderSide: BorderSide(color: scheme.outlineVariant),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: radius,
+          borderSide: BorderSide(color: _channelAccent(session), width: 1.5),
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 11,
+        ),
+      ),
+    );
+    return _composerOnFire ? _FlameBox(child: field) : field;
+  }
+
+  Future<void> _showComposerTools(ChannelSession session) async {
+    final scheme = Theme.of(context).colorScheme;
+    final tool = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              key: const Key('composer-tool-gif'),
+              leading: Icon(Icons.gif_box_outlined, color: scheme.tertiary),
+              title: const Text('GIF'),
+              onTap: () => Navigator.pop(sheetContext, 'gif'),
+            ),
+            ListTile(
+              key: const Key('composer-tool-sticker'),
+              leading: Icon(Icons.image_outlined, color: scheme.secondary),
+              title: const Text('Sticker'),
+              onTap: () => Navigator.pop(sheetContext, 'sticker'),
+            ),
+            ListTile(
+              key: const Key('composer-tool-file'),
+              leading: Icon(Icons.attach_file, color: scheme.primary),
+              title: const Text('Attach file'),
+              onTap: () => Navigator.pop(sheetContext, 'file'),
+            ),
+            if (!session.isDm)
+              ListTile(
+                key: const Key('composer-tool-mention'),
+                leading: Icon(Icons.alternate_email, color: scheme.tertiary),
+                title: const Text('Mention'),
+                onTap: () => Navigator.pop(sheetContext, 'mention'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || tool == null) return;
+    switch (tool) {
+      case 'gif':
+        await _sendGif();
+        break;
+      case 'sticker':
+        await _sendSticker();
+        break;
+      case 'file':
+        await _sendFile();
+        break;
+      case 'mention':
+        await _insertMention(session);
+        break;
+    }
   }
 
   /// The composer while a voice message records: red mic, ticking elapsed
@@ -8602,9 +8956,9 @@ class _RingPainter extends CustomPainter {
       old.phase != phase || old.level != level;
 }
 
-/// A slow, breathing ember glow for the app-bar background — a gradient in the
-/// channel [accent] that drifts direction and intensity over ~8s. Subtle, warm,
-/// and reinforces the hearth identity without distracting from the content.
+/// A slow, breathing channel glow for the app-bar background. The active
+/// channel colour drifts into the theme's cool secondary accent, keeping Hearth's
+/// identity visible without turning the whole interface orange.
 class _EmberGlow extends StatefulWidget {
   const _EmberGlow({required this.accent});
 
@@ -8629,7 +8983,20 @@ class _EmberGlowState extends State<_EmberGlow>
   @override
   void initState() {
     super.initState();
-    if (_ambientAnimations) _c.repeat(reverse: true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final reduceMotion =
+        MediaQuery.maybeOf(context)?.disableAnimations == true ||
+        !TickerMode.valuesOf(context).enabled;
+    if (_ambientAnimations && !reduceMotion) {
+      if (!_c.isAnimating) _c.repeat(reverse: true);
+    } else {
+      _c.stop();
+      _c.value = 0;
+    }
   }
 
   @override
@@ -8644,14 +9011,15 @@ class _EmberGlowState extends State<_EmberGlow>
       animation: _c,
       builder: (context, _) {
         final t = Curves.easeInOut.transform(_c.value);
+        final secondary = Theme.of(context).colorScheme.secondary;
         return DecoratedBox(
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: Alignment(-1 + t * 0.5, -1),
               end: Alignment(1, 1 - t * 0.4),
               colors: [
-                widget.accent.withAlpha((20 + 20 * t).round()),
-                widget.accent.withAlpha((6 * (1 - t)).round()),
+                widget.accent.withAlpha((16 + 16 * t).round()),
+                secondary.withAlpha((4 + 8 * (1 - t)).round()),
                 Colors.transparent,
               ],
               stops: const [0.0, 0.5, 1.0],

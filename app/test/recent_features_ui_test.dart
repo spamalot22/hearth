@@ -212,6 +212,32 @@ void main() {
     await _finish(tester);
   });
 
+  testWidgets('compact composer exposes every secondary message tool', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 3;
+    tester.view.physicalSize = const Size(1170, 2532);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await _boot(tester);
+    await _createChannel(tester, 'mobile');
+
+    expect(find.byKey(const Key('composer-more-tools')), findsOneWidget);
+    expect(find.byTooltip('Emoji'), findsOneWidget);
+    expect(find.byTooltip('Voice message'), findsOneWidget);
+    expect(find.byIcon(Icons.send), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('composer-more-tools')));
+    await _settle(tester);
+
+    expect(find.byKey(const Key('composer-tool-gif')), findsOneWidget);
+    expect(find.byKey(const Key('composer-tool-sticker')), findsOneWidget);
+    expect(find.byKey(const Key('composer-tool-file')), findsOneWidget);
+    expect(find.byKey(const Key('composer-tool-mention')), findsOneWidget);
+    await _finish(tester);
+  });
+
   testWidgets('reacting with the same emoji twice toggles it off', (
     tester,
   ) async {
