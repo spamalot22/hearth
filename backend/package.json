@@ -17,7 +17,7 @@
     "@ipld/dag-cbor": "^9.2.1",
     "@noble/ed25519": "^2.1.0",
     "dotenv": "^17.4.2",
-    "hono": "^4.6.14"
+    "hono": "^4.12.34"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
