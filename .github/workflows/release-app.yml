@@ -204,5 +204,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -X PATCH "repos/${{ github.repository }}/releases/${{ steps.gh_release.outputs.id }}" \
-            -F draft=false --jq .html_url
+          for attempt in {1..5}; do
+            if url=$(gh api -X PATCH "repos/${{ github.repository }}/releases/${{ steps.gh_release.outputs.id }}" \
+              -F draft=false --jq .html_url); then
+              echo "$url"
+              exit 0
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::GitHub did not publish the release after $attempt attempts."
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "GitHub publish attempt $attempt failed; retrying in ${delay}s."
+            sleep "$delay"
+          done
