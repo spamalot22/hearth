@@ -110,10 +110,14 @@ export function createRelay(
   // all routes except /health (which load balancers hit frequently).
   const ipLimiter = new RateLimiter(IP_RATE_LIMIT, IP_RATE_WINDOW_MS);
   const limitIp: MiddlewareHandler = async (c, next) => {
-    const ip =
-      c.req.header('x-forwarded-for')?.split(',')[0]?.trim() ??
-      c.req.header('x-real-ip') ??
-      'unknown';
+    // Reverse proxies append the connecting client to X-Forwarded-For. Use the
+    // right-most value so a caller cannot evade the limiter by prepending a
+    // different forged address to every request.
+    const forwarded = c.req.header('x-forwarded-for')
+      ?.split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const ip = forwarded?.at(-1) ?? c.req.header('x-real-ip') ?? 'unknown';
     if (!ipLimiter.allow(ip, Date.now())) {
       return c.json({ error: 'rate limited' }, 429);
     }

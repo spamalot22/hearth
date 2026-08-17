@@ -183,4 +183,19 @@ describe('relay', () => {
 
     expect(limited).toBe(true);
   });
+
+  it('cannot bypass the IP limiter with forged forwarded prefixes', async () => {
+    const app = createRelay();
+    let lastStatus = 0;
+    for (let i = 0; i <= 60; i++) {
+      const res = await app.request('/poll?channel=general', {
+        headers: {
+          'x-forwarded-for': `198.51.100.${i}, 203.0.113.10`,
+        },
+      });
+      lastStatus = res.status;
+    }
+
+    expect(lastStatus).toBe(429);
+  });
 });

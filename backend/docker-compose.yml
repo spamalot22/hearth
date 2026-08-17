@@ -30,7 +30,7 @@ services:
   # Opt-in Cloudflare path: `docker compose --profile cloudflare up -d`. Routes a
   # named tunnel's public hostname to http://relay:8787 (set TUNNEL_TOKEN in .env).
   tunnel:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.7.3
     restart: always
     command: tunnel --no-autoupdate run
     environment:

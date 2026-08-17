@@ -2147,12 +2147,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     String? hash;
     if (!remove) {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.image,
-        withData: true,
-      );
-      final bytes = result?.files.single.bytes;
-      if (bytes == null) return;
+      final file = await FilePicker.pickFile(type: FileType.image);
+      if (file == null) return;
+      final bytes = await file.readAsBytes();
       final Uint8List png;
       try {
         png = await downscaleAvatar(bytes);
@@ -3908,12 +3905,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   const Spacer(),
                   TextButton.icon(
                     onPressed: () async {
-                      final result = await FilePicker.platform.pickFiles(
+                      final file = await FilePicker.pickFile(
                         type: FileType.image,
-                        withData: true,
                       );
-                      final bytes = result?.files.single.bytes;
-                      if (bytes == null) return;
+                      if (file == null) return;
+                      final bytes = await file.readAsBytes();
                       if (bytes.length > HiveBlobStore.maxBytes) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
@@ -4012,10 +4008,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final store = _blobStore;
     if (store == null) return;
     _exitEditMode();
-    final result = await FilePicker.platform.pickFiles(withData: true);
-    final file = result?.files.single;
-    final bytes = file?.bytes;
-    if (file == null || bytes == null) return;
+    final file = await FilePicker.pickFile();
+    if (file == null) return;
+    final bytes = await file.readAsBytes();
     final danger = _fileDanger(file.name, bytes);
     if (danger != null) {
       if (mounted) _setError(danger);
@@ -4026,7 +4021,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     final hash = await store.put(bytes);
-    await _publish(FileContent(hash, file.name, _mimeFor(file.extension)));
+    final dot = file.name.lastIndexOf('.');
+    final extension = dot < 0 ? null : file.name.substring(dot + 1);
+    await _publish(FileContent(hash, file.name, _mimeFor(extension)));
   }
 
   static const _blockedExtensions = {
@@ -4195,13 +4192,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _sendSound() async {
     final store = _blobStore;
     if (store == null) return;
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.audio,
-      withData: true,
-    );
-    final file = result?.files.single;
-    final bytes = file?.bytes;
-    if (file == null || bytes == null) return;
+    final file = await FilePicker.pickFile(type: FileType.audio);
+    if (file == null) return;
+    final bytes = await file.readAsBytes();
     if (bytes.length > HiveBlobStore.maxBytes) {
       if (mounted) _setError('Sound too large (max 10 MB)');
       return;
