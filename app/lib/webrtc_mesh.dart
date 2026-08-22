@@ -14,6 +14,7 @@ import 'mesh_control.dart';
 import 'relay_tunnel.dart';
 import 'signal_auth.dart';
 import 'update_checker.dart';
+import 'webrtc_signal_order.dart';
 
 /// A peer-to-peer WebRTC mesh that surfaces each connected peer to the gossip
 /// layer as a [FrameChannel].
@@ -142,6 +143,7 @@ class WebRtcMesh {
   final Map<String, DateTime> _backoffUntil = {};
   final Map<String, int> _backoffFailures = {}; // consecutive failure count
   final Map<String, RelayTunnel> _tunnels = {}; // peerHex -> active tunnel
+  final Map<String, List<Map<String, Object?>>> _earlyRemoteIce = {};
 
   late final StreamController<FrameChannel> _peerConnected =
       StreamController<FrameChannel>.broadcast(onListen: _start);
@@ -163,12 +165,7 @@ class WebRtcMesh {
   /// Returns the link for a specific peer (for sending control messages).
   void sendControlTo(String peerHex, MeshControl control) {
     final link = _links[peerHex];
-    if (link != null && link.open) {
-      link.sendControl(control);
-      return;
-    }
-    final tunnel = _tunnels[peerHex];
-    if (tunnel?.isReady ?? false) tunnel!.sendControl(control);
+    if (link != null && link.open) link.sendControl(control);
   }
 
   /// Attempts to connect to a peer we've learned about (e.g. via contacts-online).
@@ -178,14 +175,12 @@ class WebRtcMesh {
   /// audio-level stats.
   Map<String, RTCPeerConnection> get connections => {
     for (final entry in _links.entries)
-      if (entry.value.connection != null) entry.key: entry.value.connection!,
+      if (entry.value.open && entry.value.connection != null)
+        entry.key: entry.value.connection!,
   };
 
-  /// Peers with any usable frame path, direct WebRTC or relay tunnel.
-  Iterable<String> get connectedPeers => {
-    ...connections.keys,
-    ..._tunnels.entries.where((e) => e.value.isReady).map((e) => e.key),
-  };
+  /// Peers with an open direct WebRTC data channel.
+  Iterable<String> get connectedPeers => connections.keys;
 
   void _start() {
     if (_started) return;
@@ -427,16 +422,38 @@ class WebRtcMesh {
           }
           final link = _links[from] ?? _createLink(from, initiator: false);
           await link.handleOffer(payload);
+          final earlyIce = _earlyRemoteIce.remove(from);
+          if (earlyIce != null) {
+            for (final candidate in earlyIce) {
+              await link.handleIce(candidate);
+            }
+          }
         case 'answer':
           await _links[from]?.handleAnswer(payload);
         case 'ice':
-          await _links[from]?.handleIce(payload);
+          final link = _links[from];
+          if (link != null) {
+            await link.handleIce(payload);
+          } else {
+            _bufferEarlyRemoteIce(from, payload);
+          }
       }
     } catch (_) {
       // One malformed signed SDP/candidate must not abort the mailbox batch or
       // leave a permanently handshaking link behind.
       await _links[from]?.dispose();
     }
+  }
+
+  void _bufferEarlyRemoteIce(String peerHex, Map<String, Object?> candidate) {
+    const maxPeers = 64;
+    const maxCandidatesPerPeer = 64;
+    if (!_earlyRemoteIce.containsKey(peerHex) &&
+        _earlyRemoteIce.length >= maxPeers) {
+      return;
+    }
+    final pending = _earlyRemoteIce.putIfAbsent(peerHex, () => []);
+    if (pending.length < maxCandidatesPerPeer) pending.add(candidate);
   }
 
   _PeerLink _createLink(String peerHex, {required bool initiator}) {
@@ -468,9 +485,8 @@ class WebRtcMesh {
         _backoffUntil[peerHex] = DateTime.now().add(
           Duration(seconds: delaySec),
         );
-        // After one complete ICE timeout, keep retrying direct WebRTC but also
-        // open the encrypted fallback for sync and mesh controls.
-        if (failures == 1 &&
+        // After 3 consecutive failures, try the relay tunnel (symmetric NAT).
+        if (failures == 3 &&
             !_closed &&
             localStream == null &&
             onRemoteStream == null) {
@@ -524,7 +540,7 @@ class WebRtcMesh {
           unawaited(_handleSignal({'from': from, 'kind': kind, 'data': data}));
         } else {
           // Not for us — forward to the target if we have a link.
-          sendControlTo(to, control);
+          _links[to]?.sendControl(control);
         }
       case ContactsOnlineControl():
         break; // Handled by the external onControl callback (app layer).
@@ -573,22 +589,6 @@ class WebRtcMesh {
         if (_closed || _tunnels[peerHex] != tunnel) return;
         onPeerConnectedHex?.call(peerHex);
         unawaited(candidateCache?.touch(channel, peerHex) ?? Future.value());
-        final otherPeers = connectedPeers
-            .where((peer) => peer != peerHex)
-            .toList();
-        if (otherPeers.isNotEmpty) {
-          tunnel.sendControl(PeersControl(otherPeers));
-        }
-        final manifest = versionManifest;
-        if (manifest != null) {
-          tunnel.sendControl(
-            VersionControl(version: appVersion, manifest: manifest),
-          );
-        }
-      },
-      onControl: (control) {
-        _handleControl(peerHex, control);
-        onControl?.call(peerHex, control);
       },
     );
     _tunnels[peerHex] = tunnel;
@@ -606,25 +606,24 @@ class WebRtcMesh {
       ...payload,
       'sig': await signSignal(identity, channel, kind, to, payload),
     };
-    try {
-      await _client
-          .post(
-            _activeUrl.replace(path: '/signal'),
-            headers: {
-              'content-type': 'application/json',
-              if (_authToken != null) 'Authorization': 'Bearer $_authToken',
-            },
-            body: jsonEncode({
-              'channel': channel,
-              'to': to,
-              'from': selfPubkeyHex,
-              'kind': kind,
-              'data': signed,
-            }),
-          )
-          .timeout(const Duration(seconds: 5));
-    } catch (_) {
-      // Best effort — a dropped candidate just slows ICE; renegotiation retries.
+    final response = await _client
+        .post(
+          _activeUrl.replace(path: '/signal'),
+          headers: {
+            'content-type': 'application/json',
+            if (_authToken != null) 'Authorization': 'Bearer $_authToken',
+          },
+          body: jsonEncode({
+            'channel': channel,
+            'to': to,
+            'from': selfPubkeyHex,
+            'kind': kind,
+            'data': signed,
+          }),
+        )
+        .timeout(const Duration(seconds: 5));
+    if (response.statusCode != 200) {
+      throw StateError('signal delivery failed (${response.statusCode})');
     }
   }
 
@@ -636,6 +635,7 @@ class WebRtcMesh {
       await link.dispose();
     }
     _links.clear();
+    _earlyRemoteIce.clear();
     for (final tunnel in _tunnels.values) {
       await tunnel.close();
     }
@@ -671,7 +671,7 @@ class _PeerLink implements FrameChannel {
   final List<Map<String, dynamic>> _iceServers;
   final MediaStream? localStream;
   final void Function(String peerHex, MediaStream stream)? onRemoteStream;
-  final void Function(String kind, Object? data) onSignal;
+  final Future<void> Function(String kind, Object? data) onSignal;
   final void Function(_PeerLink link) onOpen;
   final void Function() onClosed;
   final void Function(String peerHex, MeshControl control)? onControl;
@@ -684,6 +684,7 @@ class _PeerLink implements FrameChannel {
   bool _disposed = false;
   Timer? _handshakeTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
+  final WebRtcSignalOrder _outgoingSignals = WebRtcSignalOrder();
   static const int _maxPendingCandidates = 256;
   static const int _maxDataChannelFrameBytes = 16 * 1024 * 1024;
 
@@ -723,11 +724,12 @@ class _PeerLink implements FrameChannel {
     final pc = await createPeerConnection({'iceServers': _iceServers});
     pc.onIceCandidate = (candidate) {
       if (candidate.candidate == null) return; // end-of-candidates marker
-      onSignal('ice', {
+      final payload = <String, Object?>{
         'candidate': candidate.candidate,
         'sdpMid': candidate.sdpMid,
         'sdpMLineIndex': candidate.sdpMLineIndex,
-      });
+      };
+      _outgoingSignals.addCandidate(payload, onSignal);
     };
     pc.onDataChannel = _wireChannel;
     pc.onConnectionState = (state) {
@@ -762,7 +764,10 @@ class _PeerLink implements FrameChannel {
     _wireChannel(await pc.createDataChannel('hearth', RTCDataChannelInit()));
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    onSignal('offer', {'sdp': offer.sdp, 'type': offer.type});
+    await _outgoingSignals.sendDescription('offer', {
+      'sdp': offer.sdp,
+      'type': offer.type,
+    }, onSignal);
   }
 
   Future<void> handleOffer(Map<String, Object?> data) async {
@@ -774,7 +779,10 @@ class _PeerLink implements FrameChannel {
     await _flushCandidates();
     final answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    onSignal('answer', {'sdp': answer.sdp, 'type': answer.type});
+    await _outgoingSignals.sendDescription('answer', {
+      'sdp': answer.sdp,
+      'type': answer.type,
+    }, onSignal);
   }
 
   Future<void> handleAnswer(Map<String, Object?> data) async {
@@ -861,6 +869,8 @@ class _PeerLink implements FrameChannel {
     _disposed = true;
     _handshakeTimer?.cancel();
     _handshakeTimer = null;
+    _pendingCandidates.clear();
+    _outgoingSignals.clear();
     try {
       await _channel?.close();
     } catch (_) {}

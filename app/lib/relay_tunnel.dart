@@ -8,16 +8,13 @@ import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:http/http.dart' as http;
 
-import 'mesh_control.dart';
-
 /// A [FrameChannel] that tunnels gossip frames through the relay for peers that
 /// cannot establish a direct WebRTC connection.
 ///
 /// Frames are fragmented before POSTing so the relay can retain its 64 KiB body
-/// limit. Every fragment and ephemeral mesh control is encrypted with the static
-/// ECDH key shared by the two mesh identities, so the relay sees only bounded
-/// ciphertext. The receiver authenticates, reassembles, and decodes the original
-/// [SyncFrame].
+/// limit. Every fragment is encrypted with the static ECDH key shared by the two
+/// mesh identities, so the relay sees only bounded ciphertext fragments. The
+/// receiver authenticates, reassembles, and decodes the original [SyncFrame].
 class RelayTunnel implements FrameChannel {
   RelayTunnel({
     required this.baseUrl,
@@ -26,7 +23,6 @@ class RelayTunnel implements FrameChannel {
     this.authToken,
     this.authTokenProvider,
     this.onReady,
-    this.onControl,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
   }) : _client = client ?? http.Client(),
@@ -38,7 +34,6 @@ class RelayTunnel implements FrameChannel {
   final String? authToken;
   final String? Function()? authTokenProvider;
   final void Function()? onReady;
-  final void Function(MeshControl control)? onControl;
   final Duration pollInterval;
   final http.Client _client;
   final Uint8List _peerPublicKey;
@@ -55,17 +50,14 @@ class RelayTunnel implements FrameChannel {
 
   static const _requestTimeout = Duration(seconds: 10);
   static const _assemblyTtl = Duration(minutes: 5);
-  static const _controlMaxAge = Duration(minutes: 2);
   static const int _fragmentHeaderBytes = 20;
   static const int _fragmentPayloadBytes = 40 * 1024;
   static const int _maxFrameBytes = 16 * 1024 * 1024;
   static const int _maxFragments = 512;
   static const int _maxAssemblies = 4;
   static const int _maxAssemblyBytes = 32 * 1024 * 1024;
-  static const int _maxControlBytes = 32 * 1024;
   static const int _maxTunnelDataBytes = 60 * 1024;
   static const String _encryptedPrefix = 'e1:';
-  static const String _controlPrefix = 'c1:';
   static const List<int> _fragmentMagic = [0x48, 0x54, 0x31, 0x00];
 
   String get selfPubkeyHex => identity.publicKeyHex;
@@ -93,35 +85,6 @@ class RelayTunnel implements FrameChannel {
       // A failed frame must not poison the serialized upload queue. Gossip and
       // blob requests retry naturally after reconnecting to the peer.
     });
-  }
-
-  /// Sends a small authenticated mesh control over the same fallback path.
-  void sendControl(MeshControl control) {
-    if (_closed) return;
-    _sendTail = _sendTail.then((_) => _sendControl(control)).catchError((
-      Object _,
-    ) {
-      // Presence and other ephemeral controls are refreshed naturally.
-    });
-  }
-
-  Future<void> _sendControl(MeshControl control) async {
-    final clear = Uint8List.fromList(
-      utf8.encode(
-        jsonEncode({
-          ...control.toJson(),
-          '_ts': DateTime.now().toUtc().millisecondsSinceEpoch,
-        }),
-      ),
-    );
-    if (clear.length > _maxControlBytes || _closed) return;
-    final boxed = await PairBox.encrypt(
-      clear,
-      self: identity,
-      peerEd25519PublicKey: _peerPublicKey,
-    );
-    final data = '$_controlPrefix${base64Url.encode(boxed)}';
-    if (data.length <= _maxTunnelDataBytes) await _postWithRetry(data);
   }
 
   Future<void> _sendFrame(SyncFrame frame) async {
@@ -217,9 +180,12 @@ class RelayTunnel implements FrameChannel {
       final fragments = body['frames'];
       if (fragments is! List) return;
       for (final raw in fragments.whereType<String>().take(64)) {
-        final frame = await _decodeTunnelData(raw);
+        final frame = await _decodeFragment(raw);
         if (frame != null && !_frames.isClosed) {
-          _markReady();
+          if (!_ready) {
+            _ready = true;
+            onReady?.call();
+          }
           _frames.add(frame);
         }
       }
@@ -228,43 +194,6 @@ class RelayTunnel implements FrameChannel {
       // Transient failure or hostile relay response: the next poll retries.
     } finally {
       _polling = false;
-    }
-  }
-
-  Future<SyncFrame?> _decodeTunnelData(String raw) async {
-    if (raw.startsWith(_controlPrefix)) {
-      await _decodeControl(raw);
-      return null;
-    }
-    return _decodeFragment(raw);
-  }
-
-  Future<void> _decodeControl(String raw) async {
-    if (raw.length > _maxTunnelDataBytes) return;
-    try {
-      final boxed = Uint8List.fromList(
-        base64Url.decode(raw.substring(_controlPrefix.length)),
-      );
-      final clear = await PairBox.decrypt(
-        boxed,
-        self: identity,
-        peerEd25519PublicKey: _peerPublicKey,
-      );
-      if (clear.length > _maxControlBytes) return;
-      final json = (jsonDecode(utf8.decode(clear)) as Map)
-          .cast<String, Object?>();
-      final timestamp = json['_ts'];
-      if (timestamp is! int) return;
-      final age = DateTime.now().toUtc().difference(
-        DateTime.fromMillisecondsSinceEpoch(timestamp, isUtc: true),
-      );
-      if (age > _controlMaxAge || age < -_controlMaxAge) return;
-      final control = MeshControl.decodeBody(jsonEncode(json));
-      if (control == null || _closed) return;
-      _markReady();
-      onControl?.call(control);
-    } catch (_) {
-      // Malformed, stale, or unauthenticated controls are ignored.
     }
   }
 
@@ -351,12 +280,6 @@ class RelayTunnel implements FrameChannel {
   void _removeAssembly(String id) {
     final removed = _assemblies.remove(id);
     if (removed != null) _assemblyBytes -= removed.bytes;
-  }
-
-  void _markReady() {
-    if (_ready) return;
-    _ready = true;
-    onReady?.call();
   }
 
   static bool _startsWith(List<int> bytes, List<int> prefix) {

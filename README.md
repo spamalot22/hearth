@@ -158,9 +158,7 @@ local blob — after that it's pure P2P, with no CDN dependency at render.
 the offer so audio rides in the initial SDP — no renegotiation is bolted onto the
 gossip-critical mesh. Includes mute, deafen, per-user volume, generated join/leave
 cues every client plays locally, and live speaking indicators driven by WebRTC
-`audioLevel` stats. Voice presence can traverse the encrypted HTTP fallback, but
-the microphone track still needs a direct WebRTC ICE path; a TURN service would
-be required for audio between a pair whose NATs block every direct candidate.
+`audioLevel` stats.
 
 ### AI bot (local LLM, decentralised hosting)
 [`app/lib/inference_bot.dart`](app/lib/inference_bot.dart) provides an **@bot**
@@ -183,12 +181,10 @@ in-memory Docker container behind a tunnel (no port-forward). Deployed on a
 small always-on host via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
 
 When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
-(`/tunnel`) forwards bounded, encrypted fragments and authenticated mesh controls
-between the stuck peers. Large frames are reassembled only after end-to-end
-authentication, retaining the same confidentiality guarantees while keeping the
-relay's request limits small. This HTTP path carries messages, attachments, and
-presence controls, not WebRTC audio/video tracks. Both peers must support the
-encrypted fragment protocol to use this fallback path.
+(`/tunnel`) forwards bounded, encrypted fragments between the stuck peers. Large
+frames are reassembled only after end-to-end authentication, retaining the same
+confidentiality guarantees while keeping the relay's request limits small. Both
+peers must support the encrypted fragment protocol to use this fallback path.
 
 ---
 

@@ -5433,26 +5433,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _connectingVoiceTile(String rootHex, {required bool failed}) =>
-      ListTile(
-        dense: true,
-        contentPadding: EdgeInsets.zero,
-        leading: _avatar(Uint8List.fromList(hex.decode(rootHex)), radius: 16),
-        title: Text(
-          _displayName(Uint8List.fromList(hex.decode(rootHex))),
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: Text(failed ? 'No audio route' : 'Connecting...'),
-        trailing: failed
-            ? Icon(
-                Icons.error_outline,
-                color: Theme.of(context).colorScheme.error,
-              )
-            : const SizedBox.square(
-                dimension: 16,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-      );
+  Widget _connectingVoiceTile(
+    String rootHex, {
+    required bool failed,
+  }) => ListTile(
+    dense: true,
+    contentPadding: EdgeInsets.zero,
+    leading: _avatar(Uint8List.fromList(hex.decode(rootHex)), radius: 16),
+    title: Text(
+      _displayName(Uint8List.fromList(hex.decode(rootHex))),
+      overflow: TextOverflow.ellipsis,
+    ),
+    subtitle: Text(failed ? 'P2P voice connection failed' : 'Connecting...'),
+    trailing: failed
+        ? Icon(Icons.error_outline, color: Theme.of(context).colorScheme.error)
+        : const SizedBox.square(
+            dimension: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+  );
 
   /// One voice participant: avatar (green ring when speaking) + name + level
   /// bar. Tapping a peer opens their volume slider. Long-press to mute.

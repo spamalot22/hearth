@@ -225,11 +225,10 @@ polling cost is irrelevant.
   Tailscale Funnel) the box dials *out*, so **zero inbound ports**, home IP never
   exposed, TLS + hostname for free — strictly safer than forwarding a port, and a
   dynamic home IP becomes a non-issue.
-- **No TURN service in the home relay stack.** The symmetric-NAT data path uses
-  an **app-level encrypted fallback through this same tunnelled relay** for
-  messages, blobs, and controls. WebRTC audio/video still requires a direct ICE
-  path; supporting media for a direct-blocked pair would require managed TURN or
-  a separate media-relay design.
+- **No coturn, no TURN box, ever.** The symmetric-NAT minority is handled by an
+  **app-level encrypted relay-fallback through this same tunnelled relay** — it
+  forwards opaque ciphertext between two stuck peers. No UDP, no port-forward,
+  nothing extra to run.
 
 **CI/CD — IaC + tag-triggered pipeline:** the `docker-compose.yml` (+ relay
 `Dockerfile` + tunnel config) is the infrastructure as code. **GitHub Actions on a

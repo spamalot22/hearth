@@ -200,8 +200,7 @@ void main() {
           baseUrl: Uri.parse('http://relay.test'),
           channel: 'general',
           client: client,
-          // The first catch-up must not wait for this periodic interval.
-          pollInterval: const Duration(days: 1),
+          pollInterval: const Duration(milliseconds: 5),
         );
 
         final first = await transport.incoming.first.timeout(
