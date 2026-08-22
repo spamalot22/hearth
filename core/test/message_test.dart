@@ -102,10 +102,10 @@ void main() {
 
     test('canonical encoder handles every integer-size branch', () async {
       // Payload length drives the CBOR byte-string header size, and the fixed
-      // timestamp exercises the 8-byte branch — together covering all of
-      // _head() in codec.dart (1-, 2-, 4- and 8-byte argument encodings).
+      // timestamp exercises the 8-byte branch, covering the encoder widths used
+      // by valid messages while staying inside the payload safety limit.
       final author = await _fixedIdentity();
-      for (final size in [23, 200, 5000, 70000]) {
+      for (final size in [23, 200, 5000, maxMessagePayloadBytes]) {
         final m = await Message.create(
           author: author,
           channel: 'c',
@@ -115,6 +115,21 @@ void main() {
         expect(await m.verify(), isTrue);
       }
     });
+
+    test(
+      'rejects payloads larger than the direct-message safety limit',
+      () async {
+        final author = await Identity.generate();
+        await expectLater(
+          Message.create(
+            author: author,
+            channel: 'general',
+            payload: Uint8List(maxMessagePayloadBytes + 1),
+          ),
+          throwsArgumentError,
+        );
+      },
+    );
   });
 
   group('device-signed messages', () {

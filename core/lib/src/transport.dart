@@ -62,6 +62,7 @@ class RelayTransport implements Transport {
   int _since = 0;
   bool _busy = false;
   bool _paused = false;
+  bool _moreAvailable = false;
   static const _requestTimeout = Duration(seconds: 10);
 
   /// The poll cursor (relay sequence number seen so far).
@@ -84,10 +85,16 @@ class RelayTransport implements Transport {
     if (_busy || _paused) return;
     _busy = true;
     try {
-      final messages = await poll();
-      if (_incoming.isClosed) return;
-      for (final message in messages) {
-        _incoming.add(message);
+      // Drain a bounded number of server pages per tick. Each HTTP response is
+      // small, while a client returning after a long outage still catches up
+      // promptly instead of waiting one full poll interval per page.
+      for (var page = 0; page < 10; page++) {
+        final messages = await poll();
+        if (_incoming.isClosed) return;
+        for (final message in messages) {
+          _incoming.add(message);
+        }
+        if (!_moreAvailable) break;
       }
     } catch (_) {
       // Transient failure (relay down, network blip) — next tick retries.
@@ -123,6 +130,7 @@ class RelayTransport implements Transport {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
+    _moreAvailable = body['more'] == true;
     final seqValue = body['seq'];
     if (seqValue is int && seqValue > _since) _since = seqValue;
 

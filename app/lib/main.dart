@@ -31,6 +31,7 @@ import 'package:window_manager/window_manager.dart';
 import 'background_poll.dart';
 
 import 'blob_store_hive.dart';
+import 'bounded_download.dart';
 import 'candidate_cache.dart';
 import 'channel.dart';
 import 'contact_card.dart';
@@ -2149,6 +2150,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!remove) {
       final file = await FilePicker.pickFile(type: FileType.image);
       if (file == null) return;
+      if (await file.length() > HiveBlobStore.maxBytes) {
+        if (mounted) _setError('Image too large (max 10 MB)');
+        return;
+      }
       final bytes = await file.readAsBytes();
       final Uint8List png;
       try {
@@ -3859,16 +3864,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     if (url == null) return;
     try {
-      final res = await http.get(Uri.parse(url));
-      if (res.statusCode != 200) {
-        if (mounted) _setError('could not fetch that GIF');
-        return;
-      }
-      if (res.bodyBytes.length > HiveBlobStore.maxBytes) {
-        if (mounted) _setError('GIF too large (max 10 MB)');
-        return;
-      }
-      final hash = await store.put(res.bodyBytes);
+      final bytes = await downloadBytesBounded(
+        Uri.parse(url),
+        maxBytes: HiveBlobStore.maxBytes,
+      );
+      final hash = await store.put(bytes);
       await _publish(GifContent(hash));
     } catch (_) {
       if (mounted) _setError('could not fetch that GIF');
@@ -3909,8 +3909,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         type: FileType.image,
                       );
                       if (file == null) return;
-                      final bytes = await file.readAsBytes();
-                      if (bytes.length > HiveBlobStore.maxBytes) {
+                      if (await file.length() > HiveBlobStore.maxBytes) {
                         if (context.mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
@@ -3920,6 +3919,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         }
                         return;
                       }
+                      final bytes = await file.readAsBytes();
                       final hash = await store.put(bytes);
                       await library?.add(hash, MediaKind.sticker);
                       if (context.mounted) Navigator.pop(context, hash);
@@ -4010,6 +4010,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _exitEditMode();
     final file = await FilePicker.pickFile();
     if (file == null) return;
+    if (await file.length() > HiveBlobStore.maxBytes) {
+      if (mounted) _setError('File too large (max 10 MB)');
+      return;
+    }
     final bytes = await file.readAsBytes();
     final danger = _fileDanger(file.name, bytes);
     if (danger != null) {
@@ -4171,6 +4175,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final elapsed = DateTime.now().difference(started);
     try {
       final file = File(path);
+      if (await file.length() > HiveBlobStore.maxBytes) {
+        try {
+          await file.delete();
+        } catch (_) {}
+        if (mounted) _setError('Recording too long (max 10 MB)');
+        return;
+      }
       final bytes = await file.readAsBytes();
       try {
         await file.delete();
@@ -4194,6 +4205,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (store == null) return;
     final file = await FilePicker.pickFile(type: FileType.audio);
     if (file == null) return;
+    if (await file.length() > HiveBlobStore.maxBytes) {
+      if (mounted) _setError('Sound too large (max 10 MB)');
+      return;
+    }
     final bytes = await file.readAsBytes();
     if (bytes.length > HiveBlobStore.maxBytes) {
       if (mounted) _setError('Sound too large (max 10 MB)');
@@ -4224,20 +4239,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     if (picked == null) return;
     try {
-      final res = await http.get(Uri.parse(picked.url));
-      if (res.statusCode != 200) {
-        if (mounted) _setError('could not fetch that sound');
-        return;
-      }
+      final bytes = await downloadBytesBounded(
+        Uri.parse(picked.url),
+        maxBytes: HiveBlobStore.maxBytes,
+      );
       if (!mounted) return;
       final emoji =
           await pickEmoji(context, title: 'Pick an icon for this sound') ??
           '🔊';
-      if (res.bodyBytes.length > HiveBlobStore.maxBytes) {
-        if (mounted) _setError('Sound too large (max 10 MB)');
-        return;
-      }
-      final hash = await store.put(res.bodyBytes);
+      final hash = await store.put(bytes);
       await _publish(SoundContent(hash, picked.name, emoji));
     } catch (_) {
       if (mounted) _setError('could not fetch that sound');
@@ -8244,6 +8254,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final field = TextField(
       controller: _input,
       focusNode: _composerFocus,
+      inputFormatters: [LengthLimitingTextInputFormatter(7000)],
       textCapitalization: TextCapitalization.sentences,
       textInputAction: TextInputAction.send,
       onSubmitted: (_) {

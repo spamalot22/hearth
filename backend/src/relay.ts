@@ -11,6 +11,7 @@ import {
   MAX_CHANNEL_LENGTH,
   MAX_CHANNEL_MESSAGES,
   MAX_CHANNELS,
+  MAX_POLL_MESSAGES,
   MAX_TOTAL_MESSAGES,
   MESSAGE_RATE_LIMIT,
   MESSAGE_RATE_WINDOW_MS,
@@ -61,13 +62,28 @@ export class RelayStore {
     return stored.seq;
   }
 
-  since(channel: string, since: number): StoredMessage[] {
+  since(
+    channel: string,
+    since: number,
+    limit = MAX_POLL_MESSAGES,
+  ): StoredMessage[] {
     const list = this.byChannel.get(channel);
     if (!list) return [];
     // Touch: move to end for LRU ordering.
     this.byChannel.delete(channel);
     this.byChannel.set(channel, list);
-    return list.filter((m) => m.seq > since);
+    const fresh: StoredMessage[] = [];
+    for (const message of list) {
+      if (message.seq <= since) continue;
+      fresh.push(message);
+      if (fresh.length >= limit) break;
+    }
+    return fresh;
+  }
+
+  latestSeq(channel: string): number {
+    const list = this.byChannel.get(channel);
+    return list?.at(-1)?.seq ?? 0;
   }
 }
 
@@ -198,10 +214,11 @@ export function createRelay(
     // defence-in-depth but prevents background poll after token expiry.
     const sinceRaw = Number(c.req.query('since') ?? '0');
     const since = Number.isSafeInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
-    const fresh = store.since(channel, since);
+    const fresh = store.since(channel, since, MAX_POLL_MESSAGES);
     const messages = fresh.map((m) => ({ seq: m.seq, ...m.message }));
     const seq = fresh.length ? fresh[fresh.length - 1]!.seq : since;
-    return c.json({ messages, seq });
+    const latestSeq = store.latestSeq(channel);
+    return c.json({ messages, seq, latestSeq, more: seq < latestSeq });
   });
 
   return app;

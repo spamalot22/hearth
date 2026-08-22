@@ -22,6 +22,7 @@ class HiveBlobStore implements BlobStore {
 
   /// Maximum blob size (10 MB). Rejects uploads and incoming blobs above this.
   static const int maxBytes = maxBlobBytes;
+  static final RegExp _blobHash = RegExp(r'^1220[0-9a-f]{64}$');
 
   static Future<HiveBlobStore> open() async {
     await Hive.initFlutter();
@@ -43,6 +44,7 @@ class HiveBlobStore implements BlobStore {
 
   @override
   Future<Uint8List?> get(String hashHex) async {
+    if (!_blobHash.hasMatch(hashHex)) return null;
     final bytes = _box.get(hashHex);
     if (bytes != null) {
       // Touch access time (fire-and-forget).
@@ -52,7 +54,8 @@ class HiveBlobStore implements BlobStore {
   }
 
   @override
-  Future<bool> has(String hashHex) async => _box.containsKey(hashHex);
+  Future<bool> has(String hashHex) async =>
+      _blobHash.hasMatch(hashHex) && _box.containsKey(hashHex);
 
   /// Deletes blobs not accessed in the last [pruneDays] days.
   /// Returns the number of blobs pruned.

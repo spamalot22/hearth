@@ -43,6 +43,7 @@ class SyncEngine {
   final bool Function(Message message)? messageAllowed;
 
   final Set<SyncSession> _sessions = {};
+  final Set<String> _pendingBlobs = {};
   final StreamController<void> _updates = StreamController<void>.broadcast();
   final StreamController<String> _blobArrived =
       StreamController<String>.broadcast();
@@ -56,7 +57,8 @@ class SyncEngine {
 
   /// Registers a peer's frame [link] and starts reconciling with it.
   SyncSession addPeer(FrameChannel link) {
-    final session = SyncSession(
+    late final SyncSession session;
+    session = SyncSession(
       repository: repository,
       channel: channel,
       link: link,
@@ -65,9 +67,13 @@ class SyncEngine {
       onBlob: _onBlob,
       isDeviceRevoked: isDeviceRevoked,
       messageAllowed: messageAllowed,
+      onClosed: () => _sessions.remove(session),
     );
     _sessions.add(session);
     session.start();
+    for (final hash in _pendingBlobs) {
+      session.requestBlob(hash);
+    }
     return session;
   }
 
@@ -113,15 +119,27 @@ class SyncEngine {
   }
 
   /// Asks every peer for the blob [hash]; arrivals surface on [blobArrived].
-  void requestBlob(String hash) {
+  /// Returns false when the id is malformed or the pending-request cap is full.
+  bool requestBlob(String hash) {
+    if (!_blobPattern.hasMatch(hash)) return false;
+    if (!_pendingBlobs.contains(hash) &&
+        _pendingBlobs.length >= _maxPendingBlobs) {
+      return false;
+    }
+    _pendingBlobs.add(hash);
     for (final session in _sessions) {
       session.requestBlob(hash);
     }
+    return true;
   }
 
   void _onBlob(String hash) {
+    _pendingBlobs.remove(hash);
     if (!_blobArrived.isClosed) _blobArrived.add(hash);
   }
+
+  static const int _maxPendingBlobs = 1000;
+  static final RegExp _blobPattern = RegExp(r'^1220[0-9a-f]{64}$');
 
   /// Closes every session and releases resources.
   Future<void> close() async {
@@ -158,8 +176,13 @@ class SyncSession {
     this.onBlob,
     this.isDeviceRevoked,
     this.messageAllowed,
+    this.onClosed,
   }) {
-    _sub = _link.frames.listen(_enqueue);
+    _sub = _link.frames.listen(
+      _enqueue,
+      onError: (Object _, StackTrace _) {},
+      onDone: onClosed,
+    );
   }
 
   final MessageRepository repository;
@@ -169,6 +192,7 @@ class SyncSession {
   final void Function(String hash)? onBlob;
   final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
   final bool Function(Message message)? messageAllowed;
+  final void Function()? onClosed;
 
   /// Called after this session stores a *new* message, so the engine can spread
   /// it to other peers.
@@ -176,6 +200,7 @@ class SyncSession {
 
   late final StreamSubscription<SyncFrame> _sub;
   final Set<String> _wanted = <String>{};
+  final Set<String> _requestedBlobs = <String>{};
   Future<void> _tail = Future<void>.value();
 
   /// Advertises our current heads to begin reconciliation.
@@ -185,9 +210,15 @@ class SyncSession {
   void gossip(Message message) => _link.send(GiveFrame(message));
 
   /// Asks this peer for the blob [hash].
-  void requestBlob(String hash) => _link.send(WantBlobFrame(hash));
+  void requestBlob(String hash) {
+    if (!_blobPattern.hasMatch(hash) || !_requestedBlobs.add(hash)) return;
+    _link.send(WantBlobFrame(hash));
+  }
 
-  Future<void> close() => _sub.cancel();
+  Future<void> close() async {
+    await _sub.cancel();
+    await _tail;
+  }
 
   /// Maximum pending wants per peer (prevents OOM from a malicious HAVE flood).
   static const int _maxPendingWants = 10000;
@@ -218,9 +249,13 @@ class SyncSession {
       case GiveFrame(:final message):
         await _receive(message);
       case WantBlobFrame(:final hash):
+        if (!_blobPattern.hasMatch(hash)) return;
         final bytes = await blobStore?.get(hash);
-        if (bytes != null) _link.send(GiveBlobFrame(hash, bytes));
+        if (bytes != null && bytes.length <= maxBlobBytes) {
+          _link.send(GiveBlobFrame(hash, bytes));
+        }
       case GiveBlobFrame(:final hash, :final bytes):
+        if (!_requestedBlobs.contains(hash)) return;
         // Reject oversized blobs before spending CPU hashing them.
         if (bytes.length > maxBlobBytes) return;
         // Content-addressed: the bytes must hash to the requested id.
@@ -228,6 +263,7 @@ class SyncSession {
         final store = blobStore;
         if (store == null) return;
         await store.put(bytes);
+        _requestedBlobs.remove(hash);
         onBlob?.call(hash);
     }
   }
@@ -271,6 +307,7 @@ class SyncSession {
       ids.map(hex.encode).toList(growable: false);
 
   static final RegExp _idPattern = RegExp(r'^[0-9a-fA-F]{68}$');
+  static final RegExp _blobPattern = RegExp(r'^1220[0-9a-f]{64}$');
 
   static Uint8List? _idBytes(String idHex) =>
       _idPattern.hasMatch(idHex) ? Uint8List.fromList(hex.decode(idHex)) : null;

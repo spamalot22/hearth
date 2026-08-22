@@ -211,6 +211,67 @@ void main() {
       },
     );
 
+    test(
+      'incoming drains consecutive backlog pages in one poll cycle',
+      () async {
+        final firstMessage = await Message.create(
+          author: author,
+          channel: 'general',
+          payload: _b('first page'),
+        );
+        final secondMessage = await Message.create(
+          author: author,
+          channel: 'general',
+          payload: _b('second page'),
+        );
+        final client = MockClient((req) async {
+          final since = int.parse(req.url.queryParameters['since']!);
+          if (since == 0) {
+            return http.Response(
+              jsonEncode({
+                'messages': [
+                  {'seq': 1, ...firstMessage.toJson()},
+                ],
+                'seq': 1,
+                'latestSeq': 2,
+                'more': true,
+              }),
+              200,
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'messages': [
+                {'seq': 2, ...secondMessage.toJson()},
+              ],
+              'seq': 2,
+              'latestSeq': 2,
+              'more': false,
+            }),
+            200,
+          );
+        });
+        final transport = RelayTransport(
+          baseUrl: Uri.parse('http://relay.test'),
+          channel: 'general',
+          client: client,
+          pollInterval: const Duration(milliseconds: 5),
+        );
+
+        final received = await transport.incoming
+            .take(2)
+            .toList()
+            .timeout(const Duration(seconds: 2));
+
+        expect(received.map((message) => message.idHex), [
+          firstMessage.idHex,
+          secondMessage.idHex,
+        ]);
+        expect(transport.since, 2);
+        await transport.close();
+      },
+    );
+
     test('poll does not require a token (channel ID is the auth)', () async {
       var called = false;
       final client = MockClient((req) async {

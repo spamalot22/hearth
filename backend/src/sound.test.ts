@@ -48,4 +48,14 @@ describe('Sound proxy', () => {
     });
     expect(await res.json()).toEqual({ sounds: [], configured: true });
   });
+
+  it('rejects an excessive search query before calling the provider', async () => {
+    process.env.FREESOUND_KEY = 'fake-key';
+    const app = createRelay();
+    const token = await getToken(app);
+    const res = await app.request(`/sound/search?q=${'x'.repeat(101)}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.status).toBe(400);
+  });
 });

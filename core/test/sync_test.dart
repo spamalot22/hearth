@@ -21,10 +21,14 @@ class _Link implements FrameChannel {
   final String peerHex;
 
   final StreamController<SyncFrame> incoming = StreamController<SyncFrame>();
+  final List<SyncFrame> sent = [];
   _Link? partner;
 
   @override
-  void send(SyncFrame frame) => partner?.incoming.add(frame);
+  void send(SyncFrame frame) {
+    sent.add(frame);
+    partner?.incoming.add(frame);
+  }
 
   @override
   Stream<SyncFrame> get frames => incoming.stream;
@@ -121,6 +125,21 @@ void main() {
       expect(b.ordered().map((m) => utf8.decode(m.payload)), ['live']);
     });
 
+    test('a closed peer session is retired from future gossip', () async {
+      final repository = _repo();
+      final engine = SyncEngine(repository, 'general');
+      final link = _Link();
+      engine.addPeer(link);
+      await link.incoming.close();
+      await _pump();
+      link.sent.clear();
+
+      await engine.publish(await msg('after disconnect'));
+
+      expect(link.sent, isEmpty);
+      await engine.close();
+    });
+
     test('epidemic: A→B→C delivers without A ever talking to C', () async {
       final a = _repo();
       final b = _repo();
@@ -215,11 +234,71 @@ void main() {
       engB.addPeer(link);
 
       final claimed = await blobHash(_b('what was asked for'));
+      engB.requestBlob(claimed);
       link.incoming.add(GiveBlobFrame(claimed, _b('evil different bytes')));
 
       await _pump();
       expect(await bBlobs.has(claimed), isFalse);
     });
+
+    test('an unsolicited blob is dropped', () async {
+      final targetBlobs = InMemoryBlobStore();
+      final engine = SyncEngine(_repo(), 'general', blobStore: targetBlobs);
+      final link = _Link();
+      engine.addPeer(link);
+      final bytes = _b('not requested');
+      final hash = await blobHash(bytes);
+
+      link.incoming.add(GiveBlobFrame(hash, bytes));
+      await _pump();
+
+      expect(await targetBlobs.has(hash), isFalse);
+      await engine.close();
+      await link.incoming.close();
+    });
+
+    test(
+      'malformed and excessive pending blob requests are rejected',
+      () async {
+        final engine = SyncEngine(_repo(), 'general');
+        expect(engine.requestBlob('not-a-hash'), isFalse);
+        for (var i = 0; i < 1000; i++) {
+          final hash = '1220${i.toRadixString(16).padLeft(64, '0')}';
+          expect(engine.requestBlob(hash), isTrue);
+        }
+        expect(
+          engine.requestBlob('1220${List.filled(64, 'f').join()}'),
+          isFalse,
+        );
+        await engine.close();
+      },
+    );
+
+    test(
+      'a blob requested before peers connect is retried on connect',
+      () async {
+        final sourceBlobs = InMemoryBlobStore();
+        final targetBlobs = InMemoryBlobStore();
+        final hash = await sourceBlobs.put(_b('late peer blob'));
+        final source = SyncEngine(_repo(), 'general', blobStore: sourceBlobs);
+        final target = SyncEngine(_repo(), 'general', blobStore: targetBlobs);
+        var arrived = false;
+        final arrivedSub = target.blobArrived.listen((value) {
+          if (value == hash) arrived = true;
+        });
+
+        target.requestBlob(hash);
+        final (sourceLink, targetLink) = _pair();
+        source.addPeer(sourceLink);
+        target.addPeer(targetLink);
+
+        await _settle(() => arrived);
+        expect(await targetBlobs.get(hash), _b('late peer blob'));
+        await arrivedSub.cancel();
+        await source.close();
+        await target.close();
+      },
+    );
   });
 
   group('receive (untrusted courier ingestion)', () {

@@ -365,16 +365,20 @@ class WebRtcMesh {
   /// Cap on how many peers a single peer-exchange / announce response can make us
   /// dial, so a malicious peer or relay can't flood us into spawning connections.
   static const int _kMaxPeerFanout = 64;
+  static const int _kMaxPeerConnections = 64;
+  static const int _kMaxRememberedFailures = 1024;
+  static final RegExp _peerIdPattern = RegExp(r'^[0-9a-f]{64}$');
 
   /// We initiate (offer) only to peers whose key sorts below ours, so exactly
   /// one side of every pair offers.
   void _maybeInitiate(String peerHex) {
     // A pubkey is 32 bytes = 64 hex chars; drop anything malformed or our own.
     if (_closed ||
-        peerHex.length != 64 ||
+        !_peerIdPattern.hasMatch(peerHex) ||
         peerHex == selfPubkeyHex ||
         !(peerAllowed?.call(peerHex) ?? true) ||
-        _links.containsKey(peerHex)) {
+        _links.containsKey(peerHex) ||
+        _links.length >= _kMaxPeerConnections) {
       return;
     }
     // Default policy: the greater key offers (one offerer per pair). A forced
@@ -385,7 +389,13 @@ class WebRtcMesh {
     final until = _backoffUntil[peerHex];
     if (until != null && DateTime.now().isBefore(until)) return; // backing off
     final link = _createLink(peerHex, initiator: true);
-    unawaited(link.start());
+    unawaited(() async {
+      try {
+        await link.start();
+      } catch (_) {
+        await link.dispose();
+      }
+    }());
   }
 
   Future<void> _handleSignal(Map<String, Object?> signal) async {
@@ -395,6 +405,7 @@ class WebRtcMesh {
     if (fromValue is! String || kindValue is! String || data is! Map) return;
     final from = fromValue;
     final kind = kindValue;
+    if (!_peerIdPattern.hasMatch(from) || from == selfPubkeyHex) return;
     if (!(peerAllowed?.call(from) ?? true)) return;
     final payload = data.cast<String, Object?>();
     // Drop anything not validly signed by the claimed sender — this is what
@@ -405,6 +416,10 @@ class WebRtcMesh {
     try {
       switch (kind) {
         case 'offer':
+          if (!_links.containsKey(from) &&
+              _links.length >= _kMaxPeerConnections) {
+            return;
+          }
           final link = _links[from] ?? _createLink(from, initiator: false);
           await link.handleOffer(payload);
         case 'answer':
@@ -434,6 +449,13 @@ class WebRtcMesh {
       onOpen: _emitPeer,
       onClosed: () {
         _links.remove(peerHex);
+        if (_closed) return;
+        if (!_backoffFailures.containsKey(peerHex) &&
+            _backoffFailures.length >= _kMaxRememberedFailures) {
+          final oldest = _backoffFailures.keys.first;
+          _backoffFailures.remove(oldest);
+          _backoffUntil.remove(oldest);
+        }
         final failures = (_backoffFailures[peerHex] ?? 0) + 1;
         _backoffFailures[peerHex] = failures;
         // Exponential: 10s, 20s, 40s, 80s, 160s, capped at 300s (5min).
@@ -528,8 +550,10 @@ class WebRtcMesh {
   /// Opens a relay tunnel as a fallback when ICE fails — symmetric NAT on both
   /// sides can't go direct, so the relay forwards opaque ciphertext.
   void _openTunnel(String peerHex) {
-    if (!(peerAllowed?.call(peerHex) ?? true) ||
-        _tunnels.containsKey(peerHex)) {
+    if (!_peerIdPattern.hasMatch(peerHex) ||
+        !(peerAllowed?.call(peerHex) ?? true) ||
+        _tunnels.containsKey(peerHex) ||
+        _tunnels.length >= _kMaxPeerConnections) {
       return;
     }
     late final RelayTunnel tunnel;
@@ -613,7 +637,11 @@ class _PeerLink implements FrameChannel {
     this.localStream,
     this.onRemoteStream,
     this.onControl,
-  });
+  }) {
+    _handshakeTimer = Timer(const Duration(seconds: 30), () {
+      if (!_opened) unawaited(dispose());
+    });
+  }
 
   @override
   final String peerHex;
@@ -632,6 +660,7 @@ class _PeerLink implements FrameChannel {
   bool _remoteSet = false;
   bool _opened = false;
   bool _disposed = false;
+  Timer? _handshakeTimer;
   final List<RTCIceCandidate> _pendingCandidates = [];
   static const int _maxPendingCandidates = 256;
   static const int _maxDataChannelFrameBytes = 16 * 1024 * 1024;
@@ -647,19 +676,22 @@ class _PeerLink implements FrameChannel {
 
   @override
   void send(SyncFrame frame) {
-    final channel = _channel;
-    if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
-      unawaited(
-        channel!.send(RTCDataChannelMessage(wrapGossip(frame.encode()))),
-      );
-    }
+    _sendText(wrapGossip(frame.encode()));
   }
 
   /// Sends a mesh control message (peer-exchange / relayed signalling) to this peer.
-  void sendControl(MeshControl control) {
+  void sendControl(MeshControl control) => _sendText(control.encode());
+
+  void _sendText(String text) {
     final channel = _channel;
     if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
-      unawaited(channel!.send(RTCDataChannelMessage(control.encode())));
+      unawaited(() async {
+        try {
+          await channel!.send(RTCDataChannelMessage(text));
+        } catch (_) {
+          await dispose();
+        }
+      }());
     }
   }
 
@@ -793,7 +825,11 @@ class _PeerLink implements FrameChannel {
     channel.onDataChannelState = (state) {
       if (state == RTCDataChannelState.RTCDataChannelOpen && !_opened) {
         _opened = true;
+        _handshakeTimer?.cancel();
+        _handshakeTimer = null;
         onOpen(this); // surfaces this peer to the gossip layer
+      } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
+        unawaited(dispose());
       }
     };
   }
@@ -801,6 +837,8 @@ class _PeerLink implements FrameChannel {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _handshakeTimer?.cancel();
+    _handshakeTimer = null;
     try {
       await _channel?.close();
     } catch (_) {}

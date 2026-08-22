@@ -22,7 +22,8 @@ export 'src/frame.dart'
         WantFrame;
 export 'src/identity.dart'
     show Identity, InMemoryKeyStore, KeyStore, sha256Digest;
-export 'src/message.dart' show Message, kHearthMessageVersion;
+export 'src/message.dart'
+    show Message, kHearthMessageVersion, maxMessagePayloadBytes;
 export 'src/mnemonic.dart' show seedToMnemonic, mnemonicToSeed, bip39Words;
 export 'src/repository.dart' show MessageRepository;
 export 'src/storage.dart' show InMemoryMessageStorage, MessageStorage;

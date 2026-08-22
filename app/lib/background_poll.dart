@@ -125,7 +125,17 @@ Future<void> _pollFromStorage() async {
       final messages = body['messages'] as List? ?? [];
       final seqValue = body['seq'];
       final seq = seqValue is int && seqValue > since ? seqValue : since;
-      if (!hasBaseline || seq > since) await cursorBox.put(channelId, seq);
+      final latestValue = body['latestSeq'];
+      final latestSeq = latestValue is int && latestValue > seq
+          ? latestValue
+          : seq;
+      if (!hasBaseline) {
+        // Baseline directly at the channel head. Poll responses are paginated,
+        // so using the first page cursor would notify old backlog later.
+        await cursorBox.put(channelId, latestSeq);
+      } else if (seq > since) {
+        await cursorBox.put(channelId, seq);
+      }
       if (!hasBaseline) continue; // baseline just set — nothing to report yet
       // Count new messages, excluding our own (the relay echoes them back).
       var count = 0;

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { encode as dagCborEncode } from '@ipld/dag-cbor';
 import * as ed from '@noble/ed25519';
 
-import { MAX_CHANNEL_LENGTH } from './limits';
+import { MAX_CHANNEL_LENGTH, MAX_MESSAGE_PAYLOAD_BYTES } from './limits';
 
 /** Schema version of the signed content. Mirrors core's kHearthMessageVersion. */
 export const MESSAGE_VERSION = 1;
@@ -159,6 +159,7 @@ export async function verifyWire(w: WireMessage): Promise<boolean> {
   };
   if (
     fields.author.length !== 32 || fields.prev.some((p) => p.length !== 34) ||
+    fields.payload.length > MAX_MESSAGE_PAYLOAD_BYTES ||
     b64urlToBytes(w.id).length !== 34 || b64urlToBytes(w.sig).length !== 64
   ) return false;
   const content = signedBytes(fields);

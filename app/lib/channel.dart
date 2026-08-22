@@ -464,8 +464,9 @@ class ChannelSession {
     final bytes = await store.get(hash);
     if (bytes != null) {
       _blobs[hash] = bytes;
-    } else if (_requested.add(hash)) {
-      engine.requestBlob(hash);
+      _requested.remove(hash);
+    } else if (!_requested.contains(hash) && engine.requestBlob(hash)) {
+      _requested.add(hash);
     }
   }
 

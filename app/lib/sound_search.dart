@@ -29,10 +29,12 @@ Future<_SoundResult> _search(Uri relayUrl, String query, String? token) async {
     final params = <String, String>{'q': query};
     final headers = <String, String>{};
     if (token != null) headers['Authorization'] = 'Bearer $token';
-    res = await http.get(
-      relayUrl.replace(path: '/sound/search', queryParameters: params),
-      headers: headers,
-    );
+    res = await http
+        .get(
+          relayUrl.replace(path: '/sound/search', queryParameters: params),
+          headers: headers,
+        )
+        .timeout(const Duration(seconds: 10));
   } catch (_) {
     return const _SoundResult.unavailable(
       "Can't reach the relay — it may be offline.",

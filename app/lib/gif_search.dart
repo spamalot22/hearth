@@ -69,10 +69,12 @@ Future<_GifResult> _search(Uri relayUrl, String query, String? token) async {
     final params = <String, String>{'q': query};
     final headers = <String, String>{};
     if (token != null) headers['Authorization'] = 'Bearer $token';
-    res = await http.get(
-      relayUrl.replace(path: '/gif/search', queryParameters: params),
-      headers: headers,
-    );
+    res = await http
+        .get(
+          relayUrl.replace(path: '/gif/search', queryParameters: params),
+          headers: headers,
+        )
+        .timeout(const Duration(seconds: 10));
   } catch (_) {
     return const _GifResult.unavailable(
       "Can't reach the relay — it may be offline.",

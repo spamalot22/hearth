@@ -11,6 +11,11 @@ import 'identity.dart';
 /// Schema version of the signed content. Bump if the signed fields change.
 const int kHearthMessageVersion = 1;
 
+/// Message payloads are small encrypted envelopes. Larger media travels through
+/// the content-addressed blob protocol, so accepting oversized payloads only
+/// creates a direct-peer memory and storage exhaustion path.
+const int maxMessagePayloadBytes = 32 * 1024;
+
 /// Multihash prefix for sha2-256 (code 0x12, length 0x20). Prefixing the digest
 /// makes ids self-describing, so the hash algorithm can be migrated later
 /// without breaking existing ids (hash agility).
@@ -114,10 +119,26 @@ class Message {
     Identity? signingDevice,
     DeviceCert? deviceCert,
   }) async {
+    if (channel.isEmpty || channel.length > 256) {
+      throw ArgumentError.value(channel, 'channel', 'must be 1-256 characters');
+    }
+    if (payload.length > maxMessagePayloadBytes) {
+      throw ArgumentError.value(
+        payload.length,
+        'payload',
+        'must be at most $maxMessagePayloadBytes bytes',
+      );
+    }
+    if (prev.length > 256 || prev.any((parent) => parent.length != 34)) {
+      throw ArgumentError.value(prev, 'prev', 'must contain at most 256 ids');
+    }
     if (signingDevice != null && deviceCert == null) {
       throw ArgumentError('device-signed messages must carry the device cert');
     }
     final ts = timestampMs ?? DateTime.now().toUtc().millisecondsSinceEpoch;
+    if (ts < 0) {
+      throw ArgumentError.value(ts, 'timestampMs', 'must not be negative');
+    }
     final signer = signingDevice ?? author;
     final device = signingDevice?.publicKey;
     final fields = Message._(
@@ -161,6 +182,7 @@ class Message {
           id.length != 34 ||
           channel.isEmpty ||
           channel.length > 256 ||
+          payload.length > maxMessagePayloadBytes ||
           timestampMs < 0 ||
           prev.length > 256 ||
           prev.any((parent) => parent.length != 34)) {

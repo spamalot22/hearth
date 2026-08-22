@@ -25,7 +25,7 @@ const MAX_BUFFER = 100;
 const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 // Cap distinct (from|to) pairs. Undrained buffers to peers that never poll
 // (e.g. an attacker posting to random `to` values) would otherwise grow the map
-// without bound — the TTL only fires on drain.
+// between periodic lazy TTL pruning passes.
 const MAX_PAIRS = 10_000;
 const MAX_TOTAL_FRAMES = 10_000;
 
@@ -38,8 +38,12 @@ export class TunnelHub {
   // Key: "from|to" -> buffered frames the sender posted for the receiver.
   private readonly buffers = new Map<string, TunnelEntry[]>();
   private frameCount = 0;
+  private lastPruneMs = 0;
 
   post(from: string, to: string, data: string, nowMs: number): void {
+    if (nowMs - this.lastPruneMs >= TUNNEL_TTL_MS) {
+      this.prune(nowMs);
+    }
     const key = `${from}|${to}`;
     // Touch for LRU: delete + re-insert so active pairs move to the end and the
     // oldest pair sits at the front for eviction.
@@ -63,6 +67,19 @@ export class TunnelHub {
       this.frameCount -= this.buffers.get(oldest)?.length ?? 0;
       this.buffers.delete(oldest);
     }
+  }
+
+  private prune(nowMs: number): void {
+    for (const [key, buf] of this.buffers) {
+      const fresh = buf.filter((entry) => nowMs - entry.ts <= TUNNEL_TTL_MS);
+      this.frameCount -= buf.length - fresh.length;
+      if (fresh.length === 0) {
+        this.buffers.delete(key);
+      } else if (fresh.length !== buf.length) {
+        this.buffers.set(key, fresh);
+      }
+    }
+    this.lastPruneMs = nowMs;
   }
 
   /** Drains buffered frames for [to] from [from], pruning stale entries. */

@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Hono } from 'hono';
 
+const MAX_QUERY_LENGTH = 100;
+const PROVIDER_TIMEOUT_MS = 5000;
+
+function isHttpsUrl(value: string | undefined): value is string {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Freesound search, proxied through the relay so the API token stays server-side
  * — set `FREESOUND_KEY` on the relay, never in clients. Filtered to Creative
@@ -13,6 +25,9 @@ export function addSoundRoutes(app: Hono): void {
     if (!key) return c.json({ sounds: [], configured: false });
     const q = c.req.query('q')?.trim();
     if (!q) return c.json({ sounds: [], configured: true });
+    if (q.length > MAX_QUERY_LENGTH) {
+      return c.json({ error: 'query too long' }, 400);
+    }
 
     const url = new URL('https://freesound.org/apiv2/search/text/');
     url.search = new URLSearchParams({
@@ -24,7 +39,9 @@ export function addSoundRoutes(app: Hono): void {
     }).toString();
 
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+      });
       if (!res.ok) return c.json({ sounds: [], configured: true }, 502);
       const data = (await res.json()) as {
         results?: Array<{ name?: string; previews?: Record<string, string> }>;
@@ -33,7 +50,9 @@ export function addSoundRoutes(app: Hono): void {
         .map((r) => {
           const preview =
             r.previews?.['preview-hq-mp3'] ?? r.previews?.['preview-lq-mp3'];
-          return r.name && preview ? { name: r.name, preview } : null;
+          return r.name && isHttpsUrl(preview)
+            ? { name: r.name.slice(0, 200), preview }
+            : null;
         })
         .filter((s): s is { name: string; preview: string } => s !== null);
       return c.json({ sounds, configured: true });

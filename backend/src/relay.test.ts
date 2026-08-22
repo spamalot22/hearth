@@ -9,7 +9,7 @@ import {
   type WireMessage,
   verifyWire,
 } from './message';
-import { createRelay } from './relay';
+import { createRelay, RelayStore } from './relay';
 
 function b64url(b: Uint8Array): string {
   return Buffer.from(b).toString('base64url');
@@ -130,6 +130,33 @@ describe('relay', () => {
     )).json()) as { messages: WireMessage[] };
 
     expect(second.messages).toHaveLength(1);
+  });
+
+  it('paginates large backlogs and exposes the channel head', async () => {
+    const store = new RelayStore();
+    const wire = await makeWire('message');
+    for (let i = 0; i < 105; i++) store.append(wire);
+    const app = createRelay(store);
+
+    const first = (await (await app.request(
+      '/poll?channel=general&since=0',
+    )).json()) as {
+      messages: WireMessage[];
+      seq: number;
+      latestSeq: number;
+      more: boolean;
+    };
+    expect(first.messages).toHaveLength(100);
+    expect(first.seq).toBe(100);
+    expect(first.latestSeq).toBe(105);
+    expect(first.more).toBe(true);
+
+    const second = (await (await app.request(
+      `/poll?channel=general&since=${first.seq}`,
+    )).json()) as typeof first;
+    expect(second.messages).toHaveLength(5);
+    expect(second.seq).toBe(105);
+    expect(second.more).toBe(false);
   });
 
   it('rejects an oversized body with 413', async () => {

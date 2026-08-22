@@ -9,6 +9,9 @@
 /** Reject request bodies larger than this (signals/messages are tiny). */
 export const MAX_BODY_BYTES = 64 * 1024;
 
+/** Decoded encrypted payload limit; leaves room for its signed JSON envelope. */
+export const MAX_MESSAGE_PAYLOAD_BYTES = 32 * 1024;
+
 /** Maximum channel/capability identifier length accepted by relay routes. */
 export const MAX_CHANNEL_LENGTH = 256;
 
@@ -20,6 +23,9 @@ export const MAX_TOTAL_SIGNALS = 10_000;
 
 /** Keep at most this many courier messages per channel. */
 export const MAX_CHANNEL_MESSAGES = 5000;
+
+/** Maximum courier messages serialized in one poll response. */
+export const MAX_POLL_MESSAGES = 100;
 
 /** Global courier-message count across all channels. */
 export const MAX_TOTAL_MESSAGES = 20_000;
