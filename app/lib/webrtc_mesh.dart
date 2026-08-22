@@ -163,7 +163,12 @@ class WebRtcMesh {
   /// Returns the link for a specific peer (for sending control messages).
   void sendControlTo(String peerHex, MeshControl control) {
     final link = _links[peerHex];
-    if (link != null && link.open) link.sendControl(control);
+    if (link != null && link.open) {
+      link.sendControl(control);
+      return;
+    }
+    final tunnel = _tunnels[peerHex];
+    if (tunnel?.isReady ?? false) tunnel!.sendControl(control);
   }
 
   /// Attempts to connect to a peer we've learned about (e.g. via contacts-online).
@@ -463,8 +468,9 @@ class WebRtcMesh {
         _backoffUntil[peerHex] = DateTime.now().add(
           Duration(seconds: delaySec),
         );
-        // After 3 consecutive failures, try the relay tunnel (symmetric NAT).
-        if (failures == 3 &&
+        // After one complete ICE timeout, keep retrying direct WebRTC but also
+        // open the encrypted fallback for sync and mesh controls.
+        if (failures == 1 &&
             !_closed &&
             localStream == null &&
             onRemoteStream == null) {
@@ -518,7 +524,7 @@ class WebRtcMesh {
           unawaited(_handleSignal({'from': from, 'kind': kind, 'data': data}));
         } else {
           // Not for us — forward to the target if we have a link.
-          _links[to]?.sendControl(control);
+          sendControlTo(to, control);
         }
       case ContactsOnlineControl():
         break; // Handled by the external onControl callback (app layer).
@@ -567,6 +573,22 @@ class WebRtcMesh {
         if (_closed || _tunnels[peerHex] != tunnel) return;
         onPeerConnectedHex?.call(peerHex);
         unawaited(candidateCache?.touch(channel, peerHex) ?? Future.value());
+        final otherPeers = connectedPeers
+            .where((peer) => peer != peerHex)
+            .toList();
+        if (otherPeers.isNotEmpty) {
+          tunnel.sendControl(PeersControl(otherPeers));
+        }
+        final manifest = versionManifest;
+        if (manifest != null) {
+          tunnel.sendControl(
+            VersionControl(version: appVersion, manifest: manifest),
+          );
+        }
+      },
+      onControl: (control) {
+        _handleControl(peerHex, control);
+        onControl?.call(peerHex, control);
       },
     );
     _tunnels[peerHex] = tunnel;

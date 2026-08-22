@@ -78,7 +78,11 @@ class RelayTransport implements Transport {
   void resume() => _paused = false;
 
   void _startPolling() {
-    _timer ??= Timer.periodic(pollInterval, (_) => unawaited(_pollOnce()));
+    if (_timer != null) return;
+    // Catch up immediately. Waiting one full interval lets a fast P2P open
+    // pause this courier before it has fetched any pre-existing relay history.
+    unawaited(_pollOnce());
+    _timer = Timer.periodic(pollInterval, (_) => unawaited(_pollOnce()));
   }
 
   Future<void> _pollOnce() async {

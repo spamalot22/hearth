@@ -46,6 +46,8 @@ class VoiceSession {
 
   bool get isMuted => _muted || _deafened;
   bool get isDeafened => _deafened;
+  bool get connectionWaitExpired =>
+      DateTime.now().difference(_joinedAt) > const Duration(seconds: 30);
 
   /// A peer's playback volume (0..1) — defaults to full.
   double volumeOf(String peerHex) => _volumes[peerHex] ?? 1.0;

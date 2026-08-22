@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:core/core.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hearth/mesh_control.dart';
 import 'package:hearth/relay_tunnel.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -91,6 +92,7 @@ void main() {
     final mailbox = <String>[];
     final requestSizes = <int>[];
     final postedData = <String>[];
+    final controls = <MeshControl>[];
 
     Future<http.Response> relay(http.Request request) async {
       if (request.method == 'POST') {
@@ -120,14 +122,24 @@ void main() {
       peerPubkeyHex: alice.publicKeyHex,
       authToken: 'bob-token',
       pollInterval: const Duration(milliseconds: 5),
+      onControl: controls.add,
       client: MockClient(relay),
     );
     final bytes = Uint8List.fromList(
       List<int>.generate(200 * 1024, (index) => index & 0xff),
     );
-    final received = receiver.frames.first;
     receiver.start();
 
+    sender.sendControl(VoicePresenceControl(channelId: 'channel-id'));
+    await _waitUntil(() => controls.isNotEmpty);
+    expect(controls.single, isA<VoicePresenceControl>());
+    expect((controls.single as VoicePresenceControl).channelId, 'channel-id');
+    expect(receiver.isReady, isTrue);
+    expect(postedData, everyElement(startsWith('c1:')));
+    requestSizes.clear();
+    postedData.clear();
+
+    final received = receiver.frames.first;
     sender.send(GiveBlobFrame('1220${List.filled(64, 'a').join()}', bytes));
     final frame = await received.timeout(const Duration(seconds: 5));
 

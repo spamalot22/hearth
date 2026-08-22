@@ -261,7 +261,7 @@ class ChannelSession {
         },
         onPeerLeft: (_) {
           // Resume relay polling when the last P2P peer drops.
-          if (mesh?.peers.isEmpty ?? true) courier?.resume();
+          if (mesh?.connectedPeers.isEmpty ?? true) courier?.resume();
           onUpdate(); // Refresh UI so member online status updates.
         },
         onControl: (fromHex, control) {
@@ -335,7 +335,7 @@ class ChannelSession {
   void sendTyping(bool typing) {
     final mesh = _mesh;
     if (mesh == null) return;
-    for (final peerHex in mesh.connections.keys) {
+    for (final peerHex in mesh.connectedPeers) {
       mesh.sendControlTo(peerHex, TypingControl(typing: typing));
     }
   }
@@ -344,7 +344,7 @@ class ChannelSession {
   void broadcast(MeshControl control) {
     final mesh = _mesh;
     if (mesh == null) return;
-    for (final peerHex in mesh.connections.keys) {
+    for (final peerHex in mesh.connectedPeers) {
       mesh.sendControlTo(peerHex, control);
     }
   }
@@ -593,7 +593,7 @@ class ChannelManager {
     for (final session in _sessions.values) {
       final mesh = session._mesh;
       if (mesh == null) continue;
-      final peersHere = mesh.connections.keys.toList();
+      final peersHere = mesh.connectedPeers.toList();
       for (final peerHex in peersHere) {
         final others = peersHere.where((p) => p != peerHex).toList();
         if (others.isNotEmpty) {
@@ -618,7 +618,7 @@ class ChannelManager {
         if (mesh == null) continue;
         final cached = candidateCache?.knownPeers(session.channelId) ?? {};
         if (cached.contains(peerHex) &&
-            !mesh.connections.containsKey(peerHex)) {
+            !mesh.connectedPeers.contains(peerHex)) {
           mesh.maybeInitiateVia(peerHex);
         }
       }

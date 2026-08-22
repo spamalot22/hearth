@@ -1335,8 +1335,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Set<String> _baselined = {}; // channels past their initial settle
   final Map<String, Set<String>> _seenMembers =
       {}; // channelId -> known members
-  final Map<String, (int, Set<String>)> _membersCache =
-      {}; // channelId -> (msgCount, members)
+  final Map<String, (int, String, Set<String>)> _membersCache =
+      {}; // channelId -> (msgCount, resolved live/known signature, members)
   final Set<String> _promptedNew = {}; // members offered to add this session
   final List<({String key, String name})> _newMembers = []; // pending prompts
   bool _promptingMember = false;
@@ -1661,7 +1661,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Re-broadcast read watermark only when peer count increased (new peer).
     final active = _channels?.active;
     if (active != null) {
-      final peerCount = active.mesh?.peers.length ?? 0;
+      final peerCount = active.mesh?.connectedPeers.length ?? 0;
       final lastCount = _lastPeerCount[active.channelId] ?? 0;
       if (peerCount > lastCount) {
         final wm = _lastBroadcastWatermark[active.channelId];
@@ -1831,21 +1831,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (control.channelId.isNotEmpty && control.channelId != channelId) {
         return;
       }
-      final rootHex = _rootHexForPeer(fromHex);
       setState(() {
         if (control.channelId.isEmpty) {
           // A leave applies only to the authenticated channel carrying it. A
           // peer in another shared channel must not clear unrelated presence.
-          _voicePresence[channelId]?.remove(rootHex);
-          if (!_voicePresence.values.any((set) => set.contains(rootHex))) {
-            _voicePresenceTs.remove(rootHex);
+          _voicePresence[channelId]?.remove(fromHex);
+          _voicePresenceTs.remove(fromHex);
+          final resolved = _rootHexForPeer(fromHex);
+          if (resolved != fromHex) {
+            _voicePresence[channelId]?.remove(resolved);
+            _voicePresenceTs.remove(resolved);
           }
         } else {
-          (_voicePresence[channelId] ??= {}).add(rootHex);
-          _voicePresenceTs[rootHex] = DateTime.now();
+          (_voicePresence[channelId] ??= {}).add(fromHex);
+          _voicePresenceTs[fromHex] = DateTime.now();
           // Remove from other channels (can only be in one).
+          final resolved = _rootHexForPeer(fromHex);
           for (final entry in _voicePresence.entries) {
-            if (entry.key != channelId) entry.value.remove(rootHex);
+            if (entry.key != channelId) {
+              entry.value.remove(fromHex);
+              if (resolved != fromHex) entry.value.remove(resolved);
+            }
           }
         }
         // Prune stale entries (>30s without refresh).
@@ -2536,8 +2542,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Set<String> _allOnlinePeers() {
     final result = <String>{};
     for (final s in _channels?.sessions ?? <ChannelSession>[]) {
-      result.addAll(s.mesh?.peers ?? []);
+      result.addAll(
+        (s.mesh?.connectedPeers ?? const <String>[]).map(_rootHexForPeer),
+      );
     }
+    result.remove(widget.identity.publicKeyHex);
     return result;
   }
 
@@ -2546,7 +2555,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final result = <String, int>{};
     for (final s in _channels?.sessions ?? <ChannelSession>[]) {
       for (final msg in s.repository.ordered()) {
-        final key = hex.encode(msg.author);
+        final key = _rootHexForPeer(hex.encode(msg.author));
         final ts = msg.timestampMs;
         if (ts > (result[key] ?? 0)) result[key] = ts;
       }
@@ -2555,21 +2564,36 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Set<String> _membersOf(ChannelSession session) {
-    final self = hex.encode(widget.identity.publicKey);
+    final self = widget.identity.publicKeyHex;
     final msgCount = session.repository.length;
-    final peerCount = session.mesh?.peers.length ?? 0;
+    final connectedRoots = <String>{
+      for (final peer in session.mesh?.connectedPeers ?? const <String>[])
+        _rootHexForPeer(peer),
+    }..remove(self);
+    final knownRoots = <String>{
+      for (final member
+          in _groups[session.channelId]?.knownMembers ?? const <String>{})
+        _rootHexForPeer(member),
+    }..remove(self);
+    final signatureParts = <String>{...connectedRoots, ...knownRoots}.toList()
+      ..sort();
+    final identitySignature = signatureParts.join(',');
     final cacheKey = session.channelId;
     final cached = _membersCache[cacheKey];
-    // Invalidate if message count or peer count changed.
-    if (cached != null && cached.$1 == msgCount + peerCount) {
-      return cached.$2;
+    // A device→root mapping can become known without changing either count, so
+    // cache the resolved identities rather than a raw peer count.
+    if (cached != null &&
+        cached.$1 == msgCount &&
+        cached.$2 == identitySignature) {
+      return cached.$3;
     }
     final members = {
       for (final message in session.repository.ordered())
-        if (hex.encode(message.author) != self) hex.encode(message.author),
-      ...?session.mesh?.peers,
+        _rootHexForPeer(hex.encode(message.author)),
+      ...connectedRoots,
+      ...knownRoots,
     }..remove(self);
-    _membersCache[cacheKey] = (msgCount + peerCount, members);
+    _membersCache[cacheKey] = (msgCount, identitySignature, members);
     return members;
   }
 
@@ -4762,6 +4786,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  Set<String> _voiceMembersFor(String channelId) => {
+    for (final peer in _voicePresence[channelId] ?? const <String>{})
+      _rootHexForPeer(peer),
+  }..remove(widget.identity.publicKeyHex);
+
   Future<void> _leaveVoice() async {
     await _stopScreenShare(); // no-op if not sharing; tells peers before we go
     if (_ytIsHost && _ytVideoId != null) {
@@ -5119,6 +5148,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final theme = Theme.of(context);
     final voice = _voice;
     final inCall = voice != null && voice.channelId == session.channelId;
+    final voiceMembers = _voiceMembersFor(session.channelId);
+    final connectedVoiceRoots = <String>{
+      for (final peer in voice?.peerHexes ?? const <String>[])
+        _rootHexForPeer(peer),
+    };
+    final connectingVoiceMembers = voiceMembers.difference(connectedVoiceRoots);
     // Material (not a plain coloured Container) so the panel's ListTiles paint
     // their ink splashes on a Material ancestor rather than an opaque ColoredBox.
     return Material(
@@ -5230,11 +5265,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       label: const Text('Join voice'),
                     ),
                   ),
-                  if (_voicePresence[session.channelId]?.isNotEmpty ?? false)
+                  if (voiceMembers.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
                       child: Text(
-                        '🔊 ${_voicePresence[session.channelId]!.map((h) => _contacts?.nameFor(h) ?? h.substring(0, 8)).join(', ')}',
+                        '🔊 ${voiceMembers.map((h) => _displayName(Uint8List.fromList(hex.decode(h)))).join(', ')}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ),
@@ -5345,6 +5380,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       Uint8List.fromList(hex.decode(peerHex)),
                       _displayName(Uint8List.fromList(hex.decode(peerHex))),
                     ),
+                  for (final memberHex in connectingVoiceMembers)
+                    _connectingVoiceTile(
+                      memberHex,
+                      failed: voice.connectionWaitExpired,
+                    ),
                   const SizedBox(height: 8),
                   OutlinedButton.icon(
                     onPressed: () => unawaited(_openVoiceSoundboard(session)),
@@ -5392,6 +5432,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ),
     );
   }
+
+  Widget _connectingVoiceTile(String rootHex, {required bool failed}) =>
+      ListTile(
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        leading: _avatar(Uint8List.fromList(hex.decode(rootHex)), radius: 16),
+        title: Text(
+          _displayName(Uint8List.fromList(hex.decode(rootHex))),
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(failed ? 'No audio route' : 'Connecting...'),
+        trailing: failed
+            ? Icon(
+                Icons.error_outline,
+                color: Theme.of(context).colorScheme.error,
+              )
+            : const SizedBox.square(
+                dimension: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+      );
 
   /// One voice participant: avatar (green ring when speaking) + name + level
   /// bar. Tapping a peer opens their volume slider. Long-press to mute.
@@ -7244,7 +7305,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final channelId = session.channelId;
     final watermarks = _readWatermarks[channelId] ?? {};
     final members = _membersOf(session);
-    final peers = session.mesh?.peers ?? [];
+    final peers = session.mesh?.connectedPeers ?? const <String>[];
     final msgTs = message.timestampMs;
 
     // Count members whose watermark is at or past this message (by timestamp).
@@ -7286,7 +7347,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final wmTs = _watermarkTs[session.channelId] ?? {};
     final members = _membersOf(session);
     final msgTs = message.timestampMs;
-    final peers = session.mesh?.peers ?? [];
+    final peers = {
+      for (final peer in session.mesh?.connectedPeers ?? const <String>[])
+        _rootHexForPeer(peer),
+    };
 
     showModalBottomSheet<void>(
       context: context,

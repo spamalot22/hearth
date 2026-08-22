@@ -31,9 +31,11 @@ void main() {
       expect(back!.channel.id, c.id);
       expect(back.channel.key, c.key);
       expect(back.channel.name, 'Games');
+      expect(back.channel.knownMembers, {inviterHex});
       expect(back.inviterPubkey, inviterHex);
       expect(back.inviterName, 'Alice');
       expect(back.relayUrl, 'https://relay.example.com');
+      expect(back.channel.withName('Renamed').knownMembers, {inviterHex});
     });
 
     test('a malformed invite returns null', () {

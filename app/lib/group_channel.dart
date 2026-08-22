@@ -10,11 +10,18 @@ import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 /// that encrypts its messages, and a local [name] you chose (yours only, never
 /// shared). Two people who create "games" get different ids — no collisions.
 class GroupChannel {
-  GroupChannel({required this.id, required this.key, required this.name});
+  GroupChannel({
+    required this.id,
+    required this.key,
+    required this.name,
+    Set<String> knownMembers = const <String>{},
+  }) : knownMembers = Set<String>.unmodifiable(knownMembers);
 
   final String id; // 16 random bytes, hex
   final Uint8List key; // 32 random bytes
   final String name; // local display name
+  /// Root identities explicitly known from the invite bootstrap.
+  final Set<String> knownMembers;
   static final _idRe = RegExp(r'^[0-9a-f]{32}$');
   static final _pubkeyRe = RegExp(r'^[0-9a-f]{64}$');
 
@@ -60,7 +67,12 @@ class GroupChannel {
       final inviter = nonEmpty('inv');
       if (inviter != null && !_pubkeyRe.hasMatch(inviter)) return null;
       return Invite(
-        channel: GroupChannel(id: id, key: key, name: nonEmpty('n') ?? id),
+        channel: GroupChannel(
+          id: id,
+          key: key,
+          name: nonEmpty('n') ?? id,
+          knownMembers: inviter == null ? const <String>{} : {inviter},
+        ),
         inviterPubkey: inviter,
         inviterName: nonEmpty('in'),
         relayUrl: nonEmpty('r'),
@@ -71,16 +83,26 @@ class GroupChannel {
   }
 
   GroupChannel withName(String newName) =>
-      GroupChannel(id: id, key: key, name: newName);
+      GroupChannel(id: id, key: key, name: newName, knownMembers: knownMembers);
 
-  Map<String, Object?> _toRegistry() => {'k': base64Url.encode(key), 'n': name};
+  Map<String, Object?> _toRegistry() => {
+    'k': base64Url.encode(key),
+    'n': name,
+    if (knownMembers.isNotEmpty) 'm': knownMembers.toList()..sort(),
+  };
 
-  static GroupChannel _fromRegistry(String id, Map<String, Object?> m) =>
-      GroupChannel(
-        id: id,
-        key: base64Url.decode(m['k']! as String),
-        name: m['n'] as String? ?? id,
-      );
+  static GroupChannel _fromRegistry(String id, Map<String, Object?> m) {
+    final members = ((m['m'] as List?) ?? const <Object?>[])
+        .whereType<String>()
+        .where(_pubkeyRe.hasMatch)
+        .toSet();
+    return GroupChannel(
+      id: id,
+      key: base64Url.decode(m['k']! as String),
+      name: m['n'] as String? ?? id,
+      knownMembers: members,
+    );
+  }
 
   static String _hex(Random rng, int bytes) => List.generate(
     bytes,
