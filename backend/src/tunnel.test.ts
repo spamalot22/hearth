@@ -35,19 +35,37 @@ describe('tunnel', () => {
     it('prunes stale entries on drain', () => {
       const hub = new TunnelHub();
       hub.post('alice', 'bob', 'old', 0);
-      hub.post('alice', 'bob', 'fresh', 29000);
-      const frames = hub.drain('alice', 'bob', 30001);
+      hub.post('alice', 'bob', 'fresh', 299000);
+      const frames = hub.drain('alice', 'bob', 300001);
       expect(frames).toEqual(['fresh']);
     });
 
-    it('caps buffer at 100', () => {
+    it('caps a pair at 512 frames and paginates drains', () => {
       const hub = new TunnelHub();
-      for (let i = 0; i < 150; i++) {
+      for (let i = 0; i < 600; i++) {
         hub.post('a', 'b', `f${i}`, 1000);
       }
-      const frames = hub.drain('a', 'b', 1001);
-      expect(frames.length).toBe(100);
-      expect(frames[0]).toBe('f50');
+      const frames: string[] = [];
+      for (let page = 0; page < 16; page++) {
+        frames.push(...hub.drain('a', 'b', 1001));
+      }
+      expect(frames.length).toBe(512);
+      expect(frames[0]).toBe('f88');
+      expect(frames.at(-1)).toBe('f599');
+      expect(hub.drain('a', 'b', 1001)).toEqual([]);
+    });
+
+    it('caps buffered bytes per pair', () => {
+      const hub = new TunnelHub();
+      const fragment = 'x'.repeat(60 * 1024);
+      for (let i = 0; i < 500; i++) {
+        hub.post('a', 'b', fragment, 1000);
+      }
+      let count = 0;
+      for (let page = 0; page < 16; page++) {
+        count += hub.drain('a', 'b', 1001).length;
+      }
+      expect(count).toBeLessThanOrEqual(409);
     });
 
     it('separate directions are independent', () => {
@@ -73,10 +91,11 @@ describe('tunnel', () => {
     it('re-posting an existing pair keeps it fresh (LRU touch)', () => {
       const hub = new TunnelHub();
       hub.post('attacker', 'victim0', 'keep', 1000);
-      for (let i = 1; i < 10_000; i++) {
+      for (let i = 1; i < 2048; i++) {
         hub.post('attacker', `victim${i}`, 'x', 1000);
       }
-      // Touch victim0 so it is no longer the oldest, then overflow by one.
+      // Touch victim0 so it is no longer the oldest, then overflow the global
+      // frame cap. A less-recent pair is evicted instead.
       hub.post('attacker', 'victim0', 'keep2', 1001);
       hub.post('attacker', 'victim-new', 'x', 1002);
       // victim0 survived because the touch moved it to the end.
@@ -138,6 +157,23 @@ describe('tunnel', () => {
       });
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
+    });
+
+    it('rejects a tunnel fragment over 60 KiB', async () => {
+      const app = makeApp(alwaysValid);
+      const res = await app.request('/tunnel', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${aliceHex}`,
+        },
+        body: JSON.stringify({
+          from: aliceHex,
+          to: bobHex,
+          data: 'x'.repeat(60 * 1024 + 1),
+        }),
+      });
+      expect(res.status).toBe(413);
     });
 
     it('returns 400 for malformed json and invalid pubkeys', async () => {

@@ -559,7 +559,7 @@ class WebRtcMesh {
     late final RelayTunnel tunnel;
     tunnel = RelayTunnel(
       baseUrl: _activeUrl,
-      selfPubkeyHex: selfPubkeyHex,
+      identity: identity,
       peerPubkeyHex: peerHex,
       authToken: _authToken,
       authTokenProvider: () => _authToken,

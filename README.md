@@ -181,8 +181,10 @@ in-memory Docker container behind a tunnel (no port-forward). Deployed on a
 small always-on host via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
 
 When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
-(`/tunnel`) forwards opaque ciphertext between the stuck peers — same E2E
-guarantees, just routed through the relay instead of direct.
+(`/tunnel`) forwards bounded, encrypted fragments between the stuck peers. Large
+frames are reassembled only after end-to-end authentication, retaining the same
+confidentiality guarantees while keeping the relay's request limits small. Both
+peers must support the encrypted fragment protocol to use this fallback path.
 
 ---
 

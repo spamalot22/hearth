@@ -10,8 +10,8 @@ Do **not** run resource-intensive builds or full native test suites locally.
 In particular, do not run:
 
 - `flutter build ...`
-- full `flutter test` runs that compile `fllama`, llama.cpp, Gradle, or other
-  native dependencies
+- any `flutter test` command: this package's native hook compiles `fllama` and
+  llama.cpp even when only one Dart test file is selected
 - `./gradlew assemble...` or other Android release/debug builds
 - Docker image builds
 - clean/rebuild operations for native dependencies
@@ -23,6 +23,7 @@ it to completion, and inspect any failed job logs there. Do not tag or publish a
 release until its required GitHub checks have succeeded.
 
 Local work must be limited to lightweight inspection, formatting, static
-analysis, and narrowly targeted tests that are known not to invoke native or
-Gradle compilation. Before running a command whose resource cost is uncertain,
-treat it as resource-intensive and use GitHub Actions instead.
+analysis, and tests outside the Flutter package that are known not to invoke
+native or Gradle compilation. Run all Flutter tests in GitHub Actions. Before
+running a command whose resource cost is uncertain, treat it as
+resource-intensive and use GitHub Actions instead.

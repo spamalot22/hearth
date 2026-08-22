@@ -18,6 +18,8 @@ import {
   RateLimiter,
   SEARCH_RATE_LIMIT,
   SEARCH_RATE_WINDOW_MS,
+  TUNNEL_IP_RATE_LIMIT,
+  TUNNEL_IP_RATE_WINDOW_MS,
 } from './limits';
 import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
@@ -125,7 +127,9 @@ export function createRelay(
   // Per-IP global rate limit — catches keypair-rotating attackers. Applied to
   // all routes except /health (which load balancers hit frequently).
   const ipLimiter = new RateLimiter(IP_RATE_LIMIT, IP_RATE_WINDOW_MS);
-  const limitIp: MiddlewareHandler = async (c, next) => {
+  const clientIp = (c: {
+    req: { header(name: string): string | undefined };
+  }): string => {
     // Reverse proxies append the connecting client to X-Forwarded-For. Use the
     // right-most value so a caller cannot evade the limiter by prepending a
     // different forged address to every request.
@@ -133,7 +137,10 @@ export function createRelay(
       ?.split(',')
       .map((value) => value.trim())
       .filter(Boolean);
-    const ip = forwarded?.at(-1) ?? c.req.header('x-real-ip') ?? 'unknown';
+    return forwarded?.at(-1) ?? c.req.header('x-real-ip') ?? 'unknown';
+  };
+  const limitIp: MiddlewareHandler = async (c, next) => {
+    const ip = clientIp(c);
     if (!ipLimiter.allow(ip, Date.now())) {
       return c.json({ error: 'rate limited' }, 429);
     }
@@ -143,9 +150,23 @@ export function createRelay(
   app.use('/signal', limitIp);
   app.use('/messages', limitIp);
   app.use('/poll', limitIp);
-  app.use('/tunnel', limitIp);
   app.use('/gif/*', limitIp);
   app.use('/sound/*', limitIp);
+
+  // Blob fragmentation legitimately uses hundreds of small authenticated
+  // requests, so tunnel traffic has a separate per-IP budget. The tunnel also
+  // enforces token ownership, per-pair rate limits, and global byte quotas.
+  const tunnelIpLimiter = new RateLimiter(
+    TUNNEL_IP_RATE_LIMIT,
+    TUNNEL_IP_RATE_WINDOW_MS,
+  );
+  const limitTunnelIp: MiddlewareHandler = async (c, next) => {
+    if (!tunnelIpLimiter.allow(clientIp(c), Date.now())) {
+      return c.json({ error: 'rate limited' }, 429);
+    }
+    await next();
+  };
+  app.use('/tunnel', limitTunnelIp);
 
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
   addSignalingRoutes(app, signalHub);

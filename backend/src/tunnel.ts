@@ -20,27 +20,36 @@ function bearerToken(c: { req: { header(name: string): string | undefined } }): 
  * other; the other GETs them. Bounded per-pair buffer, TTL on entries.
  */
 
-const TUNNEL_TTL_MS = 30_000;
-const MAX_BUFFER = 100;
+const TUNNEL_TTL_MS = 5 * 60_000;
+const MAX_BUFFER = 512;
+const MAX_DRAIN_FRAMES = 32;
+const MAX_TUNNEL_DATA_BYTES = 60 * 1024;
+const MAX_PAIR_BYTES = 24 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 // Cap distinct (from|to) pairs. Undrained buffers to peers that never poll
 // (e.g. an attacker posting to random `to` values) would otherwise grow the map
 // between periodic lazy TTL pruning passes.
 const MAX_PAIRS = 10_000;
-const MAX_TOTAL_FRAMES = 10_000;
+const MAX_TOTAL_FRAMES = 2048;
 
 interface TunnelEntry {
   data: string;
   ts: number;
+  bytes: number;
 }
 
 export class TunnelHub {
   // Key: "from|to" -> buffered frames the sender posted for the receiver.
   private readonly buffers = new Map<string, TunnelEntry[]>();
+  private readonly bufferBytes = new Map<string, number>();
   private frameCount = 0;
+  private totalBytes = 0;
   private lastPruneMs = 0;
 
-  post(from: string, to: string, data: string, nowMs: number): void {
+  post(from: string, to: string, data: string, nowMs: number): boolean {
+    const dataBytes = Buffer.byteLength(data, 'utf8');
+    if (dataBytes > MAX_TUNNEL_DATA_BYTES) return false;
     if (nowMs - this.lastPruneMs >= TUNNEL_TTL_MS) {
       this.prune(nowMs);
     }
@@ -48,38 +57,60 @@ export class TunnelHub {
     // Touch for LRU: delete + re-insert so active pairs move to the end and the
     // oldest pair sits at the front for eviction.
     const buf = this.buffers.get(key) ?? [];
+    let pairBytes = this.bufferBytes.get(key) ?? 0;
     this.buffers.delete(key);
-    buf.push({ data, ts: nowMs });
+    this.bufferBytes.delete(key);
+    buf.push({ data, ts: nowMs, bytes: dataBytes });
     this.frameCount++;
-    if (buf.length > MAX_BUFFER) {
-      const removed = buf.length - MAX_BUFFER;
-      buf.splice(0, removed);
-      this.frameCount -= removed;
+    this.totalBytes += dataBytes;
+    pairBytes += dataBytes;
+    while (buf.length > MAX_BUFFER || pairBytes > MAX_PAIR_BYTES) {
+      const removed = buf.shift();
+      if (removed == null) break;
+      this.frameCount--;
+      this.totalBytes -= removed.bytes;
+      pairBytes -= removed.bytes;
     }
     this.buffers.set(key, buf);
+    this.bufferBytes.set(key, pairBytes);
     // Evict the least-recently-posted pair once over the cap.
     while (
       this.buffers.size > MAX_PAIRS ||
-      this.frameCount > MAX_TOTAL_FRAMES
+      this.frameCount > MAX_TOTAL_FRAMES ||
+      this.totalBytes > MAX_TOTAL_BYTES
     ) {
       const oldest = this.buffers.keys().next().value;
       if (oldest === undefined) break;
-      this.frameCount -= this.buffers.get(oldest)?.length ?? 0;
-      this.buffers.delete(oldest);
+      this.deletePair(oldest);
     }
+    return true;
   }
 
   private prune(nowMs: number): void {
-    for (const [key, buf] of this.buffers) {
+    for (const [key, buf] of [...this.buffers.entries()]) {
       const fresh = buf.filter((entry) => nowMs - entry.ts <= TUNNEL_TTL_MS);
-      this.frameCount -= buf.length - fresh.length;
+      this.deletePair(key);
       if (fresh.length === 0) {
-        this.buffers.delete(key);
-      } else if (fresh.length !== buf.length) {
-        this.buffers.set(key, fresh);
+        continue;
       }
+      this.putPair(key, fresh);
     }
     this.lastPruneMs = nowMs;
+  }
+
+  private deletePair(key: string): void {
+    this.frameCount -= this.buffers.get(key)?.length ?? 0;
+    this.totalBytes -= this.bufferBytes.get(key) ?? 0;
+    this.buffers.delete(key);
+    this.bufferBytes.delete(key);
+  }
+
+  private putPair(key: string, entries: TunnelEntry[]): void {
+    const bytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+    this.buffers.set(key, entries);
+    this.bufferBytes.set(key, bytes);
+    this.frameCount += entries.length;
+    this.totalBytes += bytes;
   }
 
   /** Drains buffered frames for [to] from [from], pruning stale entries. */
@@ -88,9 +119,10 @@ export class TunnelHub {
     const buf = this.buffers.get(key);
     if (!buf) return [];
     const fresh = buf.filter((e) => nowMs - e.ts <= TUNNEL_TTL_MS);
-    this.frameCount -= buf.length;
-    this.buffers.delete(key);
-    return fresh.map((e) => e.data);
+    this.deletePair(key);
+    const drained = fresh.splice(0, MAX_DRAIN_FRAMES);
+    if (fresh.length > 0) this.putPair(key, fresh);
+    return drained.map((e) => e.data);
   }
 }
 
@@ -135,7 +167,9 @@ export function addTunnelRoutes(
     if (!tunnelLimiter.allow(pairKey, Date.now())) {
       return c.json({ error: 'rate limited' }, 429);
     }
-    hub.post(body.from, body.to, body.data, Date.now());
+    if (!hub.post(body.from, body.to, body.data, Date.now())) {
+      return c.json({ error: 'tunnel frame too large' }, 413);
+    }
     return c.json({ ok: true });
   });
 
