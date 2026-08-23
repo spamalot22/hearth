@@ -67,6 +67,7 @@ class ScreenBroadcast {
     required String channelId,
     required Identity identity,
     required Uri relayUrl,
+    List<Uri> fallbackUrls = const [],
     required DesktopCapturerSource source,
     required ScreenResolution resolution,
     required void Function() onEnded,
@@ -77,6 +78,7 @@ class ScreenBroadcast {
     );
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
+      fallbackUrls: fallbackUrls,
       channel: screenMeshChannel(channelId, identity.publicKeyHex),
       identity: identity,
       localStream: stream,
@@ -138,6 +140,7 @@ class ScreenView {
     required String sharerHex,
     required Identity identity,
     required Uri relayUrl,
+    List<Uri> fallbackUrls = const [],
     required void Function() onChange,
     bool Function(String peerHex)? peerAllowed,
   }) async {
@@ -146,6 +149,7 @@ class ScreenView {
     late final ScreenView view;
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
+      fallbackUrls: fallbackUrls,
       channel: screenMeshChannel(channelId, sharerHex),
       identity: identity,
       forceInitiator: false, // answer-only; the sharer offers

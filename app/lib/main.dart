@@ -4730,6 +4730,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         identity: widget.identity,
         meshIdentity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
+        fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
         onChange: _voiceChanged,
         enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
         candidateCache: _channels?.candidateCache,
@@ -4846,6 +4847,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         channelId: session.channelId,
         identity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
+        fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
         source: choice.source,
         resolution: choice.resolution,
         peerAllowed: (peerHex) =>
@@ -4893,6 +4895,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         sharerHex: sharerHex,
         identity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
+        fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
         onChange: _voiceChanged,

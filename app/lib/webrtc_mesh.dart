@@ -71,9 +71,9 @@ class WebRtcMesh {
   /// The relay currently being used (follows failover).
   Uri get activeUrl => _activeUrl;
 
-  /// Last time the primary relay was confirmed reachable — used to periodically
-  /// re-prefer it after a failover so we don't stay pinned to a fallback forever.
-  DateTime _primaryOkAt = DateTime.now();
+  /// Last time the primary relay was probed — used to periodically re-prefer it
+  /// after a failover without routing traffic to it before the probe succeeds.
+  DateTime _primaryProbeAt = DateTime.now();
 
   /// Channel everyone in this mesh shares.
   final String channel;
@@ -259,8 +259,10 @@ class WebRtcMesh {
 
   /// Forces an immediate re-announce (e.g. after relay recovery).
   void forceAnnounce() {
+    if (_closed) return;
     _announceTimer?.cancel();
     unawaited(_announce());
+    if (_started) _scheduleAnnounce();
   }
 
   /// Closes links that no longer satisfy a dynamic admission policy (for
@@ -298,14 +300,16 @@ class WebRtcMesh {
       // Re-probe the primary ~once a minute so we return to it after it
       // recovers — otherwise failover is sticky and we'd stay on a fallback
       // indefinitely even once the primary is healthy again.
-      if (_activeUrl != baseUrl &&
-          DateTime.now().difference(_primaryOkAt) >
-              const Duration(seconds: 60)) {
-        _activeUrl = baseUrl;
-        _primaryOkAt = DateTime.now();
-      }
-      // Try active URL first, then fallbacks.
-      final urls = {_activeUrl, ...fallbackUrls, baseUrl}.toList();
+      final now = DateTime.now();
+      final probePrimary =
+          _activeUrl != baseUrl &&
+          now.difference(_primaryProbeAt) > const Duration(seconds: 60);
+      if (probePrimary) _primaryProbeAt = now;
+      // Probe the primary first when due, but keep the working relay active
+      // until the probe has returned a complete, valid announce response.
+      final urls = probePrimary
+          ? {baseUrl, _activeUrl, ...fallbackUrls}.toList()
+          : {_activeUrl, ...fallbackUrls, baseUrl}.toList();
       for (final url in urls) {
         try {
           final res = await _client
@@ -316,11 +320,11 @@ class WebRtcMesh {
               )
               .timeout(const Duration(seconds: 5));
           if (res.statusCode != 200) continue;
-          _activeUrl = url;
-          if (url == baseUrl) _primaryOkAt = DateTime.now();
           final body = jsonDecode(res.body) as Map<String, dynamic>;
           final token = body['token'];
           if (token is! String || token.isEmpty) continue;
+          _activeUrl = url;
+          if (url == baseUrl) _primaryProbeAt = DateTime.now();
           if (_observeRelay(url, body['relayEpoch'])) {
             _signalSince = 0;
             retrySignals = true;
@@ -614,6 +618,7 @@ class WebRtcMesh {
     late final RelayTunnel tunnel;
     tunnel = RelayTunnel(
       baseUrl: _activeUrl,
+      baseUrlProvider: () => _activeUrl,
       identity: identity,
       peerPubkeyHex: peerHex,
       authToken: _authToken,

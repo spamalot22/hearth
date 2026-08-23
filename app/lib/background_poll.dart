@@ -139,7 +139,7 @@ Future<void> _pollFromStorage() async {
       var since = cursorBox.get(channelId) ?? 0;
       var body = await _fetchPoll(relay, channelId, since);
       if (body == null) continue;
-      final responseEpoch = body['relayEpoch'];
+      var responseEpoch = body['relayEpoch'];
       if (responseEpoch is String && responseEpoch.isNotEmpty) {
         final previousEpoch = epochBox.get(channelId);
         if (previousEpoch != null && previousEpoch != responseEpoch) {
@@ -147,8 +147,11 @@ Future<void> _pollFromStorage() async {
           await cursorBox.put(channelId, since);
           body = await _fetchPoll(relay, channelId, since);
           if (body == null) continue;
+          responseEpoch = body['relayEpoch'];
         }
-        await epochBox.put(channelId, responseEpoch);
+        if (responseEpoch is String && responseEpoch.isNotEmpty) {
+          await epochBox.put(channelId, responseEpoch);
+        }
       }
       final messages = body['messages'] as List? ?? [];
       final seqValue = body['seq'];

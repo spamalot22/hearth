@@ -18,6 +18,7 @@ import 'package:http/http.dart' as http;
 class RelayTunnel implements FrameChannel {
   RelayTunnel({
     required this.baseUrl,
+    this.baseUrlProvider,
     required this.identity,
     required this.peerPubkeyHex,
     this.authToken,
@@ -29,6 +30,7 @@ class RelayTunnel implements FrameChannel {
        _peerPublicKey = Uint8List.fromList(hex.decode(peerPubkeyHex));
 
   final Uri baseUrl;
+  final Uri Function()? baseUrlProvider;
   final Identity identity;
   final String peerPubkeyHex;
   final String? authToken;
@@ -61,6 +63,7 @@ class RelayTunnel implements FrameChannel {
   static const List<int> _fragmentMagic = [0x48, 0x54, 0x31, 0x00];
 
   String get selfPubkeyHex => identity.publicKeyHex;
+  Uri get _url => baseUrlProvider?.call() ?? baseUrl;
   String? get _token => authTokenProvider?.call() ?? authToken;
 
   /// True after at least one valid frame has arrived from the peer.
@@ -128,7 +131,7 @@ class RelayTunnel implements FrameChannel {
         final token = _token;
         final res = await _client
             .post(
-              baseUrl.replace(path: '/tunnel'),
+              _url.replace(path: '/tunnel'),
               body: jsonEncode({
                 'from': selfPubkeyHex,
                 'to': peerPubkeyHex,
@@ -171,7 +174,7 @@ class RelayTunnel implements FrameChannel {
       if (token != null) headers['Authorization'] = 'Bearer $token';
       final res = await _client
           .get(
-            baseUrl.replace(path: '/tunnel', queryParameters: params),
+            _url.replace(path: '/tunnel', queryParameters: params),
             headers: headers,
           )
           .timeout(_requestTimeout);

@@ -50,6 +50,46 @@ void main() {
     await tunnel.close();
   });
 
+  test('follows relay URL changes for uploads and polling', () async {
+    final self = await Identity.generate();
+    final peer = await Identity.generate();
+    final requests = <String>[];
+    var relayUrl = Uri.parse('https://primary.example');
+    final client = MockClient((request) async {
+      requests.add('${request.method} ${request.url.host}');
+      return request.method == 'GET'
+          ? http.Response(jsonEncode({'frames': <String>[]}), 200)
+          : http.Response('{}', 200);
+    });
+    final tunnel = RelayTunnel(
+      baseUrl: relayUrl,
+      baseUrlProvider: () => relayUrl,
+      identity: self,
+      peerPubkeyHex: peer.publicKeyHex,
+      authToken: 'token',
+      pollInterval: const Duration(milliseconds: 5),
+      client: client,
+    );
+
+    tunnel.start();
+    tunnel.send(const HaveFrame([]));
+    await _waitUntil(
+      () =>
+          requests.contains('POST primary.example') &&
+          requests.contains('GET primary.example'),
+    );
+
+    relayUrl = Uri.parse('https://fallback.example');
+    tunnel.send(const HaveFrame([]));
+    await _waitUntil(
+      () =>
+          requests.contains('POST fallback.example') &&
+          requests.contains('GET fallback.example'),
+    );
+
+    await tunnel.close();
+  });
+
   test('rejects unauthenticated plaintext tunnel frames', () async {
     final self = await Identity.generate();
     final peer = await Identity.generate();

@@ -75,6 +75,7 @@ class VoiceSession {
     required Identity identity,
     Identity? meshIdentity,
     required Uri relayUrl,
+    List<Uri> fallbackUrls = const [],
     required void Function() onChange,
     bool enhancedNoiseSuppression = false,
     CandidateCache? candidateCache,
@@ -147,6 +148,7 @@ class VoiceSession {
     late final VoiceSession session;
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
+      fallbackUrls: fallbackUrls,
       channel: 'voice:$channelId',
       identity: meshIdentity ?? identity,
       localStream: stream,
