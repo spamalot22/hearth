@@ -179,6 +179,9 @@ pure P2P, so the happy path needs no server. It's optional and swappable (the
 client points at any relay URL), and is designed to **self-host** as a single
 in-memory Docker container behind a tunnel (no port-forward). Deployed on a
 small always-on host via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
+Each relay process publishes a random `relayEpoch`; clients bind their signalling
+and courier cursors to that generation and reset them after a container restart
+or relay failover, because the relay's in-memory sequence numbers restart at zero.
 
 When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
 (`/tunnel`) forwards bounded, encrypted fragments between the stuck peers. Large

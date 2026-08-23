@@ -96,6 +96,67 @@ void main() {
       expect(second, isEmpty); // cursor advanced; nothing new
     });
 
+    test('poll resets its cursor when the relay process restarts', () async {
+      final afterRestart = await Message.create(
+        author: author,
+        channel: 'general',
+        payload: _b('after restart'),
+      );
+      final requestedSince = <int>[];
+      var request = 0;
+      final client = MockClient((req) async {
+        final since = int.parse(req.url.queryParameters['since']!);
+        requestedSince.add(since);
+        request++;
+        if (request == 1) {
+          return http.Response(
+            jsonEncode({
+              'messages': <Object?>[],
+              'seq': 100,
+              'latestSeq': 100,
+              'relayEpoch': 'before',
+            }),
+            200,
+          );
+        }
+        if (since > 0) {
+          return http.Response(
+            jsonEncode({
+              'messages': <Object?>[],
+              'seq': since,
+              'latestSeq': 1,
+              'relayEpoch': 'after',
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'messages': [
+              {'seq': 1, ...afterRestart.toJson()},
+            ],
+            'seq': 1,
+            'latestSeq': 1,
+            'relayEpoch': 'after',
+          }),
+          200,
+        );
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'general',
+        client: client,
+      );
+
+      expect(await transport.poll(), isEmpty);
+      final received = await transport.poll();
+
+      expect(requestedSince, [0, 100, 0]);
+      expect(received.map((message) => message.idHex), [afterRestart.idHex]);
+      expect(transport.since, 1);
+      expect(transport.relayEpoch, 'after');
+    });
+
     test('poll drops messages that fail verification', () async {
       final good = await Message.create(
         author: author,
@@ -325,6 +386,49 @@ void main() {
       expect(captured[1].host, 'fallback.test');
       expect(captured[1].path, '/messages');
     });
+
+    test(
+      'switching relay endpoints resets the endpoint-local cursor',
+      () async {
+        var active = Uri.parse('http://primary.test');
+        final requests = <String>[];
+        final client = MockClient((req) async {
+          final since = int.parse(req.url.queryParameters['since']!);
+          requests.add('${req.url.host}:$since');
+          if (req.url.host == 'primary.test') {
+            return http.Response(
+              jsonEncode({
+                'messages': <Object?>[],
+                'seq': 50,
+                'relayEpoch': 'primary',
+              }),
+              200,
+            );
+          }
+          return http.Response(
+            jsonEncode({
+              'messages': <Object?>[],
+              'seq': 0,
+              'relayEpoch': 'fallback',
+            }),
+            200,
+          );
+        });
+        final transport = RelayTransport(
+          baseUrl: active,
+          channel: 'ch1',
+          client: client,
+          baseUrlProvider: () => active,
+        );
+
+        await transport.poll();
+        active = Uri.parse('http://fallback.test');
+        await transport.poll();
+
+        expect(requests, ['primary.test:0', 'fallback.test:0']);
+        expect(transport.relayEpoch, 'fallback');
+      },
+    );
 
     test('baseUrlProvider null falls back to baseUrl', () async {
       Uri? capturedUrl;

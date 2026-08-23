@@ -108,10 +108,12 @@ describe('signalling routes', () => {
     const sig = (await sigRes.json()) as {
       signals: { from: string; kind: string }[];
       seq: number;
+      relayEpoch: string;
     };
     expect(sig.signals).toHaveLength(1);
     expect(sig.signals[0]!.from).toBe(aliceHex);
     expect(sig.signals[0]!.kind).toBe('offer');
+    expect(sig.relayEpoch).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it('rejects malformed signal json and invalid signal kinds', async () => {

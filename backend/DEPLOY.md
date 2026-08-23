@@ -93,7 +93,8 @@ Then in Hearth on each device: drawer → **Relay** → that URL → restart. De
   field. This stack keeps relay and Tailscale lifecycles independent, so both should
   return after Docker starts. If the deployed relay still uses
   `network_mode: service:tailscale`, pull and redeploy the complete stack to apply the
-  private-bridge layout.
+  private-bridge layout. `/health` includes a `relayEpoch` that changes on every relay
+  process start; current clients use it to reset the relay's in-memory sequence cursors.
 - **`502` after a ~20s hang** — Funnel reached the node but the relay didn't answer.
   Almost always **userspace mode** (`TS_USERSPACE=true`): it configures Funnel but
   never receives inbound traffic. Use kernel mode (the default). Confirm the relay

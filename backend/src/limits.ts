@@ -45,8 +45,16 @@ export const SIGNAL_RATE_WINDOW_MS = 10_000;
 export const MESSAGE_RATE_LIMIT = 30;
 export const MESSAGE_RATE_WINDOW_MS = 10_000;
 
-/** Per-IP: global request cap (catches keypair-rotating attackers). */
-export const IP_RATE_LIMIT = 60;
+/**
+ * Per-IP global request cap (catches keypair-rotating attackers).
+ *
+ * A client keeps one signalling poller per open channel plus a standing contact
+ * rendezvous, and several clients commonly share one public NAT address. Sixty
+ * requests/minute let normal bootstrap traffic rate-limit its own SDP/ICE. Five
+ * requests/second still bounds abusive sources while leaving room for that
+ * legitimate fan-out; authenticated routes retain their tighter per-key caps.
+ */
+export const IP_RATE_LIMIT = 300;
 export const IP_RATE_WINDOW_MS = 60_000;
 
 /** Per-pair tunnel fragments per window (a 10 MB blob needs about 350). */

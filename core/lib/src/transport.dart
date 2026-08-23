@@ -63,10 +63,16 @@ class RelayTransport implements Transport {
   bool _busy = false;
   bool _paused = false;
   bool _moreAvailable = false;
+  String? _relayEpoch;
+  Uri? _cursorUrl;
+  bool _epochObserved = false;
   static const _requestTimeout = Duration(seconds: 10);
 
   /// The poll cursor (relay sequence number seen so far).
   int get since => _since;
+
+  /// The relay process generation associated with [since].
+  String? get relayEpoch => _relayEpoch;
 
   @override
   Stream<Message> get incoming => _incoming.stream;
@@ -121,15 +127,39 @@ class RelayTransport implements Transport {
 
   /// One poll round: fetches messages newer than the cursor, returns only those
   /// that verify, and advances the cursor.
-  Future<List<Message>> poll() async {
+  Future<List<Message>> poll() => _poll(allowEpochRetry: true);
+
+  Future<List<Message>> _poll({required bool allowEpochRetry}) async {
+    final url = _url;
+    if (_cursorUrl != null && _cursorUrl != url) {
+      // Sequence numbers are local to one relay process. A failover endpoint
+      // has an unrelated sequence space; repository dedup makes replay safe.
+      _since = 0;
+      _relayEpoch = null;
+      _epochObserved = false;
+    }
+    _cursorUrl = url;
     final params = <String, String>{'channel': channel, 'since': '$_since'};
     final res = await _client
-        .get(_url.replace(path: '/poll', queryParameters: params))
+        .get(url.replace(path: '/poll', queryParameters: params))
         .timeout(_requestTimeout);
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
     }
     final body = jsonDecode(res.body) as Map<String, dynamic>;
+    final responseEpoch = body['relayEpoch'];
+    if (responseEpoch is String && responseEpoch.isNotEmpty) {
+      final changed = _epochObserved && _relayEpoch != responseEpoch;
+      _relayEpoch = responseEpoch;
+      if (changed && allowEpochRetry) {
+        // The relay is in-memory, so a process restart resets all sequence
+        // numbers. Retry once from zero to receive post-restart messages.
+        _since = 0;
+        _moreAvailable = true;
+        return _poll(allowEpochRetry: false);
+      }
+    }
+    _epochObserved = true;
     _moreAvailable = body['more'] == true;
     final seqValue = body['seq'];
     if (seqValue is int && seqValue > _since) _since = seqValue;

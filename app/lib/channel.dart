@@ -204,6 +204,9 @@ class ChannelSession {
   /// session has no live courier. Used to seed the background poller's baseline.
   int? get relaySince => _relayCourier?.since;
 
+  /// Relay process generation associated with [relaySince].
+  String? get relayEpoch => _relayCourier?.relayEpoch;
+
   static Future<ChannelSession> open({
     required String channelId,
     required Identity identity,

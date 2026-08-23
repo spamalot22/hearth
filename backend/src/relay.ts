@@ -2,6 +2,7 @@
 import { Hono, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
+import { randomBytes } from 'node:crypto';
 
 import { addGifRoutes } from './gif';
 import {
@@ -106,6 +107,7 @@ export function createRelay(
   store: RelayStore = new RelayStore(),
   signalHub: SignalHub = new SignalHub(),
   tunnelHub: TunnelHub = new TunnelHub(),
+  relayEpoch = randomBytes(16).toString('hex'),
 ): Hono {
   const app = new Hono();
 
@@ -122,7 +124,7 @@ export function createRelay(
     }),
   );
 
-  app.get('/health', (c) => c.json({ ok: true }));
+  app.get('/health', (c) => c.json({ ok: true, relayEpoch }));
 
   // Per-IP global rate limit — catches keypair-rotating attackers. Applied to
   // all routes except /health (which load balancers hit frequently).
@@ -169,7 +171,7 @@ export function createRelay(
   app.use('/tunnel', limitTunnelIp);
 
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
-  addSignalingRoutes(app, signalHub);
+  addSignalingRoutes(app, signalHub, relayEpoch);
 
   // Cap the media-search proxies relay-wide so a stranger can't drain the provider
   // quota. Also requires a valid announce token (proves you're a Hearth client, not
@@ -239,7 +241,13 @@ export function createRelay(
     const messages = fresh.map((m) => ({ seq: m.seq, ...m.message }));
     const seq = fresh.length ? fresh[fresh.length - 1]!.seq : since;
     const latestSeq = store.latestSeq(channel);
-    return c.json({ messages, seq, latestSeq, more: seq < latestSeq });
+    return c.json({
+      messages,
+      seq,
+      latestSeq,
+      more: seq < latestSeq,
+      relayEpoch,
+    });
   });
 
   return app;

@@ -144,6 +144,9 @@ class WebRtcMesh {
   final Map<String, int> _backoffFailures = {}; // consecutive failure count
   final Map<String, RelayTunnel> _tunnels = {}; // peerHex -> active tunnel
   final Map<String, List<Map<String, Object?>>> _earlyRemoteIce = {};
+  String? _relayEpoch;
+  Uri? _signalCursorUrl;
+  bool _relayObserved = false;
 
   late final StreamController<FrameChannel> _peerConnected =
       StreamController<FrameChannel>.broadcast(onListen: _start);
@@ -239,6 +242,21 @@ class WebRtcMesh {
   /// The current announce token (valid for ~60s, refreshed each announce cycle).
   String? get authToken => _authToken;
 
+  /// Associates the signal cursor with one relay process. Returns true when
+  /// the endpoint or process generation changed and the cursor must restart.
+  bool _observeRelay(Uri url, Object? epochValue) {
+    var changed = _signalCursorUrl != null && _signalCursorUrl != url;
+    if (epochValue is String && epochValue.isNotEmpty) {
+      changed = changed || (_relayObserved && _relayEpoch != epochValue);
+      _relayEpoch = epochValue;
+    } else if (changed) {
+      _relayEpoch = null;
+    }
+    _signalCursorUrl = url;
+    _relayObserved = true;
+    return changed;
+  }
+
   /// Forces an immediate re-announce (e.g. after relay recovery).
   void forceAnnounce() {
     _announceTimer?.cancel();
@@ -264,6 +282,7 @@ class WebRtcMesh {
   Future<void> _announce() async {
     if (_announcing || _closed) return;
     _announcing = true;
+    var retrySignals = false;
     try {
       final ts = DateTime.now().toUtc().millisecondsSinceEpoch;
       final sigBytes = await identity.sign(
@@ -302,6 +321,10 @@ class WebRtcMesh {
           final body = jsonDecode(res.body) as Map<String, dynamic>;
           final token = body['token'];
           if (token is! String || token.isEmpty) continue;
+          if (_observeRelay(url, body['relayEpoch'])) {
+            _signalSince = 0;
+            retrySignals = true;
+          }
           _authToken = token;
           final peers = body['peers'];
           if (peers is List) {
@@ -318,6 +341,7 @@ class WebRtcMesh {
       }
     } finally {
       _announcing = false;
+      if (retrySignals && !_closed) unawaited(_pollSignals());
     }
   }
 
@@ -325,6 +349,7 @@ class WebRtcMesh {
   Future<void> _pollSignals() async {
     if (_pollingSignals || _closed) return;
     _pollingSignals = true;
+    var retry = false;
     try {
       final params = <String, String>{
         'channel': channel,
@@ -333,14 +358,21 @@ class WebRtcMesh {
       };
       final headers = <String, String>{};
       if (_authToken != null) headers['Authorization'] = 'Bearer $_authToken';
+      final pollUrl = _activeUrl;
       final res = await _client
           .get(
-            _activeUrl.replace(path: '/signal', queryParameters: params),
+            pollUrl.replace(path: '/signal', queryParameters: params),
             headers: headers,
           )
           .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) return;
+      if (pollUrl != _activeUrl) return;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (_observeRelay(pollUrl, body['relayEpoch'])) {
+        _signalSince = 0;
+        retry = true;
+        return;
+      }
       final signals = body['signals'];
       if (signals is List) {
         for (final raw in signals.take(256)) {
@@ -359,6 +391,7 @@ class WebRtcMesh {
       // Transient — the next tick retries.
     } finally {
       _pollingSignals = false;
+      if (retry && !_closed) unawaited(_pollSignals());
     }
   }
 

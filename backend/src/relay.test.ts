@@ -9,6 +9,7 @@ import {
   type WireMessage,
   verifyWire,
 } from './message';
+import { IP_RATE_LIMIT } from './limits';
 import { createRelay, RelayStore } from './relay';
 
 function b64url(b: Uint8Array): string {
@@ -132,6 +133,19 @@ describe('relay', () => {
     expect(second.messages).toHaveLength(1);
   });
 
+  it('reports one relay epoch across health and courier polling', async () => {
+    const app = createRelay(undefined, undefined, undefined, 'test-epoch');
+    const health = (await (await app.request('/health')).json()) as {
+      relayEpoch: string;
+    };
+    const poll = (await (await app.request(
+      '/poll?channel=general&since=0',
+    )).json()) as { relayEpoch: string };
+
+    expect(health.relayEpoch).toBe('test-epoch');
+    expect(poll.relayEpoch).toBe('test-epoch');
+  });
+
   it('paginates large backlogs and exposes the channel head', async () => {
     const store = new RelayStore();
     const wire = await makeWire('message');
@@ -214,7 +228,7 @@ describe('relay', () => {
   it('cannot bypass the IP limiter with forged forwarded prefixes', async () => {
     const app = createRelay();
     let lastStatus = 0;
-    for (let i = 0; i <= 60; i++) {
+    for (let i = 0; i <= IP_RATE_LIMIT; i++) {
       const res = await app.request('/poll?channel=general', {
         headers: {
           'x-forwarded-for': `198.51.100.${i}, 203.0.113.10`,
@@ -224,5 +238,18 @@ describe('relay', () => {
     }
 
     expect(lastStatus).toBe(429);
+  });
+
+  it('allows a shared NAT bootstrap burst without starving signalling', async () => {
+    const app = createRelay();
+    for (let i = 0; i < 100; i++) {
+      const route = i % 2 === 0
+        ? '/poll?channel=general'
+        : `/signal?channel=general&for=${'a'.repeat(64)}`;
+      const res = await app.request(route, {
+        headers: { 'x-forwarded-for': '198.51.100.2, 203.0.113.10' },
+      });
+      expect(res.status).not.toBe(429);
+    }
   });
 });

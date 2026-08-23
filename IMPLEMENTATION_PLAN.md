@@ -1008,3 +1008,12 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
     identity switch. Backup/restore/rename/revoke correctly guarded for canSign.
   A revoked device is now **cryptographically locked out** of future DMs — it
   receives no key wrap in future `MultiDeviceBox` messages.
+- **2026-08-23** — **Relay restart recovery and shared-NAT bootstrap hardening.**
+  Relay responses now carry a random process epoch. Foreground signalling,
+  foreground courier polling, and Android background polling bind their cursors
+  to that epoch and retry from zero after a container restart or relay failover,
+  preventing a pre-restart cursor from suppressing every new offer/message.
+  Increased the bounded per-IP request budget from 60 to 300 requests/minute:
+  two clients behind one router each maintain channel, voice, and standing
+  contact rendezvous loops, and the old ceiling could rate-limit their own SDP
+  and ICE before a direct P2P link formed.

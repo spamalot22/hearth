@@ -204,6 +204,7 @@ export class SignalHub {
 export function addSignalingRoutes(
   app: Hono,
   hub: SignalHub,
+  relayEpoch: string,
   now: () => number = Date.now,
 ): void {
   // Announce presence in a channel; returns the other live peers to connect to.
@@ -255,7 +256,7 @@ export function addSignalingRoutes(
       }
       const peers = hub.announce(body.channel, body.pubkey, now());
       const token = hub.issueToken(body.pubkey, now());
-      return c.json({ peers, token });
+      return c.json({ peers, token, relayEpoch });
     }
     // Unsigned announce — reject (no backward compat needed).
     return c.json({ error: 'signature required' }, 403);
@@ -330,6 +331,6 @@ export function addSignalingRoutes(
     const since = Number.isSafeInteger(sinceRaw) && sinceRaw >= 0 ? sinceRaw : 0;
     const signals = hub.signalsSince(channel, forPubkey, since, now());
     const seq = signals.length ? signals[signals.length - 1]!.seq : since;
-    return c.json({ signals, seq });
+    return c.json({ signals, seq, relayEpoch });
   });
 }

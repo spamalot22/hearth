@@ -60,12 +60,14 @@ Future<void> initBackgroundFetch() async {
 /// [cursors] seeds each channel's poll cursor with the relay seq the foreground
 /// has already caught up to, so the background poll only counts genuinely-new
 /// messages — never the whole backlog, never messages already read in-app. A
-/// cursor is only ever advanced, never rewound. [selfAuthor] is the local
-/// identity's base64url author key, used to skip our own echoed messages.
+/// cursor is only rewound when [epochs] proves the in-memory relay restarted.
+/// [selfAuthor] is the local identity's base64url author key, used to skip our
+/// own echoed messages.
 Future<void> saveBackgroundPollState({
   required String relayUrl,
   required List<String> channelIds,
   Map<String, int> cursors = const {},
+  Map<String, String> epochs = const {},
   Map<String, String> names = const {},
   String? selfAuthor,
 }) async {
@@ -76,16 +78,36 @@ Future<void> saveBackgroundPollState({
   // Channel id -> local name, so per-channel notifications can be labelled.
   await box.put('names', jsonEncode(names));
   if (selfAuthor != null) await box.put('self', selfAuthor);
-  if (cursors.isNotEmpty) {
+  if (cursors.isNotEmpty || epochs.isNotEmpty) {
     final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
+    final epochBox = await Hive.openBox<String>('hearth.bg_epochs');
+    for (final entry in epochs.entries) {
+      final previous = epochBox.get(entry.key);
+      if (previous != null && previous != entry.value) {
+        await cursorBox.put(entry.key, cursors[entry.key] ?? 0);
+      }
+      await epochBox.put(entry.key, entry.value);
+    }
     for (final entry in cursors.entries) {
-      // Only ever move the cursor forward — rewinding would re-notify messages
-      // a previous background poll already reported.
+      // Within one relay generation, only move forward.
       if (entry.value > (cursorBox.get(entry.key) ?? 0)) {
         await cursorBox.put(entry.key, entry.value);
       }
     }
   }
+}
+
+Future<Map<String, dynamic>?> _fetchPoll(
+  Uri relay,
+  String channelId,
+  int since,
+) async {
+  final params = <String, String>{'channel': channelId, 'since': '$since'};
+  final res = await http
+      .get(relay.replace(path: '/poll', queryParameters: params))
+      .timeout(const Duration(seconds: 10));
+  if (res.statusCode != 200) return null;
+  return jsonDecode(res.body) as Map<String, dynamic>;
 }
 
 /// Polls relay from Hive-stored state (works in headless isolate).
@@ -106,6 +128,7 @@ Future<void> _pollFromStorage() async {
     final relay = Uri.parse(relayUrl);
     final channels = channelsRaw.split(',').where((s) => s.isNotEmpty).toList();
     final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
+    final epochBox = await Hive.openBox<String>('hearth.bg_epochs');
 
     // Per-channel new counts → one notification per group/DM (below).
     final newPerChannel = <String, int>{};
@@ -113,15 +136,20 @@ Future<void> _pollFromStorage() async {
       // First time we ever poll this channel in the background: establish the
       // baseline silently instead of notifying for the entire backlog.
       final hasBaseline = cursorBox.containsKey(channelId);
-      final since = cursorBox.get(channelId) ?? 0;
-      final params = <String, String>{'channel': channelId, 'since': '$since'};
-
-      final res = await http
-          .get(relay.replace(path: '/poll', queryParameters: params))
-          .timeout(const Duration(seconds: 10));
-      if (res.statusCode != 200) continue;
-
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      var since = cursorBox.get(channelId) ?? 0;
+      var body = await _fetchPoll(relay, channelId, since);
+      if (body == null) continue;
+      final responseEpoch = body['relayEpoch'];
+      if (responseEpoch is String && responseEpoch.isNotEmpty) {
+        final previousEpoch = epochBox.get(channelId);
+        if (previousEpoch != null && previousEpoch != responseEpoch) {
+          since = 0;
+          await cursorBox.put(channelId, since);
+          body = await _fetchPoll(relay, channelId, since);
+          if (body == null) continue;
+        }
+        await epochBox.put(channelId, responseEpoch);
+      }
       final messages = body['messages'] as List? ?? [];
       final seqValue = body['seq'];
       final seq = seqValue is int && seqValue > since ? seqValue : since;

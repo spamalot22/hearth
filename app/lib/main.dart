@@ -1366,6 +1366,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       for (final s in sessions)
         if ((s.relaySince ?? 0) > 0) s.channelId: s.relaySince!,
     };
+    final epochs = <String, String>{
+      for (final s in sessions)
+        if (s.relayEpoch != null) s.channelId: s.relayEpoch!,
+    };
     // Channel id -> local name, so background notifications can label each group/DM.
     final names = <String, String>{
       for (final s in sessions) s.channelId: _channelTitle(s),
@@ -1374,6 +1378,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       relayUrl: _relayUrl.toString(),
       channelIds: sessions.map((s) => s.channelId).toList(),
       cursors: cursors,
+      epochs: epochs,
       names: names,
       selfAuthor: base64Url.encode(widget.identity.publicKey),
     );
