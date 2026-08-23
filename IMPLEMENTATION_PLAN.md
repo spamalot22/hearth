@@ -645,8 +645,9 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
 - **2026-06-26** — **Relay deployed off `localhost`** (self-hosted, Portainer). The
   relay ships as a GHCR image (GH Actions on a version tag) and runs as a Portainer
   stack with an official **Tailscale Funnel sidecar** for public HTTPS — no domain, no
-  port-forward, and the **tailnet node is the container**, not the NAS (it shares a
-  netns only with the relay, so nothing else on the host is exposed). Hard-won gotchas,
+  port-forward, and the **tailnet node is the container**, not the NAS. Funnel reaches
+  the relay over a private Compose bridge, so neither service owns the other's network
+  namespace and they can restart independently. Hard-won gotchas,
   captured in `backend/DEPLOY.md`: Funnel **requires kernel mode** (a real `/dev/net/tun`
   + `NET_ADMIN`) — userspace mode configures Funnel but never receives inbound traffic
   (silent 502); the **Funnel ACL `nodeAttrs` grant** is needed because the container's

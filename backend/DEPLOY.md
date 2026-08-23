@@ -52,9 +52,10 @@ credential in Portainer (a **classic PAT with `read:packages`**).
 | `TAG` | no | image tag (default `latest`) |
 
 The stack runs a digest-pinned official `tailscale/tailscale` **sidecar** (joins your
-tailnet as the node, runs Funnel) plus the relay sharing its network namespace. Funnel
-proxies to the relay on localhost and **nothing else on the host is exposed** — the
-tailnet node is the *container*, not your NAS.
+tailnet as the node and runs Funnel) plus the relay on a private Compose bridge. Funnel
+proxies to `http://relay:8787` using Docker DNS. Port 8787 is not published on the host,
+and the containers can restart independently — the tailnet node is the Tailscale
+container, not your NAS.
 
 The Tailscale image is intentionally not managed by Watchtower. A mutable `latest`
 image can replace and restart the sidecar without any Git change; this previously left
@@ -87,19 +88,21 @@ Then in Hearth on each device: drawer → **Relay** → that URL → restart. De
 **not** need to be on your tailnet (Funnel is public).
 
 ## Troubleshooting (things we actually hit)
-- **Tailscale is running but the relay is stopped and has no logs** — the relay shares
-  Tailscale's container network namespace. If an updater replaces only the Tailscale
-  container, the existing relay remains tied to the removed namespace and can fail
-  before its process starts, so there is no application log. Pull and redeploy the
-  complete Portainer stack; starting only the old relay container is not sufficient.
+- **Relay stopped with exit code 137 and no final log** — `137` means `SIGKILL`, commonly
+  an abrupt host shutdown or the kernel OOM killer. Check the container's `OOMKilled`
+  field. This stack keeps relay and Tailscale lifecycles independent, so both should
+  return after Docker starts. If the deployed relay still uses
+  `network_mode: service:tailscale`, pull and redeploy the complete stack to apply the
+  private-bridge layout.
 - **`502` after a ~20s hang** — Funnel reached the node but the relay didn't answer.
   Almost always **userspace mode** (`TS_USERSPACE=true`): it configures Funnel but
   never receives inbound traffic. Use kernel mode (the default). Confirm the relay
-  itself is fine by exec'ing the tailscale container: `wget -qO- http://127.0.0.1:8787/health`.
+  itself is fine by exec'ing the Tailscale container:
+  `wget -qO- http://relay:8787/health`.
 - **`curl: (35) TLS connect error: unexpected eof while reading`** — public Funnel DNS
   resolves and accepts TCP, but HTTPS is not actually being served. First confirm the
-  relay answers inside the shared network namespace:
-  `docker exec -it <tailscale-container> wget -qO- http://127.0.0.1:8787/health`.
+  relay answers over the private Compose network:
+  `docker exec -it <tailscale-container> wget -qO- http://relay:8787/health`.
   Then check `tailscale serve status` and `tailscale funnel status` inside the
   Tailscale container. If the node is online but both statuses are empty, force a full
   Portainer pull and redeploy so `tailscale-config` runs before the sidecar is recreated.

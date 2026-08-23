@@ -2,9 +2,9 @@
 # Portainer stack (Git repo or web editor) or `docker compose -f docker-compose.tailscale.yml up -d`.
 # NOTE: keep relay env/volumes in sync with docker-compose.yml.
 # Anyone can run it: it pulls the published relay image and exposes it publicly via
-# Tailscale Funnel — no domain, no port-forward, no Cloudflare. The relay shares the
-# Tailscale container's network namespace, so Funnel reaches it on localhost and the
-# relay is never otherwise exposed.
+# Tailscale Funnel — no domain, no port-forward, no Cloudflare. Funnel reaches the
+# relay by service name over a private Compose bridge; port 8787 is not published to
+# the host. The containers can therefore restart independently after a host reboot.
 #
 # Everything is configured with environment variables (Portainer → Stack → Environment):
 #   TS_AUTHKEY     (required) reusable, non-ephemeral Tailscale auth key (admin console → Keys)
@@ -51,6 +51,8 @@ services:
       - /dev/net/tun:/dev/net/tun
     cap_add:
       - NET_ADMIN
+    networks:
+      - relay-internal
     restart: always
 
   relay:
@@ -61,9 +63,12 @@ services:
       PORT: 8787
       GIPHY_KEY: ${GIPHY_KEY:-}
       FREESOUND_KEY: ${FREESOUND_KEY:-}
-    network_mode: service:tailscale # share Tailscale's netns; Funnel → localhost:8787
-    depends_on:
-      - tailscale
+    # `expose` documents the container-only listener; unlike `ports`, it does not
+    # publish 8787 on the host or LAN. Funnel connects over `relay-internal`.
+    expose:
+      - "8787"
+    networks:
+      - relay-internal
     restart: always
 
 configs:
@@ -73,7 +78,7 @@ configs:
         "TCP": { "443": { "HTTPS": true } },
         "Web": {
           "$${TS_CERT_DOMAIN}:443": {
-            "Handlers": { "/": { "Proxy": "http://127.0.0.1:8787" } }
+            "Handlers": { "/": { "Proxy": "http://relay:8787" } }
           }
         },
         "AllowFunnel": { "$${TS_CERT_DOMAIN}:443": true }
@@ -82,3 +87,7 @@ configs:
 volumes:
   tailscale-config:
   tailscale-state:
+
+networks:
+  relay-internal:
+    driver: bridge
