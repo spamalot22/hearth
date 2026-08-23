@@ -19,6 +19,34 @@ void main() {
     expect(script, contains('Copy-Item -Destination \$InstallDir'));
   });
 
+  test('Windows clients prefer the installer with ZIP compatibility', () {
+    final assets = <String, dynamic>{
+      'windows': {'file': 'hearth-windows.zip', 'sha256': 'zip'},
+      'windowsInstaller': {
+        'file': 'hearth-windows-setup.exe',
+        'sha256': 'setup',
+      },
+    };
+
+    expect(
+      selectUpdateAsset(assets, TargetPlatform.windows),
+      assets['windowsInstaller'],
+    );
+    assets.remove('windowsInstaller');
+    expect(
+      selectUpdateAsset(assets, TargetPlatform.windows),
+      assets['windows'],
+    );
+  });
+
+  test('Windows installer runs silently with recovery logging', () {
+    final args = windowsInstallerArguments(r'C:\logs\update.log');
+
+    expect(args, contains('/VERYSILENT'));
+    expect(args, contains('/CLOSEAPPLICATIONS'));
+    expect(args, contains(r'/LOG=C:\logs\update.log'));
+  });
+
   test('screen mesh is named by the authenticated sharer device', () {
     expect(screenMeshChannel('group', 'device-key'), 'screen:group:device-key');
   });

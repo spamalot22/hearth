@@ -19,9 +19,14 @@ Future<Map<String, dynamic>> _manifest(
 }) async {
   final androidHash = List.filled(64, 'a').join();
   final windowsHash = List.filled(64, 'b').join();
+  final windowsInstallerHash = List.filled(64, 'c').join();
   final assets = {
     'android': {'file': 'a.apk', 'sha256': androidHash},
     'windows': {'file': 'w.zip', 'sha256': windowsHash},
+    'windowsInstaller': {
+      'file': 'hearth-windows-setup.exe',
+      'sha256': windowsInstallerHash,
+    },
   };
   final bytes = legacyScheme
       ? utf8.encode(

@@ -133,6 +133,9 @@ jobs:
         run: |
           flutter pub get
           flutter build windows --release --dart-define=APP_VERSION=ci
+      - name: Build Windows installer
+        shell: pwsh
+        run: .github/scripts/build-windows-installer.ps1 -Version '0.0.0' -BuildDir 'app/build/windows/x64/runner/Release' -OutputDir "$env:RUNNER_TEMP"
 
   build-web:
     runs-on: ubuntu-latest

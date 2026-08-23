@@ -23,13 +23,15 @@ const int _dlFailed = 16;
 const int _maxUpdateBytes = 1024 * 1024 * 1024;
 const Duration _androidCleanupDelay = Duration(minutes: 2);
 
-/// Deletes any leftover update APKs/ZIPs from previous downloads.
+/// Deletes any leftover update packages from previous downloads.
 Future<void> cleanupOldUpdates() async {
   try {
     final dir = await getTemporaryDirectory();
     for (final f in dir.listSync()) {
       if (f is File &&
-          (f.path.endsWith('.apk') || f.path.endsWith('.zip')) &&
+          (f.path.endsWith('.apk') ||
+              f.path.endsWith('.zip') ||
+              f.path.endsWith('.exe')) &&
           f.path.contains('hearth')) {
         f.deleteSync();
       }
@@ -358,13 +360,22 @@ Future<void> _clearPending() async {
 }
 
 Map<String, dynamic>? _platformAsset(Map<String, dynamic> assets) {
-  final key = switch (defaultTargetPlatform) {
-    TargetPlatform.android => 'android',
-    TargetPlatform.windows => 'windows',
+  return selectUpdateAsset(assets, defaultTargetPlatform);
+}
+
+/// Chooses the native update package. New Windows clients prefer the installer,
+/// while manifests retain the portable ZIP for clients released before setup
+/// support existed.
+@visibleForTesting
+Map<String, dynamic>? selectUpdateAsset(
+  Map<String, dynamic> assets,
+  TargetPlatform platform,
+) {
+  final a = switch (platform) {
+    TargetPlatform.android => assets['android'],
+    TargetPlatform.windows => assets['windowsInstaller'] ?? assets['windows'],
     _ => null,
   };
-  if (key == null) return null;
-  final a = assets[key];
   return a is Map ? a.cast<String, dynamic>() : null;
 }
 
@@ -376,10 +387,16 @@ Future<void> _install(String path) async {
   throw UnsupportedError('Auto-install not supported on this platform.');
 }
 
-/// Windows can't overwrite a running .exe, so we hand off to a detached script
-/// that waits for us to exit, extracts the new build over the install dir, and
-/// relaunches. We then quit.
-Future<void> _installWindows(String zipPath) async {
+/// Installed builds hand off to the per-user setup executable. The ZIP branch
+/// remains only for signed manifests published before installer support.
+Future<void> _installWindows(String packagePath) async {
+  if (packagePath.toLowerCase().endsWith('.exe')) {
+    await _launchWindowsInstaller(packagePath);
+    exit(0);
+  }
+  if (!packagePath.toLowerCase().endsWith('.zip')) {
+    throw StateError('unsupported Windows update package');
+  }
   final exeDir = File(Platform.resolvedExecutable).parent.path;
   // A portable build can live beside unrelated user files. Never delete its
   // parent directory; update known release files in place instead.
@@ -400,7 +417,7 @@ Future<void> _installWindows(String zipPath) async {
       '-File',
       scriptPath,
       '-ZipPath',
-      zipPath,
+      packagePath,
       '-InstallDir',
       exeDir,
     ],
@@ -409,6 +426,33 @@ Future<void> _installWindows(String zipPath) async {
   );
   exit(0);
 }
+
+Future<void> _launchWindowsInstaller(String installerPath) async {
+  final localAppData = Platform.environment['LOCALAPPDATA'];
+  final logDir = Directory(
+    localAppData == null || localAppData.isEmpty
+        ? Directory.systemTemp.path
+        : '$localAppData${Platform.pathSeparator}Hearth'
+              '${Platform.pathSeparator}Logs',
+  );
+  await logDir.create(recursive: true);
+  final logPath = '${logDir.path}${Platform.pathSeparator}update-installer.log';
+  await Process.start(
+    installerPath,
+    windowsInstallerArguments(logPath),
+    mode: ProcessStartMode.detached,
+    runInShell: false,
+  );
+}
+
+@visibleForTesting
+List<String> windowsInstallerArguments(String logPath) => [
+  '/VERYSILENT',
+  '/SUPPRESSMSGBOXES',
+  '/NORESTART',
+  '/CLOSEAPPLICATIONS',
+  '/LOG=$logPath',
+];
 
 @visibleForTesting
 String buildWindowsUpdateScript() => r'''

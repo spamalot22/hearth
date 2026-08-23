@@ -289,6 +289,10 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
   from GitHub Releases and peers may relay it, but the app trusts it only when it
   is signed by the hardcoded release key. GitHub or a peer can withhold an update,
   but cannot forge one.
+- **Windows uses a per-user installer** — Hearth installs under
+  `%LOCALAPPDATA%\Programs\Hearth`, creates Start Menu/uninstall entries, and
+  applies verified updates through the installer. Releases retain a portable ZIP
+  so clients predating installer support can still reach a compatible version.
 - **Per-pubkey rate limiting** on signal and message endpoints prevents mailbox
   flooding from anonymous attackers.
 - **What the relay still learns:** that a peer is online, who they're signalling

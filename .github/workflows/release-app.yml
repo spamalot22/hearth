@@ -111,12 +111,17 @@ jobs:
         run: |
           flutter pub get
           flutter build windows --release --build-name=${{ needs.version.outputs.name }} --build-number=${{ needs.version.outputs.code }} --dart-define=APP_VERSION=${{ github.ref_name }} --dart-define=RELEASE_PUBLIC_KEY=${{ vars.RELEASE_PUBLIC_KEY }} --dart-define=RELAY_URL=${{ vars.RELAY_URL }}
+      - name: Build installer
+        shell: pwsh
+        run: .github/scripts/build-windows-installer.ps1 -Version '${{ needs.version.outputs.name }}' -BuildDir 'app/build/windows/x64/runner/Release' -OutputDir "$env:GITHUB_WORKSPACE"
       - name: Zip
         run: Compress-Archive -Path app/build/windows/x64/runner/Release/* -DestinationPath hearth-windows.zip
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows
-          path: hearth-windows.zip
+          path: |
+            hearth-windows.zip
+            hearth-windows-setup.exe
 
   web:
     runs-on: ubuntu-latest
@@ -185,7 +190,8 @@ jobs:
           fi
           SEQ=$(date +%s)
           pnpm exec tsx src/sign-release.ts manifest "${{ github.ref_name }}" "$SEQ" "$RELEASE_PRIVATE_KEY" \
-            android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip > ../dist/manifest.json
+            android=../dist/hearth-android.apk windows=../dist/hearth-windows.zip \
+            windowsInstaller=../dist/hearth-windows-setup.exe > ../dist/manifest.json
       - run: ls -lR dist
       - name: Create draft release with assets
         id: gh_release
