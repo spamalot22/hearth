@@ -12,33 +12,6 @@ import 'package:open_filex/open_filex.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('Windows updater never deletes the install directory', () {
-    final script = buildWindowsUpdateScript();
-    expect(script, isNot(contains('rmdir')));
-    expect(script, isNot(contains('Remove-Item -LiteralPath \$InstallDir')));
-    expect(script, contains('Copy-Item -Destination \$InstallDir'));
-  });
-
-  test('Windows clients prefer the installer with ZIP compatibility', () {
-    final assets = <String, dynamic>{
-      'windows': {'file': 'hearth-windows.zip', 'sha256': 'zip'},
-      'windowsInstaller': {
-        'file': 'hearth-windows-setup.exe',
-        'sha256': 'setup',
-      },
-    };
-
-    expect(
-      selectUpdateAsset(assets, TargetPlatform.windows),
-      assets['windowsInstaller'],
-    );
-    assets.remove('windowsInstaller');
-    expect(
-      selectUpdateAsset(assets, TargetPlatform.windows),
-      assets['windows'],
-    );
-  });
-
   test('Windows installer runs silently with recovery logging', () {
     final args = windowsInstallerArguments(r'C:\logs\update.log');
 

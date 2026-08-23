@@ -360,22 +360,13 @@ Future<void> _clearPending() async {
 }
 
 Map<String, dynamic>? _platformAsset(Map<String, dynamic> assets) {
-  return selectUpdateAsset(assets, defaultTargetPlatform);
-}
-
-/// Chooses the native update package. New Windows clients prefer the installer,
-/// while manifests retain the portable ZIP for clients released before setup
-/// support existed.
-@visibleForTesting
-Map<String, dynamic>? selectUpdateAsset(
-  Map<String, dynamic> assets,
-  TargetPlatform platform,
-) {
-  final a = switch (platform) {
-    TargetPlatform.android => assets['android'],
-    TargetPlatform.windows => assets['windowsInstaller'] ?? assets['windows'],
+  final key = switch (defaultTargetPlatform) {
+    TargetPlatform.android => 'android',
+    TargetPlatform.windows => 'windows',
     _ => null,
   };
+  if (key == null) return null;
+  final a = assets[key];
   return a is Map ? a.cast<String, dynamic>() : null;
 }
 
@@ -387,43 +378,12 @@ Future<void> _install(String path) async {
   throw UnsupportedError('Auto-install not supported on this platform.');
 }
 
-/// Installed builds hand off to the per-user setup executable. The ZIP branch
-/// remains only for signed manifests published before installer support.
+/// Installed builds hand off to the per-user setup executable.
 Future<void> _installWindows(String packagePath) async {
-  if (packagePath.toLowerCase().endsWith('.exe')) {
-    await _launchWindowsInstaller(packagePath);
-    exit(0);
-  }
-  if (!packagePath.toLowerCase().endsWith('.zip')) {
+  if (!packagePath.toLowerCase().endsWith('.exe')) {
     throw StateError('unsupported Windows update package');
   }
-  final exeDir = File(Platform.resolvedExecutable).parent.path;
-  // A portable build can live beside unrelated user files. Never delete its
-  // parent directory; update known release files in place instead.
-  if (RegExp(r'^[A-Za-z]:\\?$').hasMatch(exeDir) || exeDir.length < 4) {
-    throw StateError('refusing to self-update from unexpected dir: $exeDir');
-  }
-  final scriptPath =
-      '${Directory.systemTemp.path}${Platform.pathSeparator}'
-      'hearth_update_${pid}_${DateTime.now().microsecondsSinceEpoch}.ps1';
-  await File(scriptPath).writeAsString(buildWindowsUpdateScript());
-  await Process.start(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      scriptPath,
-      '-ZipPath',
-      packagePath,
-      '-InstallDir',
-      exeDir,
-    ],
-    mode: ProcessStartMode.detached,
-    runInShell: false,
-  );
+  await _launchWindowsInstaller(packagePath);
   exit(0);
 }
 
@@ -453,31 +413,3 @@ List<String> windowsInstallerArguments(String logPath) => [
   '/CLOSEAPPLICATIONS',
   '/LOG=$logPath',
 ];
-
-@visibleForTesting
-String buildWindowsUpdateScript() => r'''
-param(
-  [Parameter(Mandatory = $true)][string]$ZipPath,
-  [Parameter(Mandatory = $true)][string]$InstallDir
-)
-
-$ErrorActionPreference = 'Stop'
-$scriptPath = $MyInvocation.MyCommand.Path
-$extractDir = Join-Path ([IO.Path]::GetTempPath()) ("hearth_update_" + [guid]::NewGuid().ToString("N"))
-
-try {
-  Start-Sleep -Seconds 2
-  Expand-Archive -LiteralPath $ZipPath -DestinationPath $extractDir -Force
-  $newExe = Join-Path $extractDir 'hearth.exe'
-  if (-not (Test-Path -LiteralPath $newExe -PathType Leaf)) {
-    throw 'Update archive does not contain hearth.exe'
-  }
-
-  # Copy in place: a portable install may share its folder with user files.
-  Get-ChildItem -LiteralPath $extractDir | Copy-Item -Destination $InstallDir -Recurse -Force
-  Start-Process -FilePath (Join-Path $InstallDir 'hearth.exe')
-} finally {
-  Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
-}
-''';
