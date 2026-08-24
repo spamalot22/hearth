@@ -1331,6 +1331,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Set<String> _ytSharedTo = {};
   ProfileStore? _profile;
   SettingsStore? _settings;
+
+  void _dismissComposerFocus() {
+    if (_composerFocus.hasFocus) _composerFocus.unfocus();
+  }
+
   AudioPlayer? _speakerTestPlayer;
   UnreadStore? _unread;
   DeviceStore? _deviceStore;
@@ -2887,6 +2892,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openSettings() async {
+    _dismissComposerFocus();
     // On mobile, use a normal full-screen page with its own Scaffold/AppBar.
     // Bottom sheets and body-only routes have both produced blank scrims on
     // Android while launched from the drawer.
@@ -6096,7 +6102,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
           if (session != null && !wide)
             IconButton(
-              onPressed: () => _scaffoldKey.currentState?.openEndDrawer(),
+              onPressed: () {
+                _dismissComposerFocus();
+                _scaffoldKey.currentState?.openEndDrawer();
+              },
               icon: const Icon(Icons.people_outline),
               tooltip: 'Channel controls',
             ),
@@ -6104,7 +6113,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         bottom: _error == null ? null : _errorBar(context, _error!),
       ),
       onDrawerChanged: (open) {
-        if (open) unawaited(_checkRelay());
+        if (open) {
+          _dismissComposerFocus();
+          unawaited(_checkRelay());
+        }
+      },
+      onEndDrawerChanged: (open) {
+        if (open) _dismissComposerFocus();
       },
       drawer: _drawer(context),
       endDrawer: (session != null && !wide)
@@ -6936,6 +6951,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 selectedColor: accent,
                 trailing: _unreadBadge(session),
                 onTap: () {
+                  _dismissComposerFocus();
                   _channels?.activate(session.channelId);
                   _markRead(session);
                   _replyTo = null;
@@ -8468,6 +8484,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final field = TextField(
       controller: _input,
       focusNode: _composerFocus,
+      onTapOutside: (_) => _dismissComposerFocus(),
       inputFormatters: [LengthLimitingTextInputFormatter(7000)],
       textCapitalization: TextCapitalization.sentences,
       textInputAction: TextInputAction.send,

@@ -138,8 +138,22 @@ void main() {
       );
       await _createChannel(tester, 'general');
 
+      final composer = find.widgetWithText(TextField, 'Message general');
+      await tester.showKeyboard(composer);
+      expect(
+        tester.widget<TextField>(composer).focusNode?.hasFocus,
+        isTrue,
+        reason: 'the composer should focus after a direct user tap',
+      );
+
       await tester.tap(find.byTooltip('Open navigation menu'));
       await _settle(tester);
+      expect(
+        tester.widget<TextField>(composer).focusNode?.hasFocus,
+        isFalse,
+        reason: 'opening navigation must release retained composer focus',
+      );
+      expect(tester.testTextInput.isVisible, isFalse);
       await tester.tap(find.widgetWithText(ListTile, 'Settings'));
       await _settle(tester);
 
