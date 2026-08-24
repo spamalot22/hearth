@@ -14,6 +14,7 @@ export 'src/encryption.dart'
 export 'src/frame.dart'
     show
         FrameChannel,
+        GiveBlobChunkFrame,
         GiveBlobFrame,
         GiveFrame,
         HaveFrame,

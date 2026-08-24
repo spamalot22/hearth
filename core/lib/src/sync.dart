@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
@@ -201,6 +202,8 @@ class SyncSession {
   late final StreamSubscription<SyncFrame> _sub;
   final Set<String> _wanted = <String>{};
   final Set<String> _requestedBlobs = <String>{};
+  final Map<String, _BlobAssembly> _blobAssemblies = {};
+  int _blobAssemblyBytes = 0;
   Future<void> _tail = Future<void>.value();
 
   /// Advertises our current heads to begin reconciliation.
@@ -212,7 +215,7 @@ class SyncSession {
   /// Asks this peer for the blob [hash].
   void requestBlob(String hash) {
     if (!_blobPattern.hasMatch(hash) || !_requestedBlobs.add(hash)) return;
-    _link.send(WantBlobFrame(hash));
+    _link.send(WantBlobFrame(hash, chunked: true));
   }
 
   Future<void> close() async {
@@ -225,6 +228,12 @@ class SyncSession {
 
   /// Maximum heads accepted per HAVE frame (bounds a single frame's impact).
   static const int _maxHaveHeads = 1000;
+
+  /// 24 KiB of raw data encodes to a JSON frame below 40 KiB. That fits common
+  /// WebRTC/SCTP limits and remains one encrypted relay-tunnel fragment.
+  static const int _blobChunkBytes = 24 * 1024;
+  static const int _maxBlobAssemblies = 4;
+  static const int _maxBlobAssemblyBytes = 32 * 1024 * 1024;
 
   // Serialise handling so concurrent gives don't race on _wanted or add().
   void _enqueue(SyncFrame frame) {
@@ -248,11 +257,29 @@ class SyncSession {
         }
       case GiveFrame(:final message):
         await _receive(message);
-      case WantBlobFrame(:final hash):
+      case WantBlobFrame(:final hash, :final chunked):
         if (!_blobPattern.hasMatch(hash)) return;
         final bytes = await blobStore?.get(hash);
         if (bytes != null && bytes.length <= maxBlobBytes) {
-          _link.send(GiveBlobFrame(hash, bytes));
+          if (!chunked || bytes.length <= _blobChunkBytes) {
+            _link.send(GiveBlobFrame(hash, bytes));
+          } else {
+            for (
+              var offset = 0;
+              offset < bytes.length;
+              offset += _blobChunkBytes
+            ) {
+              final end = min(offset + _blobChunkBytes, bytes.length);
+              _link.send(
+                GiveBlobChunkFrame(
+                  hash,
+                  offset,
+                  bytes.length,
+                  Uint8List.sublistView(bytes, offset, end),
+                ),
+              );
+            }
+          }
         }
       case GiveBlobFrame(:final hash, :final bytes):
         if (!_requestedBlobs.contains(hash)) return;
@@ -263,9 +290,68 @@ class SyncSession {
         final store = blobStore;
         if (store == null) return;
         await store.put(bytes);
+        _discardBlobAssembly(hash);
         _requestedBlobs.remove(hash);
         onBlob?.call(hash);
+      case GiveBlobChunkFrame(
+        :final hash,
+        :final offset,
+        :final totalBytes,
+        :final bytes,
+      ):
+        await _receiveBlobChunk(hash, offset, totalBytes, bytes);
     }
+  }
+
+  Future<void> _receiveBlobChunk(
+    String hash,
+    int offset,
+    int totalBytes,
+    Uint8List bytes,
+  ) async {
+    if (!_requestedBlobs.contains(hash) ||
+        !_blobPattern.hasMatch(hash) ||
+        offset < 0 ||
+        totalBytes <= 0 ||
+        totalBytes > maxBlobBytes ||
+        bytes.isEmpty ||
+        bytes.length > _blobChunkBytes ||
+        offset + bytes.length > totalBytes) {
+      return;
+    }
+
+    var assembly = _blobAssemblies[hash];
+    if (assembly == null) {
+      if (offset != 0 ||
+          _blobAssemblies.length >= _maxBlobAssemblies ||
+          _blobAssemblyBytes + totalBytes > _maxBlobAssemblyBytes) {
+        return;
+      }
+      assembly = _BlobAssembly(totalBytes);
+      _blobAssemblies[hash] = assembly;
+      _blobAssemblyBytes += totalBytes;
+    }
+    if (assembly.totalBytes != totalBytes || offset != assembly.length) {
+      _discardBlobAssembly(hash);
+      return;
+    }
+
+    assembly.add(bytes);
+    if (assembly.length != totalBytes) return;
+
+    _discardBlobAssembly(hash);
+    final complete = assembly.takeBytes();
+    if (await blobHash(complete) != hash) return;
+    final store = blobStore;
+    if (store == null) return;
+    await store.put(complete);
+    _requestedBlobs.remove(hash);
+    onBlob?.call(hash);
+  }
+
+  void _discardBlobAssembly(String hash) {
+    final removed = _blobAssemblies.remove(hash);
+    if (removed != null) _blobAssemblyBytes -= removed.totalBytes;
   }
 
   Future<void> _receive(Message message) async {
@@ -311,4 +397,17 @@ class SyncSession {
 
   static Uint8List? _idBytes(String idHex) =>
       _idPattern.hasMatch(idHex) ? Uint8List.fromList(hex.decode(idHex)) : null;
+}
+
+class _BlobAssembly {
+  _BlobAssembly(this.totalBytes);
+
+  final int totalBytes;
+  final BytesBuilder _bytes = BytesBuilder(copy: false);
+
+  int get length => _bytes.length;
+
+  void add(Uint8List bytes) => _bytes.add(bytes);
+
+  Uint8List takeBytes() => _bytes.takeBytes();
 }

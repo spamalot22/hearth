@@ -227,6 +227,71 @@ void main() {
       expect(await bBlobs.get(hash), _b('sticker bytes'));
     });
 
+    test('large blobs transfer in bounded chunks', () async {
+      final sourceBytes = Uint8List.fromList(
+        List<int>.generate(256 * 1024, (index) => index % 251),
+      );
+      final sourceBlobs = InMemoryBlobStore();
+      final targetBlobs = InMemoryBlobStore();
+      final hash = await sourceBlobs.put(sourceBytes);
+      final source = SyncEngine(_repo(), 'general', blobStore: sourceBlobs);
+      final target = SyncEngine(_repo(), 'general', blobStore: targetBlobs);
+      final (sourceLink, targetLink) = _pair();
+      source.addPeer(sourceLink);
+      target.addPeer(targetLink);
+
+      String? arrived;
+      final arrivedSub = target.blobArrived.listen((value) => arrived = value);
+      target.requestBlob(hash);
+
+      await _settle(() => arrived == hash);
+      expect(await targetBlobs.get(hash), sourceBytes);
+      final chunks = sourceLink.sent.whereType<GiveBlobChunkFrame>().toList();
+      expect(chunks.length, greaterThan(1));
+      expect(
+        chunks.every((chunk) => chunk.encode().length < 64 * 1024),
+        isTrue,
+      );
+      expect(sourceLink.sent.whereType<GiveBlobFrame>(), isEmpty);
+      await arrivedSub.cancel();
+      await source.close();
+      await target.close();
+    });
+
+    test('legacy blob requests still receive a single frame', () async {
+      final sourceBytes = Uint8List(64 * 1024);
+      final sourceBlobs = InMemoryBlobStore();
+      final hash = await sourceBlobs.put(sourceBytes);
+      final source = SyncEngine(_repo(), 'general', blobStore: sourceBlobs);
+      final link = _Link();
+      source.addPeer(link);
+
+      link.incoming.add(WantBlobFrame(hash));
+      await _settle(() => link.sent.whereType<GiveBlobFrame>().isNotEmpty);
+
+      expect(link.sent.whereType<GiveBlobChunkFrame>(), isEmpty);
+      expect(link.sent.whereType<GiveBlobFrame>().single.bytes, sourceBytes);
+      await source.close();
+      await link.incoming.close();
+    });
+
+    test('out-of-order blob chunks are ignored', () async {
+      final targetBlobs = InMemoryBlobStore();
+      final target = SyncEngine(_repo(), 'general', blobStore: targetBlobs);
+      final link = _Link();
+      target.addPeer(link);
+      final bytes = _b('ordered bytes');
+      final hash = await blobHash(bytes);
+      target.requestBlob(hash);
+
+      link.incoming.add(GiveBlobChunkFrame(hash, 1, bytes.length, bytes));
+      await _pump();
+
+      expect(await targetBlobs.has(hash), isFalse);
+      await target.close();
+      await link.incoming.close();
+    });
+
     test('bytes that do not match the requested id are dropped', () async {
       final bBlobs = InMemoryBlobStore();
       final engB = SyncEngine(_repo(), 'general', blobStore: bBlobs);

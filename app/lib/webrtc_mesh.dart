@@ -721,10 +721,12 @@ class _PeerLink implements FrameChannel {
   bool _opened = false;
   bool _disposed = false;
   Timer? _handshakeTimer;
+  Future<void> _sendTail = Future<void>.value();
   final List<RTCIceCandidate> _pendingCandidates = [];
   final WebRtcSignalOrder _outgoingSignals = WebRtcSignalOrder();
   static const int _maxPendingCandidates = 256;
   static const int _maxDataChannelFrameBytes = 16 * 1024 * 1024;
+  static const int _maxBufferedSendBytes = 512 * 1024;
 
   @override
   Stream<SyncFrame> get frames => _frames.stream;
@@ -745,14 +747,41 @@ class _PeerLink implements FrameChannel {
 
   void _sendText(String text) {
     final channel = _channel;
-    if (channel?.state == RTCDataChannelState.RTCDataChannelOpen) {
-      unawaited(() async {
-        try {
-          await channel!.send(RTCDataChannelMessage(text));
-        } catch (_) {
-          await dispose();
-        }
-      }());
+    if (channel != null &&
+        channel.state == RTCDataChannelState.RTCDataChannelOpen) {
+      _sendTail = _sendTail
+          .then((_) async {
+            if (_disposed ||
+                channel.state != RTCDataChannelState.RTCDataChannelOpen) {
+              return;
+            }
+            final bufferDeadline = DateTime.now().add(
+              const Duration(seconds: 30),
+            );
+            while (!_disposed &&
+                channel.state == RTCDataChannelState.RTCDataChannelOpen) {
+              var buffered = channel.bufferedAmount ?? 0;
+              try {
+                buffered = await channel.getBufferedAmount();
+              } catch (_) {
+                // Some web implementations only expose the synchronous getter.
+              }
+              if (buffered <= _maxBufferedSendBytes) break;
+              if (DateTime.now().isAfter(bufferDeadline)) {
+                throw TimeoutException(
+                  'WebRTC data-channel send buffer stalled',
+                );
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 20));
+            }
+            if (!_disposed &&
+                channel.state == RTCDataChannelState.RTCDataChannelOpen) {
+              await channel.send(RTCDataChannelMessage(text));
+            }
+          })
+          .catchError((Object _) {
+            if (!_disposed) unawaited(dispose());
+          });
     }
   }
 

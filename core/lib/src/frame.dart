@@ -46,10 +46,20 @@ sealed class SyncFrame {
             Message.fromJson((json['m']! as Map).cast<String, Object?>()),
           );
         case 'wantblob':
-          return WantBlobFrame(json['h']! as String);
+          return WantBlobFrame(
+            json['h']! as String,
+            chunked: json['c'] == true,
+          );
         case 'giveblob':
           return GiveBlobFrame(
             json['h']! as String,
+            base64.decode(json['b']! as String),
+          );
+        case 'blobchunk':
+          return GiveBlobChunkFrame(
+            json['h']! as String,
+            json['o']! as int,
+            json['n']! as int,
             base64.decode(json['b']! as String),
           );
         default:
@@ -93,12 +103,17 @@ class GiveFrame extends SyncFrame {
 
 /// "Send me the media blob with this id" (hex). Media is fetched on demand.
 class WantBlobFrame extends SyncFrame {
-  const WantBlobFrame(this.hash);
+  const WantBlobFrame(this.hash, {this.chunked = false});
 
   final String hash;
+  final bool chunked;
 
   @override
-  Map<String, Object?> toJson() => {'t': 'wantblob', 'h': hash};
+  Map<String, Object?> toJson() => {
+    't': 'wantblob',
+    'h': hash,
+    if (chunked) 'c': true,
+  };
 }
 
 /// "Here is a blob's bytes" (base64). The receiver checks the bytes hash to the
@@ -113,6 +128,27 @@ class GiveBlobFrame extends SyncFrame {
   Map<String, Object?> toJson() => {
     't': 'giveblob',
     'h': hash,
+    'b': base64.encode(bytes),
+  };
+}
+
+/// One bounded piece of a larger blob. Data channels have substantially lower
+/// per-message limits than [maxBlobBytes], so large blobs are split and
+/// reassembled before their content hash is verified.
+class GiveBlobChunkFrame extends SyncFrame {
+  const GiveBlobChunkFrame(this.hash, this.offset, this.totalBytes, this.bytes);
+
+  final String hash;
+  final int offset;
+  final int totalBytes;
+  final Uint8List bytes;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'blobchunk',
+    'h': hash,
+    'o': offset,
+    'n': totalBytes,
     'b': base64.encode(bytes),
   };
 }

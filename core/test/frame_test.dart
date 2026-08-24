@@ -26,7 +26,9 @@ void main() {
       final message = await Message.create(
         author: identity,
         channel: 'ch1',
-        payload: Uint8List.fromList(utf8.encode('{"type":"text","text":"hello"}')),
+        payload: Uint8List.fromList(
+          utf8.encode('{"type":"text","text":"hello"}'),
+        ),
       );
       final frame = GiveFrame(message);
       final decoded = SyncFrame.decode(frame.encode());
@@ -40,7 +42,16 @@ void main() {
       final frame = WantBlobFrame('blobhash123');
       final decoded = SyncFrame.decode(frame.encode());
       expect(decoded, isA<WantBlobFrame>());
-      expect((decoded! as WantBlobFrame).hash, 'blobhash123');
+      final want = decoded! as WantBlobFrame;
+      expect(want.hash, 'blobhash123');
+      expect(want.chunked, isFalse);
+    });
+
+    test('WantBlobFrame negotiates chunk support', () {
+      final frame = WantBlobFrame('blobhash123', chunked: true);
+      final decoded = SyncFrame.decode(frame.encode())! as WantBlobFrame;
+      expect(decoded.hash, 'blobhash123');
+      expect(decoded.chunked, isTrue);
     });
 
     test('GiveBlobFrame round-trips', () {
@@ -51,6 +62,18 @@ void main() {
       final give = decoded! as GiveBlobFrame;
       expect(give.hash, 'blobhash');
       expect(give.bytes, bytes);
+    });
+
+    test('GiveBlobChunkFrame round-trips', () {
+      final bytes = Uint8List.fromList([6, 7, 8, 9]);
+      final frame = GiveBlobChunkFrame('blobhash', 32, 100, bytes);
+      final decoded = SyncFrame.decode(frame.encode());
+      expect(decoded, isA<GiveBlobChunkFrame>());
+      final chunk = decoded! as GiveBlobChunkFrame;
+      expect(chunk.hash, 'blobhash');
+      expect(chunk.offset, 32);
+      expect(chunk.totalBytes, 100);
+      expect(chunk.bytes, bytes);
     });
 
     test('empty heads HaveFrame', () {
@@ -72,6 +95,7 @@ void main() {
       expect(SyncFrame.decode('{"t":"have"}'), isNull);
       expect(SyncFrame.decode('{"t":"want"}'), isNull);
       expect(SyncFrame.decode('{"t":"wantblob"}'), isNull);
+      expect(SyncFrame.decode('{"t":"blobchunk","h":"x"}'), isNull);
     });
 
     test('empty string returns null', () {
