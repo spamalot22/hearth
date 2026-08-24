@@ -1,16 +1,14 @@
-# Build + publish the relay image to GHCR on a version tag *you* push:
-#
-#   git tag v0.1.0 && git push origin v0.1.0
-#
-# Then on the NAS: `docker compose pull && docker compose up -d`.
-# Not triggered by pushes to main — only by tags.
+# Manual relay-only repair path. Normal version tags publish the relay inside
+# release-app.yml and gate the app release on that image succeeding.
 name: deploy-relay
 
 on:
-  push:
-    tags:
-      - 'v*' # e.g. v0.1.0
-      - '[0-9]*' # e.g. 0.1.0 (bare semver)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Image version tag for a manual relay-only repair
+        required: true
+        type: string
 
 jobs:
   build-push:
@@ -20,6 +18,14 @@ jobs:
       packages: write # lets GITHUB_TOKEN push to ghcr.io/<owner>/* — no PAT needed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate image version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must be X.Y.Z or vX.Y.Z."
+            exit 1
+          fi
 
       # Gate the publish on the backend tests/typecheck (mirrors the Dockerfile's
       # esbuild build-script workaround).
@@ -55,7 +61,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/hearth-relay
           tags: |
-            type=semver,pattern={{version}}
+            type=raw,value=${{ inputs.version }}
             type=raw,value=latest
       - name: Build and push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7

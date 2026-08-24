@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+
+import 'bounded_download.dart';
 
 /// Sound search goes through the relay's `/sound/search` proxy (Freesound, CC0),
 /// so the API token lives on the relay — never in the client. The chosen clip's
@@ -24,30 +24,34 @@ class _SoundResult {
 }
 
 Future<_SoundResult> _search(Uri relayUrl, String query, String? token) async {
-  final http.Response res;
+  late final http.StreamedResponse res;
+  late final Map<String, dynamic> body;
+  final client = http.Client();
   try {
     final params = <String, String>{'q': query};
     final headers = <String, String>{};
     if (token != null) headers['Authorization'] = 'Bearer $token';
-    res = await http
-        .get(
-          relayUrl.replace(path: '/sound/search', queryParameters: params),
-          headers: headers,
-        )
-        .timeout(const Duration(seconds: 10));
+    final request = http.Request(
+      'GET',
+      relayUrl.replace(path: '/sound/search', queryParameters: params),
+    )..headers.addAll(headers);
+    res = await client.send(request).timeout(const Duration(seconds: 10));
+    body = await readJsonObjectBounded(res, maxBytes: 512 * 1024);
   } catch (_) {
     return const _SoundResult.unavailable(
       "Can't reach the relay — it may be offline.",
     );
+  } finally {
+    client.close();
   }
   if (res.statusCode != 200) {
     return const _SoundResult.unavailable('Sound search is unavailable now.');
   }
-  final body = jsonDecode(res.body) as Map;
   if (body['configured'] == false) {
     return const _SoundResult.unavailable('This relay has no sound provider.');
   }
   final sounds = (body['sounds'] as List)
+      .take(50)
       .map((s) => _Sound((s as Map)['preview'] as String, s['name'] as String))
       .toList();
   return _SoundResult.ok(sounds);

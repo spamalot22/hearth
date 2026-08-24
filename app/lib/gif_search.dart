@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 
+import 'bounded_download.dart';
+
 /// GIF search goes through the relay's `/gif/search` proxy, so the Tenor API key
 /// lives on the relay — never in the client. When the relay is unreachable or
 /// has no key, the sheet falls back to pasting a GIF URL, with an explanation.
@@ -64,34 +66,38 @@ void recordGifSent(String url, [String? preview]) {
 }
 
 Future<_GifResult> _search(Uri relayUrl, String query, String? token) async {
-  final http.Response res;
+  late final http.StreamedResponse res;
+  late final Map<String, dynamic> body;
+  final client = http.Client();
   try {
     final params = <String, String>{'q': query};
     final headers = <String, String>{};
     if (token != null) headers['Authorization'] = 'Bearer $token';
-    res = await http
-        .get(
-          relayUrl.replace(path: '/gif/search', queryParameters: params),
-          headers: headers,
-        )
-        .timeout(const Duration(seconds: 10));
+    final request = http.Request(
+      'GET',
+      relayUrl.replace(path: '/gif/search', queryParameters: params),
+    )..headers.addAll(headers);
+    res = await client.send(request).timeout(const Duration(seconds: 10));
+    body = await readJsonObjectBounded(res, maxBytes: 512 * 1024);
   } catch (_) {
     return const _GifResult.unavailable(
       "Can't reach the relay — it may be offline.",
     );
+  } finally {
+    client.close();
   }
   if (res.statusCode != 200) {
     return const _GifResult.unavailable(
       'GIF search is unavailable on this relay right now.',
     );
   }
-  final body = jsonDecode(res.body) as Map;
   if (body['configured'] == false) {
     return const _GifResult.unavailable(
       'This relay has no GIF provider set up.',
     );
   }
   final gifs = (body['gifs'] as List)
+      .take(50)
       .map((g) => _Gif((g as Map)['url'] as String, g['preview'] as String))
       .toList();
   return _GifResult.ok(gifs);

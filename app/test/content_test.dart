@@ -50,6 +50,30 @@ void main() {
       expect((parsed as ProfileContent).name, 'Alice');
     });
 
+    test('security bookkeeping envelopes round-trip', () {
+      final revocation = parseContent(
+        const DeviceRevocationContent({'root': 'r'}).encode(),
+      );
+      expect(
+        (revocation as DeviceRevocationContent).revocationJson['root'],
+        'r',
+      );
+
+      final rekey = parseContent(
+        const GroupKeyUpdateContent(
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          2,
+          'boxed',
+        ).encode(),
+      );
+      expect((rekey as GroupKeyUpdateContent).epoch, 2);
+
+      const mailboxId =
+          'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      final mailbox = parseContent(const DmMailboxContent(mailboxId).encode());
+      expect((mailbox as DmMailboxContent).mailbox, mailboxId);
+    });
+
     test('legacy plain-text payloads fall back to text', () {
       final parsed = parseContent(utf8.encode('just raw text'));
       expect(parsed, isA<TextContent>());

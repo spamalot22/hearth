@@ -33,17 +33,17 @@ interface StoredMessage {
 }
 
 /**
- * In-memory channel store for the offline-courier endpoints. Self-hosted and
- * in-memory; a durable store can slot in behind the same interface later.
+ * In-memory capability-mailbox store for the offline-courier endpoints.
+ * Self-hosted and in-memory; a durable store can slot in later.
  */
 export class RelayStore {
   private readonly byChannel = new Map<string, StoredMessage[]>();
   private seq = 0;
   private messageCount = 0;
 
-  append(message: WireMessage): number {
-    const list = this.byChannel.get(message.channel) ?? [];
-    this.byChannel.delete(message.channel);
+  append(message: WireMessage, mailbox = message.channel): number {
+    const list = this.byChannel.get(mailbox) ?? [];
+    this.byChannel.delete(mailbox);
     const stored: StoredMessage = { seq: ++this.seq, message };
     list.push(stored);
     this.messageCount++;
@@ -52,7 +52,7 @@ export class RelayStore {
       list.splice(0, removed);
       this.messageCount -= removed;
     }
-    this.byChannel.set(message.channel, list);
+    this.byChannel.set(mailbox, list);
     // LRU eviction: if over the cap, drop the oldest-accessed channel.
     while (
       this.byChannel.size > MAX_CHANNELS ||
@@ -204,6 +204,10 @@ export function createRelay(
   // Accept a signed message: verify it, then store it.
   const messageLimiter = new RateLimiter(MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS);
   app.post('/messages', async (c) => {
+    const requestedMailbox = c.req.query('mailbox');
+    if (requestedMailbox && !/^[0-9a-f]{32,64}$/.test(requestedMailbox)) {
+      return c.json({ error: 'valid mailbox capability required' }, 400);
+    }
     let body: WireMessage;
     try {
       body = (await c.req.json()) as WireMessage;
@@ -222,17 +226,20 @@ export function createRelay(
     if (!messageLimiter.allow(body.author, Date.now())) {
       return c.json({ error: 'rate limited' }, 429);
     }
-    return c.json({ ok: true, seq: store.append(body) });
+    return c.json({
+      ok: true,
+      seq: store.append(body, requestedMailbox ?? body.channel),
+    });
   });
 
   // Short-poll: messages in a channel with seq greater than `since`.
-  // The channel ID (256-bit random capability) is the auth — no token needed.
+  // The mailbox ID (a random capability) is the auth — no token needed.
   app.get('/poll', (c) => {
     const channel = c.req.query('channel');
     if (!channel || channel.length > MAX_CHANNEL_LENGTH) {
       return c.json({ error: 'valid channel required' }, 400);
     }
-    // No token required: the channel ID itself is a 256-bit unguessable
+    // No token required: the mailbox ID itself is an unguessable
     // capability — knowing it proves membership. Token-gating was
     // defence-in-depth but prevents background poll after token expiry.
     const sinceRaw = Number(c.req.query('since') ?? '0');

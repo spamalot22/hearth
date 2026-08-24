@@ -207,6 +207,59 @@ class DeviceBundleContent extends Content {
   Map<String, Object?> toJson() => {'t': 'device_bundle', 'bundle': bundleJson};
 }
 
+/// A root-signed device revocation persisted in channel history so peers that
+/// were offline during the live broadcast still learn it on their next sync.
+class DeviceRevocationContent extends Content {
+  const DeviceRevocationContent(this.revocationJson);
+
+  final Map<String, Object?> revocationJson;
+
+  @override
+  bool get isBookkeeping => true;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'device_revocation',
+    'revocation': revocationJson,
+  };
+}
+
+/// A group key rotation encrypted separately to every active member device.
+/// The outer envelope remains readable with the previous group key so offline
+/// members can receive it; the boxed replacement key excludes revoked devices.
+class GroupKeyUpdateContent extends Content {
+  const GroupKeyUpdateContent(this.groupId, this.epoch, this.boxed);
+
+  final String groupId;
+  final int epoch;
+  final String boxed;
+
+  @override
+  bool get isBookkeeping => true;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'group_key_update',
+    'group': groupId,
+    'epoch': epoch,
+    'boxed': boxed,
+  };
+}
+
+/// Negotiates an unguessable relay courier mailbox inside an encrypted DM.
+/// The signed message channel stays stable; only relay storage moves.
+class DmMailboxContent extends Content {
+  const DmMailboxContent(this.mailbox);
+
+  final String mailbox;
+
+  @override
+  bool get isBookkeeping => true;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'dm_mailbox', 'mailbox': mailbox};
+}
+
 /// Parses a payload into [Content], falling back to plain text for unknown or
 /// legacy (pre-envelope) payloads.
 Content parseContent(List<int> payload) {
@@ -262,6 +315,19 @@ Content parseContent(List<int> payload) {
           return DeviceBundleContent(
             (decoded['bundle'] as Map?)?.cast<String, Object?>() ?? const {},
           );
+        case 'device_revocation':
+          return DeviceRevocationContent(
+            (decoded['revocation'] as Map?)?.cast<String, Object?>() ??
+                const {},
+          );
+        case 'group_key_update':
+          return GroupKeyUpdateContent(
+            decoded['group'] as String? ?? '',
+            decoded['epoch'] as int? ?? -1,
+            decoded['boxed'] as String? ?? '',
+          );
+        case 'dm_mailbox':
+          return DmMailboxContent(decoded['mailbox'] as String? ?? '');
       }
     }
   } catch (_) {

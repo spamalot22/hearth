@@ -45,6 +45,7 @@ class SyncEngine {
 
   final Set<SyncSession> _sessions = {};
   final Set<String> _pendingBlobs = {};
+  final _ingestLimiter = _IngestRateLimiter(1200, const Duration(minutes: 1));
   final StreamController<void> _updates = StreamController<void>.broadcast();
   final StreamController<String> _blobArrived =
       StreamController<String>.broadcast();
@@ -68,6 +69,7 @@ class SyncEngine {
       onBlob: _onBlob,
       isDeviceRevoked: isDeviceRevoked,
       messageAllowed: messageAllowed,
+      allowIngest: _ingestLimiter.allow,
       onClosed: () => _sessions.remove(session),
     );
     _sessions.add(session);
@@ -98,6 +100,7 @@ class SyncEngine {
   /// ([SyncSession] verifies every GIVE), so we never trust the relay to have
   /// checked it. On success it's stored and gossiped onward like any message.
   Future<void> receive(Message message) async {
+    if (!_ingestLimiter.allow()) return;
     if (message.channel != channel) return;
     if (!await message.verify()) return; // forged / invalid device-cert chain
     if (!(messageAllowed?.call(message) ?? true)) return;
@@ -109,7 +112,11 @@ class SyncEngine {
         return;
       }
     }
-    if (await repository.add(message)) _onNewMessage(message, null);
+    try {
+      if (await repository.add(message)) _onNewMessage(message, null);
+    } on RepositoryCapacityException {
+      // Keep the app responsive under a valid-signature storage flood.
+    }
   }
 
   void _onNewMessage(Message message, SyncSession? from) {
@@ -177,6 +184,7 @@ class SyncSession {
     this.onBlob,
     this.isDeviceRevoked,
     this.messageAllowed,
+    this.allowIngest,
     this.onClosed,
   }) {
     _sub = _link.frames.listen(
@@ -193,6 +201,7 @@ class SyncSession {
   final void Function(String hash)? onBlob;
   final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
   final bool Function(Message message)? messageAllowed;
+  final bool Function()? allowIngest;
   final void Function()? onClosed;
 
   /// Called after this session stores a *new* message, so the engine can spread
@@ -356,6 +365,7 @@ class SyncSession {
 
   Future<void> _receive(Message message) async {
     if (message.channel != channel) return; // not our channel
+    if (!(allowIngest?.call() ?? true)) return;
     if (!await message.verify()) return; // forged or tampered
     if (!(messageAllowed?.call(message) ?? true)) return;
     // Reject messages from revoked devices.
@@ -368,9 +378,13 @@ class SyncSession {
       }
     }
     _wanted.remove(message.idHex);
-    if (await repository.add(message)) {
-      onAdded(message, this); // new → the engine spreads it onward
-      _requestMissing(message.prev.map(hex.encode)); // backfill its parents
+    try {
+      if (await repository.add(message)) {
+        onAdded(message, this); // new → the engine spreads it onward
+        _requestMissing(message.prev.map(hex.encode)); // backfill its parents
+      }
+    } on RepositoryCapacityException {
+      // Do not let one peer's signed history consume unbounded local storage.
     }
   }
 
@@ -397,6 +411,27 @@ class SyncSession {
 
   static Uint8List? _idBytes(String idHex) =>
       _idPattern.hasMatch(idHex) ? Uint8List.fromList(hex.decode(idHex)) : null;
+}
+
+class _IngestRateLimiter {
+  _IngestRateLimiter(this.limit, this.window);
+
+  final int limit;
+  final Duration window;
+  final List<DateTime> _accepted = <DateTime>[];
+
+  bool allow() {
+    final now = DateTime.now();
+    final cutoff = now.subtract(window);
+    var expired = 0;
+    while (expired < _accepted.length && _accepted[expired].isBefore(cutoff)) {
+      expired++;
+    }
+    if (expired > 0) _accepted.removeRange(0, expired);
+    if (_accepted.length >= limit) return false;
+    _accepted.add(now);
+    return true;
+  }
 }
 
 class _BlobAssembly {

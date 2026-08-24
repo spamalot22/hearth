@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/group_channel.dart';
 
@@ -36,6 +38,15 @@ void main() {
       expect(back.inviterName, 'Alice');
       expect(back.relayUrl, 'https://relay.example.com');
       expect(back.channel.withName('Renamed').knownMembers, {inviterHex});
+      expect(back.channel.epoch, c.epoch);
+    });
+
+    test('rotated key epochs survive registry encoding', () {
+      final original = GroupChannel.create('Secure');
+      final rotated = original.rotate(Uint8List(32)..fillRange(0, 32, 7), 1);
+      expect(rotated.epoch, 1);
+      expect(rotated.keys.keys, containsAll([0, 1]));
+      expect(rotated.key, everyElement(7));
     });
 
     test('a malformed invite returns null', () {

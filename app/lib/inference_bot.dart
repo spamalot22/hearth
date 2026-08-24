@@ -40,21 +40,39 @@ class InferenceBot {
   }
 
   /// Returns which model ids have been downloaded.
-  static Future<Set<String>> downloadedModels(List<String> ids) async {
+  static Future<Set<String>> downloadedModels(
+    Map<String, String> expectedHashes,
+  ) async {
     final result = <String>{};
-    for (final id in ids) {
+    for (final entry in expectedHashes.entries) {
+      final id = entry.key;
       final path = await pathFor(id);
-      if (await File(path).exists()) result.add(id);
+      final marker = File('$path.sha256');
+      if (await File(path).exists() &&
+          await marker.exists() &&
+          (await marker.readAsString()).trim() == entry.value) {
+        result.add(id);
+      }
     }
     return result;
   }
 
   /// Creates a bot if a valid model file is present. Returns null if no model.
-  static Future<InferenceBot?> tryCreate({String? modelId}) async {
+  static Future<InferenceBot?> tryCreate({
+    String? modelId,
+    String? expectedSha256,
+  }) async {
     String? path;
     if (modelId != null) {
       path = await pathFor(modelId);
       if (!await File(path).exists()) path = null;
+      if (path != null && expectedSha256 != null) {
+        final marker = File('$path.sha256');
+        if (!await marker.exists() ||
+            (await marker.readAsString()).trim() != expectedSha256) {
+          path = null;
+        }
+      }
     }
     // Fallback to legacy single-file name.
     path ??= await modelPath();
@@ -89,35 +107,53 @@ class InferenceBot {
     if (_busy) return null;
     if (!await File(_modelPath).exists()) return null;
     _busy = true;
+    var released = false;
+    var invocationStarted = false;
+    void release() {
+      if (released) return;
+      released = true;
+      _busy = false;
+    }
+
     try {
       // Reduce context size for large models to avoid OOM.
       final fileSize = await File(_modelPath).length();
       final ctx = fileSize > 4 * 1024 * 1024 * 1024 ? 1024 : 2048;
       final completer = Completer<String>();
       String result = '';
-      unawaited(
-        fllamaChat(
-          OpenAiRequest(
-            maxTokens: maxTokens,
-            messages: [
-              Message(
-                Role.system,
-                'You are a helpful assistant in a group chat called Hearth. Keep responses concise.',
-              ),
-              Message(Role.user, prompt),
-            ],
-            numGpuLayers: 99,
-            modelPath: _modelPath,
-            frequencyPenalty: 0.0,
-            presencePenalty: 1.1,
-            topP: 1.0,
-            contextSize: ctx,
-          ),
-          (String partial, String jsonStr, bool done) {
-            result = partial;
-            if (done) completer.complete(result);
-          },
+      final invocation = fllamaChat(
+        OpenAiRequest(
+          maxTokens: maxTokens,
+          messages: [
+            Message(
+              Role.system,
+              'You are a helpful assistant in a group chat called Hearth. Keep responses concise.',
+            ),
+            Message(Role.user, prompt),
+          ],
+          numGpuLayers: 99,
+          modelPath: _modelPath,
+          frequencyPenalty: 0.0,
+          presencePenalty: 1.1,
+          topP: 1.0,
+          contextSize: ctx,
         ),
+        (String partial, String jsonStr, bool done) {
+          result = partial;
+          if (done && !completer.isCompleted) completer.complete(result);
+        },
+      );
+      invocationStarted = true;
+      unawaited(
+        invocation
+            .then((_) {
+              if (!completer.isCompleted) completer.complete(result);
+              release();
+            })
+            .catchError((Object error, StackTrace stack) {
+              if (!completer.isCompleted) completer.completeError(error, stack);
+              release();
+            }),
       );
       return await completer.future.timeout(
         const Duration(seconds: 60),
@@ -129,7 +165,9 @@ class InferenceBot {
     } catch (_) {
       return null;
     } finally {
-      _busy = false;
+      // A UI timeout must not permit a second native inference while the first
+      // llama.cpp job is still running. The invocation completion releases it.
+      if (!invocationStarted) release();
     }
   }
 }

@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
+import 'bounded_download.dart';
 import 'candidate_cache.dart';
 import 'mesh_control.dart';
 import 'peer_connection_health.dart';
@@ -193,6 +194,17 @@ class WebRtcMesh {
   /// Peers with an open direct WebRTC data channel.
   Iterable<String> get connectedPeers => connections.keys;
 
+  /// Peers reachable through a validated encrypted relay tunnel.
+  Iterable<String> get relayConnectedPeers => _tunnels.entries
+      .where((entry) => entry.value.isReady)
+      .map((entry) => entry.key);
+
+  /// Every peer with a currently usable direct or relay-backed data path.
+  Iterable<String> get reachablePeers => {
+    ...connectedPeers,
+    ...relayConnectedPeers,
+  };
+
   void _start() {
     if (_started) return;
     _started = true;
@@ -364,15 +376,18 @@ class WebRtcMesh {
           : {_activeUrl, ...fallbackUrls, baseUrl}.toList();
       for (final url in urls) {
         try {
+          final request = http.Request('POST', url.replace(path: '/announce'))
+            ..headers['content-type'] = 'application/json'
+            ..body = payload;
           final res = await _client
-              .post(
-                url.replace(path: '/announce'),
-                headers: const {'content-type': 'application/json'},
-                body: payload,
-              )
+              .send(request)
               .timeout(const Duration(seconds: 5));
           if (res.statusCode != 200) continue;
-          final body = jsonDecode(res.body) as Map<String, dynamic>;
+          final body = await readJsonObjectBounded(
+            res,
+            maxBytes: 256 * 1024,
+            timeout: const Duration(seconds: 5),
+          );
           final token = body['token'];
           if (token is! String || token.isEmpty) continue;
           _activeUrl = url;
@@ -416,15 +431,20 @@ class WebRtcMesh {
       final headers = <String, String>{};
       if (_authToken != null) headers['Authorization'] = 'Bearer $_authToken';
       final pollUrl = _activeUrl;
+      final request = http.Request(
+        'GET',
+        pollUrl.replace(path: '/signal', queryParameters: params),
+      )..headers.addAll(headers);
       final res = await _client
-          .get(
-            pollUrl.replace(path: '/signal', queryParameters: params),
-            headers: headers,
-          )
+          .send(request)
           .timeout(const Duration(seconds: 5));
       if (res.statusCode != 200) return;
       if (pollUrl != _activeUrl) return;
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final body = await readJsonObjectBounded(
+        res,
+        maxBytes: 2 * 1024 * 1024,
+        timeout: const Duration(seconds: 5),
+      );
       if (_observeRelay(pollUrl, body['relayEpoch'])) {
         _signalSince = 0;
         retry = true;
@@ -735,22 +755,26 @@ class WebRtcMesh {
       'sig': await signSignal(identity, channel, kind, to, payload),
     };
     if (capability != null) signed[signalCapabilityField] = capability;
+    final request = http.Request('POST', _activeUrl.replace(path: '/signal'))
+      ..headers.addAll({
+        'content-type': 'application/json',
+        if (_authToken != null) 'Authorization': 'Bearer $_authToken',
+      })
+      ..body = jsonEncode({
+        'channel': channel,
+        'to': to,
+        'from': selfPubkeyHex,
+        'kind': kind,
+        'data': signed,
+      });
     final response = await _client
-        .post(
-          _activeUrl.replace(path: '/signal'),
-          headers: {
-            'content-type': 'application/json',
-            if (_authToken != null) 'Authorization': 'Bearer $_authToken',
-          },
-          body: jsonEncode({
-            'channel': channel,
-            'to': to,
-            'from': selfPubkeyHex,
-            'kind': kind,
-            'data': signed,
-          }),
-        )
+        .send(request)
         .timeout(const Duration(seconds: 5));
+    await readResponseBytesBounded(
+      response,
+      maxBytes: 64 * 1024,
+      timeout: const Duration(seconds: 5),
+    );
     if (response.statusCode != 200) {
       throw StateError('signal delivery failed (${response.statusCode})');
     }

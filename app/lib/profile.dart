@@ -76,8 +76,44 @@ class DmRegistry {
       .where(_pubkey.hasMatch)
       .toList(growable: false);
 
-  /// Records [peerPubkeyHex] as an established DM (idempotent).
-  Future<void> save(String peerPubkeyHex) => _box.put(peerPubkeyHex, '1');
+  /// Private relay mailbox negotiated inside the encrypted DM, or null while
+  /// this conversation still uses its deterministic bootstrap mailbox.
+  String? mailboxFor(String peerPubkeyHex) {
+    final value = _box.get(peerPubkeyHex);
+    final mailbox = value?.split('|').first;
+    return mailbox != null && RegExp(r'^[0-9a-f]{64}$').hasMatch(mailbox)
+        ? mailbox
+        : null;
+  }
+
+  String? mailboxClaimFor(String peerPubkeyHex) {
+    final parts = _box.get(peerPubkeyHex)?.split('|');
+    if (parts == null || parts.length != 2) return null;
+    return RegExp(r'^[0-9a-f]{68}$').hasMatch(parts[1]) ? parts[1] : null;
+  }
+
+  /// Records [peerPubkeyHex] as established, preserving any mailbox capability.
+  Future<void> save(String peerPubkeyHex) =>
+      _box.put(peerPubkeyHex, _box.get(peerPubkeyHex) ?? '1');
+
+  Future<bool> setMailbox(
+    String peerPubkeyHex,
+    String mailbox,
+    String claimId,
+  ) async {
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(mailbox)) {
+      throw ArgumentError.value(mailbox, 'mailbox', 'must be 32 random bytes');
+    }
+    if (!RegExp(r'^[0-9a-f]{68}$').hasMatch(claimId)) {
+      throw ArgumentError.value(claimId, 'claimId', 'must be a message id');
+    }
+    final currentClaim = mailboxClaimFor(peerPubkeyHex);
+    if (currentClaim != null && currentClaim.compareTo(claimId) <= 0) {
+      return false;
+    }
+    await _box.put(peerPubkeyHex, '$mailbox|$claimId');
+    return true;
+  }
 
   Future<void> remove(String peerPubkeyHex) => _box.delete(peerPubkeyHex);
 }

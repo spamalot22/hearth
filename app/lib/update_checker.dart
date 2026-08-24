@@ -6,6 +6,8 @@ import 'package:core/core.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 
+import 'bounded_download.dart';
+
 /// The app's build version, injected at compile time via --dart-define.
 /// Falls back to 'dev' for local runs without a tag.
 const String appVersion = String.fromEnvironment(
@@ -194,11 +196,13 @@ Future<UpdateState> checkForUpdate({
 
   final c = client ?? http.Client();
   try {
-    final res = await c
-        .get(manifestUrl ?? Uri.parse(githubManifestUrl))
-        .timeout(const Duration(seconds: 10));
+    final request = http.Request(
+      'GET',
+      manifestUrl ?? Uri.parse(githubManifestUrl),
+    );
+    final res = await c.send(request).timeout(const Duration(seconds: 10));
     if (res.statusCode != 200) return const UpdateCheckUnavailable();
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    final body = await readJsonObjectBounded(res, maxBytes: 256 * 1024);
     final info = await verifyManifest(body, publicKeyHex);
     if (info == null) return const UpdateCheckUnavailable();
 

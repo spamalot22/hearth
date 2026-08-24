@@ -85,6 +85,27 @@ describe('relay', () => {
     expect(data.seq).toBe(1);
   });
 
+  it('stores messages under an unguessable mailbox capability', async () => {
+    const app = createRelay();
+    const wire = await makeWire('private', 'logical-channel');
+    const mailbox = 'a'.repeat(64);
+    const sent = await app.request(`/messages?mailbox=${mailbox}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(wire),
+    });
+    expect(sent.status).toBe(200);
+
+    const privatePoll = (await (
+      await app.request(`/poll?channel=${mailbox}&since=0`)
+    ).json()) as { messages: WireMessage[] };
+    const publicPoll = (await (
+      await app.request('/poll?channel=logical-channel&since=0')
+    ).json()) as { messages: WireMessage[] };
+    expect(privatePoll.messages).toHaveLength(1);
+    expect(publicPoll.messages).toHaveLength(0);
+  });
+
   it('rejects a tampered message', async () => {
     const app = createRelay();
     const wire = await makeWire('hello');

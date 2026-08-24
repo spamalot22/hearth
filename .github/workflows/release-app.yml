@@ -1,6 +1,6 @@
 # Build the Hearth client and attach it to a GitHub Release on a version tag.
-# Triggers on the same tags as the relay deploy, so one tag = one coordinated
-# release: relay image → GHCR (deploy.yml) + client apps → this Release.
+# One tag drives the complete coordinated release: full verification, client
+# builds, relay image publication to GHCR, then the immutable GitHub Release.
 #
 #   git tag 0.1.1 && git push origin 0.1.1
 #
@@ -51,8 +51,74 @@ jobs:
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "tag $TAG -> versionName $NAME, versionCode $CODE"
 
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+      - name: Verify core and app
+        working-directory: app
+        run: |
+          flutter pub get
+          cd ../core && dart analyze --fatal-infos && dart test
+          cd ../app && flutter analyze && flutter test
+      - name: Verify backend and deployment config
+        env:
+          TS_AUTHKEY: ci-compose-validation
+        run: |
+          docker compose -f backend/docker-compose.yml config --quiet
+          docker compose -f backend/docker-compose.tailscale.yml config --quiet
+          cd backend
+          pnpm install --frozen-lockfile
+          pnpm audit --audit-level high
+          pnpm typecheck
+          pnpm test
+
+  relay:
+    needs: [version, verify, android, windows, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679fd # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/hearth-relay
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: ./backend
+          push: true
+          pull: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+
   android:
-    needs: version
+    needs: [version, verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -97,7 +163,7 @@ jobs:
           path: hearth-android.apk
 
   windows:
-    needs: version
+    needs: [version, verify]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -120,6 +186,7 @@ jobs:
           path: hearth-windows-setup.exe
 
   web:
+    needs: [version, verify]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -143,7 +210,7 @@ jobs:
   # GitHub releases are immutable once published, so all platform builds and the
   # signed manifest must exist before this job creates and publishes the draft.
   release:
-    needs: [android, windows, web]
+    needs: [android, windows, web, relay, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create and publish the GitHub Release
@@ -201,7 +268,9 @@ jobs:
         if: |
           needs.android.result == 'success' &&
           needs.windows.result == 'success' &&
-          needs.web.result == 'success'
+          needs.web.result == 'success' &&
+          needs.relay.result == 'success' &&
+          needs.verify.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

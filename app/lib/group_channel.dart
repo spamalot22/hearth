@@ -14,11 +14,18 @@ class GroupChannel {
     required this.id,
     required this.key,
     required this.name,
+    this.epoch = 0,
+    Map<int, Uint8List>? keys,
     Set<String> knownMembers = const <String>{},
-  }) : knownMembers = Set<String>.unmodifiable(knownMembers);
+  }) : keys = Map<int, Uint8List>.unmodifiable(
+         keys ?? <int, Uint8List>{epoch: key},
+       ),
+       knownMembers = Set<String>.unmodifiable(knownMembers);
 
   final String id; // 16 random bytes, hex
   final Uint8List key; // 32 random bytes
+  final int epoch;
+  final Map<int, Uint8List> keys;
   final String name; // local display name
   /// Root identities explicitly known from the invite bootstrap.
   final Set<String> knownMembers;
@@ -45,7 +52,7 @@ class GroupChannel {
     String? inviterName,
     String? relayUrl,
   }) =>
-      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'n': name, 'inv': inviterPubkeyHex, if (inviterName != null && inviterName.isNotEmpty) 'in': inviterName, if (relayUrl != null && relayUrl.isNotEmpty) 'r': relayUrl})))}';
+      'hearth:${base64Url.encode(utf8.encode(jsonEncode({'id': id, 'k': base64Url.encode(key), 'e': epoch, 'n': name, 'inv': inviterPubkeyHex, if (inviterName != null && inviterName.isNotEmpty) 'in': inviterName, if (relayUrl != null && relayUrl.isNotEmpty) 'r': relayUrl})))}';
 
   /// Parses an [invite] string into the channel + inviter, or null if malformed.
   static Invite? fromInvite(String invite) {
@@ -62,6 +69,8 @@ class GroupChannel {
       if (id == null || !_idRe.hasMatch(id) || k == null) return null;
       final key = base64Url.decode(k);
       if (key.length != 32) return null;
+      final epoch = json['e'] as int? ?? 0;
+      if (epoch < 0 || epoch > 0xffffffff) return null;
       String? nonEmpty(String key) {
         final v = json[key] as String?;
         return (v != null && v.trim().isNotEmpty) ? v : null;
@@ -73,6 +82,7 @@ class GroupChannel {
         channel: GroupChannel(
           id: id,
           key: key,
+          epoch: epoch,
           name: nonEmpty('n') ?? id,
           knownMembers: inviter == null ? const <String>{} : {inviter},
         ),
@@ -85,11 +95,42 @@ class GroupChannel {
     }
   }
 
-  GroupChannel withName(String newName) =>
-      GroupChannel(id: id, key: key, name: newName, knownMembers: knownMembers);
+  GroupChannel withName(String newName) => GroupChannel(
+    id: id,
+    key: key,
+    name: newName,
+    epoch: epoch,
+    keys: keys,
+    knownMembers: knownMembers,
+  );
+
+  GroupChannel withMembers(Iterable<String> members) => GroupChannel(
+    id: id,
+    key: key,
+    name: name,
+    epoch: epoch,
+    keys: keys,
+    knownMembers: {...knownMembers, ...members.where(_pubkeyRe.hasMatch)},
+  );
+
+  GroupChannel rotate(Uint8List newKey, int newEpoch) {
+    if (newKey.length != 32 || newEpoch <= epoch || newEpoch > 0xffffffff) {
+      return this;
+    }
+    return GroupChannel(
+      id: id,
+      key: newKey,
+      name: name,
+      epoch: newEpoch,
+      keys: {...keys, newEpoch: newKey},
+      knownMembers: knownMembers,
+    );
+  }
 
   Map<String, Object?> _toRegistry() => {
     'k': base64Url.encode(key),
+    'e': epoch,
+    'ks': keys.map((epoch, key) => MapEntry('$epoch', base64Url.encode(key))),
     'n': name,
     if (knownMembers.isNotEmpty) 'm': knownMembers.toList()..sort(),
   };
@@ -99,10 +140,32 @@ class GroupChannel {
         .whereType<String>()
         .where(_pubkeyRe.hasMatch)
         .toSet();
+    final currentKey = base64Url.decode(m['k']! as String);
+    final epoch = m['e'] as int? ?? 0;
+    if (epoch < 0 || epoch > 0xffffffff) {
+      throw const FormatException('invalid group key epoch');
+    }
+    final keys = <int, Uint8List>{epoch: currentKey};
+    final rawKeys = m['ks'];
+    if (rawKeys is Map) {
+      for (final entry in rawKeys.entries) {
+        final keyEpoch = int.tryParse(entry.key.toString());
+        if (keyEpoch == null ||
+            keyEpoch < 0 ||
+            keyEpoch > 0xffffffff ||
+            entry.value is! String) {
+          continue;
+        }
+        final decoded = base64Url.decode(entry.value! as String);
+        if (decoded.length == 32) keys[keyEpoch] = decoded;
+      }
+    }
     return GroupChannel(
       id: id,
-      key: base64Url.decode(m['k']! as String),
+      key: currentKey,
       name: m['n'] as String? ?? id,
+      epoch: epoch,
+      keys: keys,
       knownMembers: members,
     );
   }

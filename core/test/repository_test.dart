@@ -63,5 +63,14 @@ void main() {
       await repo.load();
       expect(repo.length, 1);
     });
+
+    test('rejects messages beyond the configured storage quota', () async {
+      final repo = MessageRepository(InMemoryMessageStorage(), maxMessages: 1);
+      expect(await repo.add(await msg('first')), isTrue);
+      await expectLater(
+        repo.add(await msg('second')),
+        throwsA(isA<RepositoryCapacityException>()),
+      );
+    });
   });
 }

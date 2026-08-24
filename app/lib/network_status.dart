@@ -10,6 +10,7 @@ class NetworkStatus extends StatefulWidget {
     required this.relayUp,
     required this.checkingRelay,
     required this.peerCount,
+    this.relayPeerCount = 0,
     required this.channelCount,
     required this.relayUrl,
     required this.onTapRelay,
@@ -20,6 +21,7 @@ class NetworkStatus extends StatefulWidget {
   final bool? relayUp;
   final bool checkingRelay;
   final int peerCount;
+  final int relayPeerCount;
   final int channelCount;
   final String relayUrl;
   final VoidCallback onTapRelay;
@@ -170,6 +172,13 @@ class _NetworkStatusState extends State<NetworkStatus>
   }
 
   String _healthMessage(bool connected, bool relayOk) {
+    final directPeers = widget.peerCount - widget.relayPeerCount;
+    if (widget.relayPeerCount > 0 && directPeers <= 0) {
+      return 'Peers reachable through encrypted relay fallback.';
+    }
+    if (widget.relayPeerCount > 0 && directPeers > 0) {
+      return 'Direct P2P active; some peers use encrypted relay fallback.';
+    }
     if (connected && relayOk) return 'Fully connected — messages flow P2P.';
     if (connected && !relayOk) {
       return 'P2P active — relay down, but messages still flow directly.';

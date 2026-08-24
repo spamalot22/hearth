@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
@@ -130,12 +131,11 @@ class DeviceStore {
     for (final cert in _certsCache) {
       if (cert.deviceKeyHex == deviceKeyHex) return hex.encode(cert.rootKey);
     }
-    // Check peer bundles — each bundle's root is known.
-    for (final entry in _bundlesCache.entries) {
-      final bundle = entry.value;
-      for (final device in bundle.devices) {
-        if (hex.encode(device) == deviceKeyHex) return entry.key;
-      }
+    // Signed bundles are additive authorization evidence. A newer bundle may
+    // be published by a newly enrolled device before it has learned about all
+    // existing devices, so consult the complete observed history here.
+    for (final entry in _deviceHistory.entries) {
+      if (entry.value.contains(deviceKeyHex)) return entry.key;
     }
     return null;
   }
@@ -232,9 +232,19 @@ class DeviceStore {
   /// The latest device bundle for [rootKeyHex], or null if none received.
   DeviceBundle? bundleFor(String rootKeyHex) => _bundlesCache[rootKeyHex];
 
-  /// Stores a verified bundle. Only accepts if it's newer than the existing one
-  /// (monotonic) and not unreasonably far in the future (prevents timestamp
-  /// poisoning where a far-future bundle permanently blocks updates).
+  /// Every device key this root has ever authorised, minus explicit
+  /// revocations. Bundles are deliberately additive: omission from a newer
+  /// bundle is not a revocation and must not strand another enrolled device.
+  List<Uint8List> authorizedDeviceKeys(String rootKeyHex) {
+    final revoked = revokedDevicesFor(rootKeyHex);
+    return (_deviceHistory[rootKeyHex] ?? const <String>{})
+        .where((key) => !revoked.contains(key))
+        .map((key) => Uint8List.fromList(hex.decode(key)))
+        .toList(growable: false);
+  }
+
+  /// Stores a verified bundle. The latest snapshot remains monotonic, while
+  /// authorised keys from valid stale bundles are still merged into history.
   Future<bool> setBundle(DeviceBundle bundle) async {
     try {
       if (!await bundle.verify()) return false;
@@ -242,20 +252,24 @@ class DeviceStore {
       return false;
     }
     final rootHex = bundle.rootKeyHex;
-    final existing = _bundlesCache[rootHex];
-    if (existing != null && existing.publishedMs >= bundle.publishedMs) {
-      return false; // reject stale/replayed bundle
-    }
     // Reject bundles with timestamps more than 5 minutes in the future.
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     if (bundle.publishedMs > now + 5 * 60 * 1000) {
       return false; // far-future timestamp — likely poisoned or clock-skewed
     }
-    _bundlesCache[rootHex] = bundle;
-    (_deviceHistory[rootHex] ??= {}).addAll(bundle.devices.map(hex.encode));
-    await _persistBundles();
-    await _persistDeviceHistory();
-    return true;
+    final history = _deviceHistory[rootHex] ??= <String>{};
+    final historyLength = history.length;
+    history.addAll(bundle.devices.map(hex.encode));
+    final historyChanged = history.length != historyLength;
+    final existing = _bundlesCache[rootHex];
+    final isNewer =
+        existing == null || existing.publishedMs < bundle.publishedMs;
+    if (isNewer) {
+      _bundlesCache[rootHex] = bundle;
+      await _persistBundles();
+    }
+    if (historyChanged) await _persistDeviceHistory();
+    return isNewer || historyChanged;
   }
 
   Future<void> _persistBundles() => _box.put(

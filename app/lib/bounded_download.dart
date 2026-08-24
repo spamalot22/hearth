@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -44,4 +45,39 @@ Future<Uint8List> downloadBytesBounded(
   } finally {
     if (ownedClient) c.close();
   }
+}
+
+/// Reads an already-open HTTP response with a hard byte ceiling.
+Future<Uint8List> readResponseBytesBounded(
+  http.StreamedResponse response, {
+  required int maxBytes,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final declared = response.contentLength;
+  if (declared != null && declared > maxBytes) {
+    throw StateError('response is larger than the safety limit');
+  }
+  final chunks = BytesBuilder(copy: false);
+  var received = 0;
+  await for (final chunk in response.stream.timeout(timeout)) {
+    received += chunk.length;
+    if (received > maxBytes) {
+      throw StateError('response exceeded the safety limit');
+    }
+    chunks.add(chunk);
+  }
+  return chunks.takeBytes();
+}
+
+Future<Map<String, dynamic>> readJsonObjectBounded(
+  http.StreamedResponse response, {
+  required int maxBytes,
+  Duration timeout = const Duration(seconds: 10),
+}) async {
+  final bytes = await readResponseBytesBounded(
+    response,
+    maxBytes: maxBytes,
+    timeout: timeout,
+  );
+  return (jsonDecode(utf8.decode(bytes)) as Map).cast<String, dynamic>();
 }

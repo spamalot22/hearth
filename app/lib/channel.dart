@@ -23,17 +23,42 @@ abstract class ChannelCipher {
 }
 
 class GroupChannelCipher implements ChannelCipher {
-  GroupChannelCipher(this._key);
+  GroupChannelCipher(this._keys, this._epoch);
 
-  final Uint8List _key;
-
-  @override
-  Future<Uint8List> encrypt(List<int> plaintext) =>
-      GroupCipher.encrypt(plaintext, key: _key);
+  static const _magic = <int>[0x48, 0x47, 0x01];
+  final Map<int, Uint8List> _keys;
+  final int _epoch;
 
   @override
-  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) =>
-      GroupCipher.decrypt(boxed, key: _key);
+  Future<Uint8List> encrypt(List<int> plaintext) async {
+    final key = _keys[_epoch];
+    if (key == null) throw StateError('missing current group key');
+    final encrypted = await GroupCipher.encrypt(plaintext, key: key);
+    final epochBytes = ByteData(4)..setUint32(0, _epoch, Endian.big);
+    final output = BytesBuilder(copy: false)
+      ..add(_magic)
+      ..add(epochBytes.buffer.asUint8List())
+      ..add(encrypted);
+    return output.takeBytes();
+  }
+
+  @override
+  Future<Uint8List> decrypt(Uint8List boxed, {Uint8List? senderDevice}) {
+    if (boxed.length >= 7 &&
+        boxed[0] == _magic[0] &&
+        boxed[1] == _magic[1] &&
+        boxed[2] == _magic[2]) {
+      final epoch = ByteData.sublistView(boxed, 3, 7).getUint32(0, Endian.big);
+      final key = _keys[epoch];
+      if (key == null) throw FormatException('unknown group key epoch $epoch');
+      return GroupCipher.decrypt(Uint8List.sublistView(boxed, 7), key: key);
+    }
+    final legacyKey = _keys[0];
+    if (legacyKey == null) {
+      throw const FormatException('missing legacy group key');
+    }
+    return GroupCipher.decrypt(boxed, key: legacyKey);
+  }
 }
 
 /// Per-device DM cipher. Encrypts to each of the peer's active device keys
@@ -42,16 +67,15 @@ class GroupChannelCipher implements ChannelCipher {
 class MultiDeviceDmCipher implements ChannelCipher {
   MultiDeviceDmCipher({
     required this.selfDevice,
-    required this.peerBundleLookup,
+    required this.peerDeviceKeys,
     required this.ownDeviceKeys,
   });
 
   /// This device's identity (for ECDH in MultiDeviceBox).
   final Identity selfDevice;
 
-  /// Looks up the peer's current device bundle. If null, the peer hasn't
-  /// published one yet and DMs can't be encrypted to them.
-  final DeviceBundle? Function() peerBundleLookup;
+  /// Looks up every non-revoked device key the peer has authorised.
+  final List<Uint8List> Function() peerDeviceKeys;
 
   /// Our own active device keys (so we can encrypt to ourselves for self-read
   /// on other devices).
@@ -59,17 +83,14 @@ class MultiDeviceDmCipher implements ChannelCipher {
 
   @override
   Future<Uint8List> encrypt(List<int> plaintext) async {
-    final peerBundle = peerBundleLookup();
-    if (peerBundle == null) {
+    final peerKeys = peerDeviceKeys();
+    if (peerKeys.isEmpty) {
       throw StateError(
         'cannot encrypt DM: peer has no device bundle (they must update)',
       );
     }
     // Encrypt to all peer devices + our own devices.
-    final recipientKeys = <Uint8List>[
-      ...peerBundle.devices,
-      ...ownDeviceKeys(),
-    ];
+    final recipientKeys = <Uint8List>[...peerKeys, ...ownDeviceKeys()];
     final seen = <String>{};
     final deduped = <Uint8List>[];
     for (final k in recipientKeys) {
@@ -96,19 +117,16 @@ class MultiDeviceDmCipher implements ChannelCipher {
         // Stale sender device — try others below.
       }
     }
-    // Fallback: iterate peer bundle devices.
-    final peerBundle = peerBundleLookup();
-    if (peerBundle != null) {
-      for (final dev in peerBundle.devices) {
-        try {
-          return await MultiDeviceBox.decrypt(
-            boxed,
-            recipientDevice: selfDevice,
-            senderDeviceEd: dev,
-          );
-        } catch (_) {
-          continue;
-        }
+    // Fallback: iterate all authorised peer devices.
+    for (final dev in peerDeviceKeys()) {
+      try {
+        return await MultiDeviceBox.decrypt(
+          boxed,
+          recipientDevice: selfDevice,
+          senderDeviceEd: dev,
+        );
+      } catch (_) {
+        continue;
       }
     }
     // Try our own devices (self-sent message from another device).
@@ -204,6 +222,9 @@ class ChannelSession {
   /// session has no live courier. Used to seed the background poller's baseline.
   int? get relaySince => _relayCourier?.since;
 
+  /// Private relay mailbox capability (may differ from the signed channel id).
+  String get relayMailbox => _relayCourier?.relayMailbox ?? channelId;
+
   /// Relay process generation associated with [relaySince].
   String? get relayEpoch => _relayCourier?.relayEpoch;
 
@@ -222,6 +243,7 @@ class ChannelSession {
     bool Function(Message message)? messageAllowed,
     CandidateCache? candidateCache,
     List<int>? peerPubkey,
+    String? relayMailbox,
     void Function()? onPeerConnected,
     void Function(String peerHex)? onPeerConnectedHex,
     void Function(String fromHex, List<String> peers)? onContactsOnline,
@@ -301,6 +323,7 @@ class ChannelSession {
       courier = RelayTransport(
         baseUrl: relayUrl,
         channel: channelId,
+        mailbox: relayMailbox,
         pollInterval: const Duration(seconds: 10),
         baseUrlProvider: () => mesh?.activeUrl ?? relayUrl,
       );
@@ -518,7 +541,9 @@ class ChannelManager {
     this.onDmConnected,
     this.isBlocked,
     this.isDeviceRevoked,
-    this.peerBundleLookup,
+    this.peerDeviceKeysLookup,
+    this.peerRootLookup,
+    this.dmMailboxLookup,
     this.ownDeviceKeys,
     this.versionManifest,
   });
@@ -561,8 +586,14 @@ class ChannelManager {
   /// [SyncEngine] so revocations cannot affect another identity's devices.
   final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
 
-  /// Looks up a peer's device bundle by root hex. Used by MultiDeviceDmCipher.
-  final DeviceBundle? Function(String rootHex)? peerBundleLookup;
+  /// Returns the complete active device set accumulated from signed bundles.
+  final List<Uint8List> Function(String rootHex)? peerDeviceKeysLookup;
+
+  /// Resolves an authorised device key to its signing root identity.
+  final String? Function(String deviceKeyHex)? peerRootLookup;
+
+  /// Returns the negotiated private relay mailbox for a DM peer.
+  final String? Function(String peerRootHex)? dmMailboxLookup;
 
   /// Returns this identity's active device keys (for self-encryption in DMs).
   final List<Uint8List> Function()? ownDeviceKeys;
@@ -673,7 +704,16 @@ class ChannelManager {
   }
 
   /// Opens (or focuses) a group channel given its [id] and encryption [key].
-  Future<void> openGroup(String id, Uint8List key) async {
+  Future<void> openGroup(
+    String id,
+    Uint8List key, {
+    int epoch = 0,
+    Map<int, Uint8List>? keys,
+    bool replace = false,
+  }) async {
+    if (replace) {
+      await _sessions.remove(id)?.close();
+    }
     if (!_sessions.containsKey(id)) {
       _sessions[id] = await ChannelSession.open(
         channelId: id,
@@ -683,7 +723,7 @@ class ChannelManager {
         fallbackUrls: fallbackUrls,
         live: live,
         onUpdate: () => _onSessionUpdate(id),
-        cipher: GroupChannelCipher(key),
+        cipher: GroupChannelCipher(keys ?? {epoch: key}, epoch),
         meshAuthKey: key,
         blobStore: blobStore,
         isDeviceRevoked: isDeviceRevoked,
@@ -706,12 +746,12 @@ class ChannelManager {
   /// back to the legacy PairBox-only cipher otherwise.
   ChannelCipher _dmCipher(List<int> peerPubkey) {
     final device = meshIdentity ?? identity;
-    final bundleFn = peerBundleLookup;
+    final keysFn = peerDeviceKeysLookup;
     final ownKeysFn = ownDeviceKeys;
     final peerHex = hex.encode(peerPubkey);
     return MultiDeviceDmCipher(
       selfDevice: device,
-      peerBundleLookup: () => bundleFn?.call(peerHex),
+      peerDeviceKeys: () => keysFn?.call(peerHex) ?? const <Uint8List>[],
       ownDeviceKeys: ownKeysFn ?? () => [device.publicKey],
     );
   }
@@ -726,9 +766,8 @@ class ChannelManager {
       (key) => hex.encode(key) == peerHex,
     )) {
       rootHex = identity.publicKeyHex;
-    } else if (peerBundleLookup
+    } else if (peerDeviceKeysLookup
             ?.call(peerRootHex)
-            ?.devices
             .any((key) => hex.encode(key) == peerHex) ??
         false) {
       rootHex = peerRootHex;
@@ -738,7 +777,7 @@ class ChannelManager {
   }
 
   bool _groupPeerAllowed(String peerHex) {
-    final rootHex = deviceToRoot[peerHex];
+    final rootHex = peerRootLookup?.call(peerHex) ?? deviceToRoot[peerHex];
     return rootHex == null ||
         !(isDeviceRevoked?.call(rootHex, peerHex) ?? false);
   }
@@ -754,9 +793,12 @@ class ChannelManager {
 
   /// Opens (or focuses) the encrypted DM with [peerPubkey]. A blocked peer is
   /// refused, so no DM session — hence no ingestion — exists for them.
-  Future<void> openDm(List<int> peerPubkey) async {
+  Future<void> openDm(List<int> peerPubkey, {bool replace = false}) async {
     if (isBlocked?.call(hex.encode(peerPubkey)) ?? false) return;
     final id = await dmChannelId(identity.publicKeyHex, hex.encode(peerPubkey));
+    if (replace) {
+      await _sessions.remove(id)?.close();
+    }
     // Reserve synchronously so a concurrent open for the same peer bails here
     // rather than building a second (leaked) session across the await below.
     if (!_sessions.containsKey(id) && _opening.add(id)) {
@@ -771,6 +813,7 @@ class ChannelManager {
           onUpdate: () => _onSessionUpdate(id),
           cipher: _dmCipher(peerPubkey),
           peerPubkey: peerPubkey,
+          relayMailbox: dmMailboxLookup?.call(hex.encode(peerPubkey)),
           blobStore: blobStore,
           isDeviceRevoked: isDeviceRevoked,
           messageAllowed: (message) {
@@ -799,6 +842,13 @@ class ChannelManager {
     }
     _activeId = id;
     onUpdate();
+  }
+
+  Future<void> replaceDmMailbox(List<int> peerPubkey) async {
+    final keepActive = _activeId;
+    final id = await dmChannelId(identity.publicKeyHex, hex.encode(peerPubkey));
+    await openDm(peerPubkey, replace: true);
+    if (keepActive != null && keepActive != id) activate(keepActive);
   }
 
   void activate(String channelId) {

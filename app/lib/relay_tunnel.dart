@@ -9,6 +9,8 @@ import 'package:core/core.dart';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
+import 'bounded_download.dart';
+
 /// A [FrameChannel] that tunnels gossip frames through the relay for peers that
 /// cannot establish a direct WebRTC connection.
 ///
@@ -151,20 +153,22 @@ class RelayTunnel implements FrameChannel {
     for (var attempt = 0; attempt < 5 && !_closed; attempt++) {
       try {
         final token = _token;
-        final res = await _client
-            .post(
-              _url.replace(path: '/tunnel'),
-              body: jsonEncode({
-                'from': selfPubkeyHex,
-                'to': peerPubkeyHex,
-                'data': data,
-              }),
-              headers: {
-                'Content-Type': 'application/json',
-                if (token != null) 'Authorization': 'Bearer $token',
-              },
-            )
-            .timeout(_requestTimeout);
+        final request = http.Request('POST', _url.replace(path: '/tunnel'))
+          ..headers.addAll({
+            'Content-Type': 'application/json',
+            if (token != null) 'Authorization': 'Bearer $token',
+          })
+          ..body = jsonEncode({
+            'from': selfPubkeyHex,
+            'to': peerPubkeyHex,
+            'data': data,
+          });
+        final res = await _client.send(request).timeout(_requestTimeout);
+        await readResponseBytesBounded(
+          res,
+          maxBytes: 64 * 1024,
+          timeout: _requestTimeout,
+        );
         if (res.statusCode == 200) return true;
         if (res.statusCode != 403 &&
             res.statusCode != 429 &&
@@ -194,14 +198,17 @@ class RelayTunnel implements FrameChannel {
       final headers = <String, String>{};
       final token = _token;
       if (token != null) headers['Authorization'] = 'Bearer $token';
-      final res = await _client
-          .get(
-            _url.replace(path: '/tunnel', queryParameters: params),
-            headers: headers,
-          )
-          .timeout(_requestTimeout);
+      final request = http.Request(
+        'GET',
+        _url.replace(path: '/tunnel', queryParameters: params),
+      )..headers.addAll(headers);
+      final res = await _client.send(request).timeout(_requestTimeout);
       if (res.statusCode != 200) return;
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      final body = await readJsonObjectBounded(
+        res,
+        maxBytes: 4 * 1024 * 1024,
+        timeout: _requestTimeout,
+      );
       final fragments = body['frames'];
       if (fragments is! List) return;
       for (final raw in fragments.whereType<String>().take(64)) {

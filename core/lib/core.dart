@@ -26,7 +26,8 @@ export 'src/identity.dart'
 export 'src/message.dart'
     show Message, kHearthMessageVersion, maxMessagePayloadBytes;
 export 'src/mnemonic.dart' show seedToMnemonic, mnemonicToSeed, bip39Words;
-export 'src/repository.dart' show MessageRepository;
+export 'src/repository.dart'
+    show MessageRepository, RepositoryCapacityException;
 export 'src/storage.dart' show InMemoryMessageStorage, MessageStorage;
 export 'src/sync.dart' show SyncEngine, SyncSession;
 export 'src/transport.dart' show RelayTransport, Transport, TransportException;

@@ -4,6 +4,7 @@
 // Uses background_fetch which leverages JobScheduler on Android (minimum 15 min).
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:background_fetch/background_fetch.dart';
 import 'package:core/core.dart';
@@ -69,6 +70,8 @@ Future<void> saveBackgroundPollState({
   Map<String, int> cursors = const {},
   Map<String, String> epochs = const {},
   Map<String, String> names = const {},
+  Map<String, String> mailboxes = const {},
+  Map<String, List<String>> allowedAuthors = const {},
   String? selfAuthor,
 }) async {
   await Hive.initFlutter();
@@ -77,21 +80,34 @@ Future<void> saveBackgroundPollState({
   await box.put('channels', channelIds.join(','));
   // Channel id -> local name, so per-channel notifications can be labelled.
   await box.put('names', jsonEncode(names));
+  await box.put('mailboxes', jsonEncode(mailboxes));
+  await box.put('allowedAuthors', jsonEncode(allowedAuthors));
   if (selfAuthor != null) await box.put('self', selfAuthor);
   if (cursors.isNotEmpty || epochs.isNotEmpty) {
     final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
     final epochBox = await Hive.openBox<String>('hearth.bg_epochs');
+    final activeKeys = channelIds
+        .map((channel) => '$channel|${mailboxes[channel] ?? channel}')
+        .toSet();
+    for (final key in cursorBox.keys.whereType<String>().toList()) {
+      if (!activeKeys.contains(key)) await cursorBox.delete(key);
+    }
+    for (final key in epochBox.keys.whereType<String>().toList()) {
+      if (!activeKeys.contains(key)) await epochBox.delete(key);
+    }
     for (final entry in epochs.entries) {
-      final previous = epochBox.get(entry.key);
+      final key = '${entry.key}|${mailboxes[entry.key] ?? entry.key}';
+      final previous = epochBox.get(key);
       if (previous != null && previous != entry.value) {
-        await cursorBox.put(entry.key, cursors[entry.key] ?? 0);
+        await cursorBox.put(key, cursors[entry.key] ?? 0);
       }
-      await epochBox.put(entry.key, entry.value);
+      await epochBox.put(key, entry.value);
     }
     for (final entry in cursors.entries) {
+      final key = '${entry.key}|${mailboxes[entry.key] ?? entry.key}';
       // Within one relay generation, only move forward.
-      if (entry.value > (cursorBox.get(entry.key) ?? 0)) {
-        await cursorBox.put(entry.key, entry.value);
+      if (entry.value > (cursorBox.get(key) ?? 0)) {
+        await cursorBox.put(key, entry.value);
       }
     }
   }
@@ -99,15 +115,31 @@ Future<void> saveBackgroundPollState({
 
 Future<Map<String, dynamic>?> _fetchPoll(
   Uri relay,
-  String channelId,
+  String mailbox,
   int since,
 ) async {
-  final params = <String, String>{'channel': channelId, 'since': '$since'};
-  final res = await http
-      .get(relay.replace(path: '/poll', queryParameters: params))
-      .timeout(const Duration(seconds: 10));
-  if (res.statusCode != 200) return null;
-  return jsonDecode(res.body) as Map<String, dynamic>;
+  final params = <String, String>{'channel': mailbox, 'since': '$since'};
+  final request = http.Request(
+    'GET',
+    relay.replace(path: '/poll', queryParameters: params),
+  );
+  final client = http.Client();
+  try {
+    final res = await client.send(request).timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) return null;
+    const maxBytes = 8 * 1024 * 1024;
+    if ((res.contentLength ?? 0) > maxBytes) return null;
+    final bytes = BytesBuilder(copy: false);
+    var received = 0;
+    await for (final chunk in res.stream.timeout(const Duration(seconds: 10))) {
+      received += chunk.length;
+      if (received > maxBytes) return null;
+      bytes.add(chunk);
+    }
+    return jsonDecode(utf8.decode(bytes.takeBytes())) as Map<String, dynamic>;
+  } finally {
+    client.close();
+  }
 }
 
 /// Polls relay from Hive-stored state (works in headless isolate).
@@ -119,9 +151,22 @@ Future<void> _pollFromStorage() async {
     final channelsRaw = box.get('channels');
     final selfAuthor = box.get('self');
     final namesRaw = box.get('names');
+    final mailboxesRaw = box.get('mailboxes');
+    final allowedRaw = box.get('allowedAuthors');
     final names = namesRaw != null
         ? (jsonDecode(namesRaw) as Map).cast<String, String>()
         : const <String, String>{};
+    final mailboxes = mailboxesRaw != null
+        ? (jsonDecode(mailboxesRaw) as Map).cast<String, String>()
+        : const <String, String>{};
+    final allowedAuthors = <String, Set<String>>{};
+    if (allowedRaw != null) {
+      final decoded = (jsonDecode(allowedRaw) as Map).cast<String, dynamic>();
+      for (final entry in decoded.entries) {
+        allowedAuthors[entry.key] =
+            (entry.value as List?)?.whereType<String>().toSet() ?? <String>{};
+      }
+    }
 
     if (relayUrl == null || channelsRaw == null || channelsRaw.isEmpty) return;
 
@@ -133,24 +178,28 @@ Future<void> _pollFromStorage() async {
     // Per-channel new counts → one notification per group/DM (below).
     final newPerChannel = <String, int>{};
     for (final channelId in channels) {
+      final mailbox = mailboxes[channelId] ?? channelId;
+      final cursorKey = '$channelId|$mailbox';
+      final allowed = allowedAuthors[channelId];
+      if (allowed == null || allowed.isEmpty) continue;
       // First time we ever poll this channel in the background: establish the
       // baseline silently instead of notifying for the entire backlog.
-      final hasBaseline = cursorBox.containsKey(channelId);
-      var since = cursorBox.get(channelId) ?? 0;
-      var body = await _fetchPoll(relay, channelId, since);
+      final hasBaseline = cursorBox.containsKey(cursorKey);
+      var since = cursorBox.get(cursorKey) ?? 0;
+      var body = await _fetchPoll(relay, mailbox, since);
       if (body == null) continue;
       var responseEpoch = body['relayEpoch'];
       if (responseEpoch is String && responseEpoch.isNotEmpty) {
-        final previousEpoch = epochBox.get(channelId);
+        final previousEpoch = epochBox.get(cursorKey);
         if (previousEpoch != null && previousEpoch != responseEpoch) {
           since = 0;
-          await cursorBox.put(channelId, since);
-          body = await _fetchPoll(relay, channelId, since);
+          await cursorBox.put(cursorKey, since);
+          body = await _fetchPoll(relay, mailbox, since);
           if (body == null) continue;
           responseEpoch = body['relayEpoch'];
         }
         if (responseEpoch is String && responseEpoch.isNotEmpty) {
-          await epochBox.put(channelId, responseEpoch);
+          await epochBox.put(cursorKey, responseEpoch);
         }
       }
       final messages = body['messages'] as List? ?? [];
@@ -163,9 +212,9 @@ Future<void> _pollFromStorage() async {
       if (!hasBaseline) {
         // Baseline directly at the channel head. Poll responses are paginated,
         // so using the first page cursor would notify old backlog later.
-        await cursorBox.put(channelId, latestSeq);
+        await cursorBox.put(cursorKey, latestSeq);
       } else if (seq > since) {
-        await cursorBox.put(channelId, seq);
+        await cursorBox.put(cursorKey, seq);
       }
       if (!hasBaseline) continue; // baseline just set — nothing to report yet
       // Count new messages, excluding our own (the relay echoes them back).
@@ -175,6 +224,7 @@ Future<void> _pollFromStorage() async {
           if (raw is! Map) continue;
           final message = Message.fromJson(raw.cast<String, Object?>());
           if (message.channel != channelId || !await message.verify()) continue;
+          if (!allowed.contains(raw['author'])) continue;
           if (raw['author'] == selfAuthor) continue;
           count++;
         } catch (_) {

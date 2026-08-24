@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -41,6 +42,7 @@ class RelayTransport implements Transport {
   RelayTransport({
     required this.baseUrl,
     required this.channel,
+    this.mailbox,
     this.baseUrlProvider,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
@@ -48,6 +50,7 @@ class RelayTransport implements Transport {
 
   final Uri baseUrl;
   final String channel;
+  final String? mailbox;
   final Duration pollInterval;
   final http.Client _client;
 
@@ -67,6 +70,11 @@ class RelayTransport implements Transport {
   Uri? _cursorUrl;
   bool _epochObserved = false;
   static const _requestTimeout = Duration(seconds: 10);
+  static const _maxPollResponseBytes = 8 * 1024 * 1024;
+  static const _maxSendResponseBytes = 64 * 1024;
+
+  /// The relay storage capability, distinct from the signed logical channel.
+  String get relayMailbox => mailbox ?? channel;
 
   /// The poll cursor (relay sequence number seen so far).
   int get since => _since;
@@ -111,16 +119,21 @@ class RelayTransport implements Transport {
 
   @override
   Future<void> send(Message message) async {
-    final res = await _client
-        .post(
-          _url.replace(path: '/messages'),
-          headers: const {'content-type': 'application/json'},
-          body: jsonEncode(message.toJson()),
-        )
-        .timeout(_requestTimeout);
+    final request =
+        http.Request(
+            'POST',
+            _url.replace(
+              path: '/messages',
+              queryParameters: mailbox == null ? null : {'mailbox': mailbox!},
+            ),
+          )
+          ..headers['content-type'] = 'application/json'
+          ..body = jsonEncode(message.toJson());
+    final res = await _client.send(request).timeout(_requestTimeout);
+    final responseBody = await _readBounded(res, _maxSendResponseBytes);
     if (res.statusCode != 200) {
       throw TransportException(
-        'send failed: HTTP ${res.statusCode} ${res.body}',
+        'send failed: HTTP ${res.statusCode} ${utf8.decode(responseBody)}',
       );
     }
   }
@@ -139,14 +152,20 @@ class RelayTransport implements Transport {
       _epochObserved = false;
     }
     _cursorUrl = url;
-    final params = <String, String>{'channel': channel, 'since': '$_since'};
-    final res = await _client
-        .get(url.replace(path: '/poll', queryParameters: params))
-        .timeout(_requestTimeout);
+    final params = <String, String>{
+      'channel': relayMailbox,
+      'since': '$_since',
+    };
+    final request = http.Request(
+      'GET',
+      url.replace(path: '/poll', queryParameters: params),
+    );
+    final res = await _client.send(request).timeout(_requestTimeout);
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
     }
-    final body = jsonDecode(res.body) as Map<String, dynamic>;
+    final bodyBytes = await _readBounded(res, _maxPollResponseBytes);
+    final body = jsonDecode(utf8.decode(bodyBytes)) as Map<String, dynamic>;
     final responseEpoch = body['relayEpoch'];
     if (responseEpoch is String && responseEpoch.isNotEmpty) {
       final changed = _epochObserved && _relayEpoch != responseEpoch;
@@ -187,5 +206,25 @@ class RelayTransport implements Transport {
     _timer?.cancel();
     _client.close();
     await _incoming.close();
+  }
+
+  static Future<Uint8List> _readBounded(
+    http.StreamedResponse response,
+    int maxBytes,
+  ) async {
+    final expected = response.contentLength;
+    if (expected != null && expected > maxBytes) {
+      throw TransportException('relay response exceeds $maxBytes bytes');
+    }
+    final bytes = BytesBuilder(copy: false);
+    var length = 0;
+    await for (final chunk in response.stream) {
+      length += chunk.length;
+      if (length > maxBytes) {
+        throw TransportException('relay response exceeds $maxBytes bytes');
+      }
+      bytes.add(chunk);
+    }
+    return bytes.takeBytes();
   }
 }

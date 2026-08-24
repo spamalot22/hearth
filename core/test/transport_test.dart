@@ -42,6 +42,36 @@ void main() {
       expect(body['id'], m.toJson()['id']);
     });
 
+    test('uses a private mailbox without changing signed channel', () async {
+      final mailbox = 'a' * 64;
+      final seen = <Uri>[];
+      final client = MockClient((request) async {
+        seen.add(request.url);
+        if (request.method == 'POST') {
+          return http.Response('{"ok":true}', 200);
+        }
+        return http.Response('{"messages":[],"seq":0}', 200);
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'logical-channel',
+        mailbox: mailbox,
+        client: client,
+      );
+      final message = await Message.create(
+        author: author,
+        channel: 'logical-channel',
+        payload: _b('private'),
+      );
+
+      await transport.send(message);
+      await transport.poll();
+
+      expect(seen[0].queryParameters['mailbox'], mailbox);
+      expect(seen[1].queryParameters['channel'], mailbox);
+      expect(message.channel, 'logical-channel');
+    });
+
     test('send throws on a non-200 response', () async {
       final client = MockClient((req) async => http.Response('nope', 400));
       final transport = RelayTransport(

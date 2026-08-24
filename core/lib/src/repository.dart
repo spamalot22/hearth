@@ -14,15 +14,28 @@ import 'storage.dart';
 /// persistence happens in exactly one place. Reads (ordering, heads) delegate to
 /// the in-memory index and stay synchronous.
 class MessageRepository {
-  MessageRepository(this._storage);
+  MessageRepository(
+    this._storage, {
+    this.maxMessages = 20000,
+    this.maxStoredBytes = 128 * 1024 * 1024,
+  });
 
   final MessageStorage _storage;
+  final int maxMessages;
+  final int maxStoredBytes;
   final MessageStore _index = MessageStore();
+  int _storedBytes = 0;
+
+  static int _sizeOf(Message message) => message.payload.length + 512;
 
   /// Rehydrates the in-memory DAG from storage. Call once before first read.
   Future<void> load() async {
     for (final message in await _storage.loadAll()) {
-      _index.add(message);
+      if (_index.length >= maxMessages ||
+          _storedBytes + _sizeOf(message) > maxStoredBytes) {
+        break;
+      }
+      if (_index.add(message)) _storedBytes += _sizeOf(message);
     }
   }
 
@@ -31,8 +44,13 @@ class MessageRepository {
   /// indexing, so the in-memory view never runs ahead of what's on disk.
   Future<bool> add(Message message) async {
     if (_index.contains(message.id)) return false;
+    if (_index.length >= maxMessages ||
+        _storedBytes + _sizeOf(message) > maxStoredBytes) {
+      throw const RepositoryCapacityException();
+    }
     await _storage.append(message);
     _index.add(message);
+    _storedBytes += _sizeOf(message);
     return true;
   }
 
@@ -42,4 +60,12 @@ class MessageRepository {
   Message? get(Uint8List id) => _index.get(id);
   Message? getByHex(String idHex) => _index.getByHex(idHex);
   int get length => _index.length;
+  int get storedBytes => _storedBytes;
+}
+
+class RepositoryCapacityException implements Exception {
+  const RepositoryCapacityException();
+
+  @override
+  String toString() => 'message history has reached its local safety limit';
 }

@@ -7,6 +7,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/channel.dart';
 
 void main() {
+  test('group cipher decrypts history across key epochs', () async {
+    final oldKey = Uint8List(32)..fillRange(0, 32, 1);
+    final newKey = Uint8List(32)..fillRange(0, 32, 2);
+    final oldCipher = GroupChannelCipher({0: oldKey}, 0);
+    final currentCipher = GroupChannelCipher({0: oldKey, 1: newKey}, 1);
+
+    final history = await oldCipher.encrypt([1, 2, 3]);
+    final current = await currentCipher.encrypt([4, 5, 6]);
+    expect(await currentCipher.decrypt(history), [1, 2, 3]);
+    expect(await currentCipher.decrypt(current), [4, 5, 6]);
+  });
+
   group('MultiDeviceDmCipher', () {
     test('encrypts via MultiDeviceBox when bundle available', () async {
       final aliceDevice = await Identity.generate();
@@ -20,7 +32,7 @@ void main() {
 
       final cipher = MultiDeviceDmCipher(
         selfDevice: aliceDevice,
-        peerBundleLookup: () => bobBundle,
+        peerDeviceKeys: () => bobBundle.devices,
         ownDeviceKeys: () => [aliceDevice.publicKey],
       );
 
@@ -36,7 +48,7 @@ void main() {
       );
       final bobCipher = MultiDeviceDmCipher(
         selfDevice: bobDevice,
-        peerBundleLookup: () => aliceBundle,
+        peerDeviceKeys: () => aliceBundle.devices,
         ownDeviceKeys: () => [bobDevice.publicKey],
       );
       final decrypted = await bobCipher.decrypt(boxed);
@@ -48,7 +60,7 @@ void main() {
 
       final cipher = MultiDeviceDmCipher(
         selfDevice: device,
-        peerBundleLookup: () => null,
+        peerDeviceKeys: () => const [],
         ownDeviceKeys: () => [device.publicKey],
       );
 
@@ -70,7 +82,7 @@ void main() {
 
       final cipher = MultiDeviceDmCipher(
         selfDevice: aliceDevice,
-        peerBundleLookup: () => bobBundle,
+        peerDeviceKeys: () => bobBundle.devices,
         ownDeviceKeys: () => [aliceDevice.publicKey],
       );
 
@@ -92,7 +104,7 @@ void main() {
 
       final cipher = MultiDeviceDmCipher(
         selfDevice: aliceDevice,
-        peerBundleLookup: () => bobBundle,
+        peerDeviceKeys: () => bobBundle.devices,
         ownDeviceKeys: () => [aliceDevice.publicKey],
       );
 
@@ -101,12 +113,7 @@ void main() {
       // Decrypt with explicit sender device (O(1) path).
       final bobCipher = MultiDeviceDmCipher(
         selfDevice: bobDevice,
-        peerBundleLookup: () => DeviceBundle(
-          rootKey: Uint8List(32),
-          devices: [aliceDevice.publicKey],
-          publishedMs: 0,
-          signature: Uint8List(64),
-        ),
+        peerDeviceKeys: () => [aliceDevice.publicKey],
         ownDeviceKeys: () => [bobDevice.publicKey],
       );
       final decrypted = await bobCipher.decrypt(
@@ -134,8 +141,8 @@ void main() {
         relayUrl: Uri.parse('http://localhost:8787'),
         live: false,
         onUpdate: () {},
-        peerBundleLookup: (rootHex) =>
-            rootHex == peerRoot.publicKeyHex ? peerBundle : null,
+        peerDeviceKeysLookup: (rootHex) =>
+            rootHex == peerRoot.publicKeyHex ? peerBundle.devices : const [],
         ownDeviceKeys: () => [ownDevice.publicKey],
       );
 

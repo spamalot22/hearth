@@ -10,6 +10,7 @@ import 'package:app_links/app_links.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -109,6 +110,7 @@ class _ModelInfo {
     this.description,
     this.url,
     this.maxBytes,
+    this.sha256,
   );
   final String id;
   final String name;
@@ -116,6 +118,7 @@ class _ModelInfo {
   final String description;
   final String url;
   final int maxBytes;
+  final String sha256;
 }
 
 const _kAvailableModels = [
@@ -126,6 +129,7 @@ const _kAvailableModels = [
     'Fast, lightweight. Good for testing.',
     'https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf',
     1024 * 1024 * 1024,
+    '9fecc3b3cd76bba89d504f29b616eedf7da85b96540e490ca5824d3f7d2776a0',
   ),
   _ModelInfo(
     'phi3',
@@ -134,6 +138,7 @@ const _kAvailableModels = [
     'Good balance of quality and speed.',
     'https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf',
     4 * 1024 * 1024 * 1024,
+    '8a83c7fb9049a9b2e92266fa7ad04933bb53aa1e85136b7b30f1b8000ff2edef',
   ),
   _ModelInfo(
     'mistral7b',
@@ -142,6 +147,7 @@ const _kAvailableModels = [
     'High quality. Needs 8 GB+ RAM.',
     'https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf',
     6 * 1024 * 1024 * 1024,
+    '3e0039fd0273fcbebb49228943b17831aadd55cbcbf56f0af00499be2040ccf9',
   ),
 ];
 
@@ -1402,12 +1408,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final names = <String, String>{
       for (final s in sessions) s.channelId: _channelTitle(s),
     };
+    final mailboxes = <String, String>{
+      for (final s in sessions) s.channelId: s.relayMailbox,
+    };
+    final allowedAuthors = <String, List<String>>{
+      for (final s in sessions)
+        s.channelId: {
+          widget.identity.publicKeyHex,
+          if (s.peerPubkey != null) hex.encode(s.peerPubkey!),
+          if (!s.isDm) ..._membersOf(s),
+        }.map((root) => base64Url.encode(hex.decode(root))).toList(),
+    };
     await saveBackgroundPollState(
       relayUrl: _relayUrl.toString(),
       channelIds: sessions.map((s) => s.channelId).toList(),
       cursors: cursors,
       epochs: epochs,
       names: names,
+      mailboxes: mailboxes,
+      allowedAuthors: allowedAuthors,
       selfAuthor: base64Url.encode(widget.identity.publicKey),
     );
   }
@@ -1525,7 +1544,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
     if (widget.autoPoll) await initRecentGifs();
     if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
-      _bot = await InferenceBot.tryCreate(modelId: settings?.activeModel);
+      final activeModel = settings?.activeModel;
+      final model = _kAvailableModels
+          .where((candidate) => candidate.id == activeModel)
+          .firstOrNull;
+      _bot = await InferenceBot.tryCreate(
+        modelId: activeModel,
+        expectedSha256: model?.sha256,
+      );
     }
     final savedRelay = settings?.relayUrl;
     if (savedRelay != null) {
@@ -1596,21 +1622,35 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       isBlocked: _blocked.contains,
       isDeviceRevoked: (rootHex, deviceHex) =>
           _deviceStore?.isRevoked(rootHex, deviceHex) ?? false,
-      peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
+      peerDeviceKeysLookup: (rootHex) =>
+          _deviceStore?.authorizedDeviceKeys(rootHex) ?? const [],
+      peerRootLookup: (deviceHex) => _deviceStore?.rootForDevice(deviceHex),
+      dmMailboxLookup: (peerHex) => _dms?.mailboxFor(peerHex),
       ownDeviceKeys: () {
         final store = _deviceStore;
         if (store == null) return [widget.deviceKeys.publicKey];
         final revoked = store.revokedDevicesFor(widget.identity.publicKeyHex);
-        return store.certs
-            .where((c) => !revoked.contains(c.deviceKeyHex))
-            .map((c) => c.deviceKey)
-            .toList();
+        final keys = <String, Uint8List>{
+          for (final cert in store.certs)
+            if (!revoked.contains(cert.deviceKeyHex))
+              cert.deviceKeyHex: cert.deviceKey,
+          for (final key in store.authorizedDeviceKeys(
+            widget.identity.publicKeyHex,
+          ))
+            hex.encode(key): key,
+        };
+        return keys.values.toList(growable: false);
       },
       versionManifest: _verifiedReleaseManifest,
     );
     for (final group in registry?.all() ?? const <GroupChannel>[]) {
       _groups[group.id] = group;
-      await channels.openGroup(group.id, group.key);
+      await channels.openGroup(
+        group.id,
+        group.key,
+        epoch: group.epoch,
+        keys: group.keys,
+      );
     }
     // Restore established DMs (peers you've actually messaged) so they keep
     // receiving without a tap — the DM analogue of the group loop above.
@@ -1973,22 +2013,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Verifies and persists a received device revocation.
   void _handleDeviceRevocation(DeviceRevocation rev) {
+    unawaited(_applyDeviceRevocation(rev));
+  }
+
+  Future<bool> _applyDeviceRevocation(DeviceRevocation rev) async {
     final store = _deviceStore;
-    if (store == null) return;
-    unawaited(() async {
-      try {
-        if (!await store.addRevocation(rev)) return;
-        await _channels?.enforcePeerPolicies();
-        await _voice?.enforcePeerPolicy();
-        await _broadcast?.enforcePeerPolicy();
-        for (final view in _screenViews.values.toList()) {
-          await view.enforcePeerPolicy();
-        }
-        if (mounted) setState(() {});
-      } catch (_) {
-        // Persistence failure — revocation will be re-learned on next sync.
+    if (store == null) return false;
+    try {
+      if (!await store.addRevocation(rev)) return false;
+      await _channels?.enforcePeerPolicies();
+      await _voice?.enforcePeerPolicy();
+      await _broadcast?.enforcePeerPolicy();
+      for (final view in _screenViews.values.toList()) {
+        await view.enforcePeerPolicy();
       }
-    }());
+      if (mounted) setState(() {});
+      return true;
+    } catch (_) {
+      // Persistence failure — durable history retries on the next refresh.
+      return false;
+    }
   }
 
   /// Decrypts the active channel's new messages, indexes any media into your
@@ -2001,7 +2045,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _maybePersistDm(active);
       await _indexLibrary(active);
       _indexProfiles(active);
-      _indexBundles(active);
+      await _indexBundles(active);
+      await _indexRevocations(active);
+      _indexGroupKeyUpdates(active);
+      _indexDmMailboxes(active);
+      await _ensureDmMailbox(active);
       _detectNewMembers(active);
       _markRead(active);
       // Backfill any watermark timestamps that were unresolved when received.
@@ -2055,6 +2103,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         case VoiceContent():
           break; // one-off recording, not a re-usable library item
         case DeviceBundleContent():
+          break;
+        case DeviceRevocationContent():
+          break;
+        case GroupKeyUpdateContent():
+          break;
+        case DmMailboxContent():
           break;
       }
     }
@@ -2255,7 +2309,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Verifies and persists device bundles from DeviceBundleContent messages.
   final Set<String> _indexedBundleIds = {};
 
-  void _indexBundles(ChannelSession session) {
+  Future<void> _indexBundles(ChannelSession session) async {
     final store = _deviceStore;
     if (store == null) return;
     for (final message in session.repository.ordered()) {
@@ -2269,14 +2323,197 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         // Only accept bundles signed by the message author (can't advertise
         // someone else's device set).
         if (bundle.rootKeyHex != hex.encode(message.author)) continue;
-        // Monotonic check is inside setBundle.
-        unawaited(
-          bundle.verify().then((valid) {
-            if (valid) unawaited(store.setBundle(bundle));
-          }),
-        );
+        await store.setBundle(bundle);
       } catch (_) {
         // Malformed bundle — skip.
+      }
+    }
+  }
+
+  /// Applies durable revocations after validating both the root signature and
+  /// the outer message author. The ID cache prevents repeated verification on
+  /// every render while still allowing newly synced history to be processed.
+  final Set<String> _indexedRevocationIds = {};
+
+  Future<void> _indexRevocations(ChannelSession session) async {
+    final store = _deviceStore;
+    if (store == null) return;
+    for (final message in session.repository.ordered()) {
+      if (_indexedRevocationIds.contains(message.idHex)) continue;
+      final content = session.contentOf(message);
+      if (content is! DeviceRevocationContent) continue;
+      if (content.revocationJson.isEmpty) {
+        _indexedRevocationIds.add(message.idHex);
+        continue;
+      }
+      try {
+        final revocation = DeviceRevocation.fromJson(content.revocationJson);
+        if (revocation.rootKeyHex != hex.encode(message.author)) {
+          _indexedRevocationIds.add(message.idHex);
+          continue;
+        }
+        if (!await revocation.verify()) {
+          _indexedRevocationIds.add(message.idHex);
+          continue;
+        }
+        final applied = await _applyDeviceRevocation(revocation);
+        if (applied ||
+            store.isRevoked(revocation.rootKeyHex, revocation.deviceKeyHex)) {
+          _indexedRevocationIds.add(message.idHex);
+        }
+      } catch (_) {
+        // Malformed revocation bookkeeping is ignored.
+        _indexedRevocationIds.add(message.idHex);
+      }
+    }
+  }
+
+  final Set<String> _indexedGroupKeyUpdateIds = {};
+
+  void _indexGroupKeyUpdates(ChannelSession session) {
+    final current = _groups[session.channelId];
+    if (current == null) return;
+    for (final message in session.repository.ordered()) {
+      if (_indexedGroupKeyUpdateIds.contains(message.idHex)) continue;
+      final content = session.contentOf(message);
+      if (content is! GroupKeyUpdateContent) continue;
+      if (content.groupId != current.id || content.boxed.length > 48 * 1024) {
+        _indexedGroupKeyUpdateIds.add(message.idHex);
+        continue;
+      }
+      if (content.epoch <= current.epoch) {
+        _indexedGroupKeyUpdateIds.add(message.idHex);
+        continue;
+      }
+      // Leave later epochs unmarked. Once the immediately preceding update is
+      // applied, the rebuilt session refresh will process the next one.
+      if (content.epoch != current.epoch + 1) continue;
+      final senderDevice = message.device;
+      if (senderDevice == null) {
+        _indexedGroupKeyUpdateIds.add(message.idHex);
+        continue;
+      }
+      _indexedGroupKeyUpdateIds.add(message.idHex);
+      unawaited(() async {
+        try {
+          final boxed = base64Url.decode(content.boxed);
+          final plaintext = await MultiDeviceBox.decrypt(
+            boxed,
+            recipientDevice: widget.deviceKeys.device,
+            senderDeviceEd: senderDevice,
+          );
+          final update = (jsonDecode(utf8.decode(plaintext)) as Map)
+              .cast<String, Object?>();
+          if (update['group'] != current.id ||
+              update['epoch'] != content.epoch ||
+              update['key'] is! String) {
+            return;
+          }
+          final key = base64Url.decode(update['key']! as String);
+          if (key.length != 32) return;
+          await _applyGroupRotation(current.rotate(key, content.epoch));
+        } catch (_) {
+          // No recipient slot means this device was intentionally excluded.
+        }
+      }());
+      return;
+    }
+  }
+
+  Future<void> _applyGroupRotation(GroupChannel channel) async {
+    final current = _groups[channel.id];
+    if (current == null || current.epoch >= channel.epoch) return;
+    await _registry?.save(channel);
+    _groups[channel.id] = channel;
+    await _channels?.openGroup(
+      channel.id,
+      channel.key,
+      epoch: channel.epoch,
+      keys: channel.keys,
+      replace: true,
+    );
+    unawaited(_saveBackgroundState());
+    if (mounted) setState(() {});
+  }
+
+  final Set<String> _indexedDmMailboxIds = {};
+  final Set<String> _applyingDmMailboxIds = {};
+  final Map<String, String> _mailboxNegotiating = {};
+
+  void _indexDmMailboxes(ChannelSession session) {
+    final peer = session.peerPubkey;
+    if (!session.isDm || peer == null) return;
+    final peerHex = hex.encode(peer);
+    final coordinator = [widget.identity.publicKeyHex, peerHex]..sort();
+    for (final message in session.repository.ordered()) {
+      if (_indexedDmMailboxIds.contains(message.idHex) ||
+          _applyingDmMailboxIds.contains(message.idHex)) {
+        continue;
+      }
+      final content = session.contentOf(message);
+      if (content is! DmMailboxContent) continue;
+      if (hex.encode(message.author) != coordinator.first ||
+          !RegExp(r'^[0-9a-f]{64}$').hasMatch(content.mailbox)) {
+        _indexedDmMailboxIds.add(message.idHex);
+        continue;
+      }
+      if (_mailboxNegotiating[peerHex] == content.mailbox) {
+        _indexedDmMailboxIds.add(message.idHex);
+        continue;
+      }
+      final currentClaim = _dms?.mailboxClaimFor(peerHex);
+      if (currentClaim != null && currentClaim.compareTo(message.idHex) <= 0) {
+        _indexedDmMailboxIds.add(message.idHex);
+        continue;
+      }
+      _applyingDmMailboxIds.add(message.idHex);
+      unawaited(() async {
+        try {
+          final changed =
+              await _dms?.setMailbox(peerHex, content.mailbox, message.idHex) ??
+              false;
+          _indexedDmMailboxIds.add(message.idHex);
+          if (!changed) return;
+          await _channels?.replaceDmMailbox(peer);
+          unawaited(_saveBackgroundState());
+        } catch (_) {
+          // Leave the claim unindexed so a later refresh retries persistence.
+        } finally {
+          _applyingDmMailboxIds.remove(message.idHex);
+        }
+      }());
+      return;
+    }
+  }
+
+  Future<void> _ensureDmMailbox(ChannelSession session) async {
+    final peer = session.peerPubkey;
+    if (!session.isDm || peer == null) return;
+    final peerHex = hex.encode(peer);
+    if (_dms?.mailboxFor(peerHex) != null ||
+        widget.identity.publicKeyHex.compareTo(peerHex) >= 0 ||
+        _mailboxNegotiating.containsKey(peerHex)) {
+      return;
+    }
+    String? mailbox;
+    try {
+      final random = Random.secure();
+      mailbox = List<int>.generate(
+        32,
+        (_) => random.nextInt(256),
+      ).map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+      _mailboxNegotiating[peerHex] = mailbox;
+      final payload = await session.encodePayload(DmMailboxContent(mailbox));
+      final message = await _createMessage(session, payload);
+      await session.publish(message);
+      await _dms?.setMailbox(peerHex, mailbox, message.idHex);
+      await _channels?.replaceDmMailbox(peer);
+      unawaited(_saveBackgroundState());
+    } catch (_) {
+      // A later refresh retries after a transient bundle/transport failure.
+    } finally {
+      if (_mailboxNegotiating[peerHex] == mailbox) {
+        _mailboxNegotiating.remove(peerHex);
       }
     }
   }
@@ -2530,11 +2767,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final store = _deviceStore;
     if (store == null) return false;
     await store.setBundle(intro.bundle);
-    final current = store.bundleFor(intro.cert.rootKeyHex);
-    return current?.devices.any(
-          (key) => hex.encode(key) == intro.cert.deviceKeyHex,
-        ) ??
-        false;
+    return store
+        .authorizedDeviceKeys(intro.cert.rootKeyHex)
+        .any((key) => hex.encode(key) == intro.cert.deviceKeyHex);
   }
 
   /// Re-opens established DMs on [channels] without disturbing the active
@@ -2576,7 +2811,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final result = <String>{};
     for (final s in _channels?.sessions ?? <ChannelSession>[]) {
       result.addAll(
-        (s.mesh?.connectedPeers ?? const <String>[]).map(_rootHexForPeer),
+        (s.mesh?.reachablePeers ?? const <String>[]).map(_rootHexForPeer),
       );
     }
     result.remove(widget.identity.publicKeyHex);
@@ -2600,7 +2835,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final self = widget.identity.publicKeyHex;
     final msgCount = session.repository.length;
     final connectedRoots = <String>{
-      for (final peer in session.mesh?.connectedPeers ?? const <String>[])
+      for (final peer in session.mesh?.reachablePeers ?? const <String>[])
         _rootHexForPeer(peer),
     }..remove(self);
     final knownRoots = <String>{
@@ -2732,6 +2967,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// settle, then offer to add anyone new who's shared a name.
   void _detectNewMembers(ChannelSession session) {
     final channel = session.channelId;
+    final group = _groups[channel];
+    if (group != null) {
+      final updated = group.withMembers(_membersOf(session));
+      if (updated.knownMembers.length != group.knownMembers.length) {
+        _groups[channel] = updated;
+        unawaited(_registry?.save(updated));
+      }
+    }
     if (_memberBaseline.add(channel)) {
       Timer(const Duration(seconds: 4), () {
         _seenMembers[channel] = _membersOf(session);
@@ -2829,18 +3072,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final all = <String>{};
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
       final mesh = session.mesh;
-      if (mesh != null) all.addAll(mesh.connectedPeers);
+      if (mesh != null) all.addAll(mesh.reachablePeers);
+    }
+    return all.length;
+  }
+
+  int _totalRelayPeerCount() {
+    final all = <String>{};
+    for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+      all.addAll(session.mesh?.relayConnectedPeers ?? const <String>[]);
     }
     return all.length;
   }
 
   Widget _connectionIndicator() {
     final peers = _totalPeerCount();
+    final relayPeers = _totalRelayPeerCount();
     final Color color;
     final String label;
-    if (_relayUp == true && peers > 0) {
+    if (_relayUp == true && peers > relayPeers) {
       color = Colors.green;
       label = 'Connected';
+    } else if (_relayUp == true && relayPeers > 0) {
+      color = Colors.green;
+      label = 'Relay connected';
     } else if (_relayUp == true) {
       color = Colors.green;
       label = 'Relay only';
@@ -3560,8 +3815,165 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ),
       trailing: isRevoked
           ? null
-          : null, // rename/revoke require entering recovery phrase (TODO)
+          : isThis
+          ? null
+          : IconButton(
+              tooltip: 'Revoke device',
+              icon: const Icon(Icons.phonelink_erase_outlined),
+              onPressed: () => unawaited(_revokeDevice(cert)),
+            ),
     );
+  }
+
+  Future<void> _revokeDevice(DeviceCert cert) async {
+    final phrase = await _promptRecoveryPhrase(
+      'Revoke ${cert.name}?',
+      'This device will lose access to future messages. Enter your 24-word '
+          'recovery phrase to confirm.',
+    );
+    if (phrase == null) return;
+    try {
+      final seed = await mnemonicToSeed(phrase);
+      if (seed == null || seed.length != 32) {
+        if (mounted) _setError('Invalid recovery phrase');
+        return;
+      }
+      final root = await Identity.fromSeed(seed);
+      seed.fillRange(0, seed.length, 0);
+      if (root.publicKeyHex != widget.identity.publicKeyHex) {
+        if (mounted) _setError('Recovery phrase does not match this identity');
+        return;
+      }
+      final revocation = await DeviceRevocation.issue(
+        root: root,
+        deviceKey: cert.deviceKey,
+      );
+      final store = _deviceStore;
+      if (store == null || !await store.addRevocation(revocation)) return;
+
+      for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
+        try {
+          final payload = await session.encodePayload(
+            DeviceRevocationContent(revocation.toJson()),
+          );
+          await session.publish(await _createMessage(session, payload));
+          session.broadcast(DeviceRevocationControl(revocation: revocation));
+        } catch (_) {
+          // Continue publishing to the remaining channels.
+        }
+      }
+      await _rotateGroupsAfterRevocation();
+      await _channels?.enforcePeerPolicies();
+      await _voice?.enforcePeerPolicy();
+      await _broadcast?.enforcePeerPolicy();
+      for (final view in _screenViews.values.toList()) {
+        await view.enforcePeerPolicy();
+      }
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) _setError('Could not revoke device: $e');
+    }
+  }
+
+  Future<void> _rotateGroupsAfterRevocation() async {
+    final store = _deviceStore;
+    final channels = _channels;
+    if (store == null || channels == null) return;
+    final sessions = channels.sessions
+        .where((session) => !session.isDm)
+        .toList();
+    for (final session in sessions) {
+      final group = _groups[session.channelId];
+      if (group == null) continue;
+      final roots = <String>{
+        widget.identity.publicKeyHex,
+        ...group.knownMembers,
+        ..._membersOf(session),
+      };
+      final recipients = <String, Uint8List>{};
+      for (final root in roots) {
+        for (final key in store.authorizedDeviceKeys(root)) {
+          recipients[hex.encode(key)] = key;
+        }
+      }
+      if (recipients.isEmpty || recipients.length > 255) {
+        if (mounted) {
+          _setError('Could not rotate ${group.name}: too many member devices');
+        }
+        continue;
+      }
+
+      final random = Random.secure();
+      final key = Uint8List.fromList(
+        List<int>.generate(32, (_) => random.nextInt(256)),
+      );
+      final epoch = group.epoch + 1;
+      final plaintext = utf8.encode(
+        jsonEncode({
+          'group': group.id,
+          'epoch': epoch,
+          'key': base64Url.encode(key),
+        }),
+      );
+      try {
+        final boxed = await MultiDeviceBox.encrypt(
+          plaintext,
+          senderDevice: widget.deviceKeys.device,
+          recipientDeviceKeys: recipients.values.toList(growable: false),
+        );
+        final payload = await session.encodePayload(
+          GroupKeyUpdateContent(group.id, epoch, base64Url.encode(boxed)),
+        );
+        await session.publish(await _createMessage(session, payload));
+        final updated = group.withMembers(roots).rotate(key, epoch);
+        await _applyGroupRotation(updated);
+      } catch (e) {
+        if (mounted) _setError('Could not rotate ${group.name}: $e');
+      }
+    }
+  }
+
+  Future<String?> _promptRecoveryPhrase(String title, String message) async {
+    final controller = TextEditingController();
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(message),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                minLines: 3,
+                maxLines: 5,
+                autocorrect: false,
+                enableSuggestions: false,
+                decoration: const InputDecoration(
+                  labelText: 'Recovery phrase',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Revoke'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
   }
 
   Widget _networkTab() {
@@ -3574,6 +3986,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             relayUp: _relayUp,
             checkingRelay: _checkingRelay,
             peerCount: _totalPeerCount(),
+            relayPeerCount: _totalRelayPeerCount(),
             channelCount: _channels?.sessions.length ?? 0,
             relayUrl: _relayUrl.toString(),
             onTapRelay: () {
@@ -3635,9 +4048,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     return StatefulBuilder(
       builder: (context, setTabState) {
         return FutureBuilder<Set<String>>(
-          future: InferenceBot.downloadedModels(
-            _kAvailableModels.map((m) => m.id).toList(),
-          ),
+          future: InferenceBot.downloadedModels({
+            for (final model in _kAvailableModels) model.id: model.sha256,
+          }),
           builder: (context, snap) {
             final downloaded = snap.data ?? {};
             final activeModel = _settings?.activeModel;
@@ -3681,6 +4094,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                                 _bot = null;
                                 InferenceBot.tryCreate(
                                   modelId: model.id,
+                                  expectedSha256: model.sha256,
                                 ).then((b) => _bot = b);
                                 setTabState(() {});
                               }
@@ -3763,6 +4177,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         throw StateError('model download is larger than expected');
       }
       var received = 0;
+      final digestSink = AccumulatorSink<Digest>();
+      final digestInput = sha256.startChunkedConversion(digestSink);
       final sink = partial.openWrite();
       try {
         await for (final chunk in response) {
@@ -3770,6 +4186,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           if (received > model.maxBytes) {
             throw StateError('model download exceeded its size limit');
           }
+          digestInput.add(chunk);
           sink.add(chunk);
           if (total > 0) {
             final progress = (received / total).clamp(0.0, 1.0);
@@ -3779,7 +4196,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           }
         }
       } finally {
+        digestInput.close();
         await sink.close();
+      }
+      final actualHash = digestSink.events.single.toString();
+      if (actualHash != model.sha256) {
+        throw const FormatException('model checksum verification failed');
       }
       if (await partial.length() < 1024 * 1024) {
         throw const FormatException('downloaded model is unexpectedly small');
@@ -3800,9 +4222,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       if (await file.exists()) await file.delete();
       await partial.rename(path);
+      await File('$path.sha256').writeAsString(model.sha256, flush: true);
       // Auto-select the newly downloaded model.
       await _settings?.setActiveModel(model.id);
-      _bot = await InferenceBot.tryCreate(modelId: model.id);
+      _bot = await InferenceBot.tryCreate(
+        modelId: model.id,
+        expectedSha256: model.sha256,
+      );
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -3875,20 +4301,34 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       isBlocked: _blocked.contains,
       isDeviceRevoked: (rootHex, deviceHex) =>
           _deviceStore?.isRevoked(rootHex, deviceHex) ?? false,
-      peerBundleLookup: (rootHex) => _deviceStore?.bundleFor(rootHex),
+      peerDeviceKeysLookup: (rootHex) =>
+          _deviceStore?.authorizedDeviceKeys(rootHex) ?? const [],
+      peerRootLookup: (deviceHex) => _deviceStore?.rootForDevice(deviceHex),
+      dmMailboxLookup: (peerHex) => _dms?.mailboxFor(peerHex),
       ownDeviceKeys: () {
         final store = _deviceStore;
         if (store == null) return [widget.deviceKeys.publicKey];
         final revoked = store.revokedDevicesFor(widget.identity.publicKeyHex);
-        return store.certs
-            .where((c) => !revoked.contains(c.deviceKeyHex))
-            .map((c) => c.deviceKey)
-            .toList();
+        final keys = <String, Uint8List>{
+          for (final cert in store.certs)
+            if (!revoked.contains(cert.deviceKeyHex))
+              cert.deviceKeyHex: cert.deviceKey,
+          for (final key in store.authorizedDeviceKeys(
+            widget.identity.publicKeyHex,
+          ))
+            hex.encode(key): key,
+        };
+        return keys.values.toList(growable: false);
       },
       versionManifest: _verifiedReleaseManifest,
     );
     for (final group in _registry?.all() ?? const <GroupChannel>[]) {
-      await channels.openGroup(group.id, group.key);
+      await channels.openGroup(
+        group.id,
+        group.key,
+        epoch: group.epoch,
+        keys: group.keys,
+      );
     }
     await _restoreDms(channels, _dms);
     if (mounted) setState(() => _channels = channels);
@@ -4474,7 +4914,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return true;
     } catch (e) {
       if (mounted) {
-        final msg = e is StateError
+        final msg = e is RepositoryCapacityException
+            ? 'Message history is full on this device'
+            : e is StateError
             ? 'This person hasn\'t published their device keys yet'
             : 'send failed';
         _setError(msg);
@@ -4542,7 +4984,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final channel = GroupChannel.create(trimmed);
     await _registry?.save(channel);
     if (mounted) setState(() => _groups[channel.id] = channel);
-    await _channels?.openGroup(channel.id, channel.key);
+    await _channels?.openGroup(
+      channel.id,
+      channel.key,
+      epoch: channel.epoch,
+      keys: channel.keys,
+    );
     unawaited(_saveBackgroundState());
   }
 
@@ -4609,7 +5056,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             'hearth#${_fingerprint(Uint8List.fromList(hex.decode(inviter)))}',
       );
     }
-    await _channels?.openGroup(channel.id, channel.key);
+    await _channels?.openGroup(
+      channel.id,
+      channel.key,
+      epoch: channel.epoch,
+      keys: channel.keys,
+    );
     if (mounted) {
       setState(() {});
       _setError(
@@ -4883,7 +5335,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
       );
       _voice!.onSoundboard = (blob) {
-        final session = _channels?.active;
+        final session = _channels?.sessions
+            .where((candidate) => candidate.channelId == channelId)
+            .firstOrNull;
         if (session != null) unawaited(_playSound(session, blob));
       };
       _voice!.onScreenShare = (sharerHex, active) {
@@ -7180,6 +7634,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       EditContent() => const SizedBox.shrink(),
       DeleteContent() => const SizedBox.shrink(),
       DeviceBundleContent() => const SizedBox.shrink(),
+      DeviceRevocationContent() => const SizedBox.shrink(),
+      GroupKeyUpdateContent() => const SizedBox.shrink(),
+      DmMailboxContent() => const SizedBox.shrink(),
     };
   }
 

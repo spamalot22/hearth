@@ -65,4 +65,49 @@ void main() {
       isFalse,
     );
   });
+
+  test(
+    'stale bundles add authorised devices without replacing latest',
+    () async {
+      final root = await Identity.generate();
+      final oldDevice = await Identity.generate();
+      final newDevice = await Identity.generate();
+      final store = await DeviceStore.open();
+
+      final latest = await DeviceBundle.publish(
+        root: root,
+        devices: [newDevice.publicKey],
+        publishedMs: 2000,
+      );
+      final stale = await DeviceBundle.publish(
+        root: root,
+        devices: [oldDevice.publicKey],
+        publishedMs: 1000,
+      );
+
+      expect(await store.setBundle(latest), isTrue);
+      expect(await store.setBundle(stale), isTrue);
+      expect(store.bundleFor(root.publicKeyHex)?.publishedMs, 2000);
+      expect(
+        store
+            .authorizedDeviceKeys(root.publicKeyHex)
+            .map((key) => key.toList()),
+        unorderedEquals([oldDevice.publicKey, newDevice.publicKey]),
+      );
+      expect(store.rootForDevice(oldDevice.publicKeyHex), root.publicKeyHex);
+
+      final revocation = await DeviceRevocation.issue(
+        root: root,
+        deviceKey: oldDevice.publicKey,
+        revokedMs: 3000,
+      );
+      expect(await store.addRevocation(revocation), isTrue);
+      expect(
+        store
+            .authorizedDeviceKeys(root.publicKeyHex)
+            .map((key) => key.toList()),
+        [newDevice.publicKey],
+      );
+    },
+  );
 }
