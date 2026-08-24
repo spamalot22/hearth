@@ -7,6 +7,7 @@ import 'package:hearth/profile.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
   late Directory temp;
 
