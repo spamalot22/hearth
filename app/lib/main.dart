@@ -78,6 +78,7 @@ RandomAccessFile? _instanceLock;
 /// Public source repository — shown in the drawer so users of a hosted instance
 /// can find the source (AGPL-3.0).
 const String kSourceUrl = 'https://github.com/spamalot22/hearth';
+const MethodChannel _windowsAudioOutput = MethodChannel('hearth/audio_output');
 
 class _ModelInfo {
   const _ModelInfo(
@@ -1309,6 +1310,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Set<String> _ytSharedTo = {};
   ProfileStore? _profile;
   SettingsStore? _settings;
+  AudioPlayer? _speakerTestPlayer;
   UnreadStore? _unread;
   DeviceStore? _deviceStore;
   late Uri _relayUrl = widget.relayUrl;
@@ -3020,6 +3022,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             final speakers = devices
                 .where((d) => d.kind == 'audiooutput' && seen.add(d.deviceId))
                 .toList();
+            final selectedMic = preferredAudioDevice(
+              mics,
+              'audioinput',
+              _settings?.audioInputDevice,
+            )?.deviceId;
+            final selectedSpeaker = preferredAudioDevice(
+              speakers,
+              'audiooutput',
+              _settings?.audioOutputDevice,
+            )?.deviceId;
             return Padding(
               padding: const EdgeInsets.all(16),
               child: ListView(
@@ -3073,22 +3085,45 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.mic, size: 20),
+                        leading: Icon(
+                          mic.deviceId == selectedMic
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_unchecked,
+                          size: 20,
+                        ),
                         title: Text(
                           mic.label.isNotEmpty
                               ? mic.label
                               : 'Microphone ${mics.indexOf(mic) + 1}',
                           overflow: TextOverflow.ellipsis,
                         ),
-                        trailing: TextButton(
-                          child: const Text('Test'),
+                        subtitle: mic.deviceId == selectedMic
+                            ? const Text('Voice microphone')
+                            : null,
+                        onTap: () async {
+                          await _settings?.setAudioInputDevice(mic.deviceId);
+                          setTabState(() {});
+                        },
+                        trailing: IconButton(
+                          icon: const Icon(Icons.mic, size: 20),
+                          tooltip: 'Test microphone',
                           onPressed: () async {
                             try {
+                              await _settings?.setAudioInputDevice(
+                                mic.deviceId,
+                              );
+                              setTabState(() {});
                               final stream = await navigator.mediaDevices
                                   .getUserMedia({
-                                    'audio': {
-                                      'deviceId': {'exact': mic.deviceId},
-                                    },
+                                    'audio': kIsWeb
+                                        ? {
+                                            'deviceId': {'exact': mic.deviceId},
+                                          }
+                                        : {
+                                            'optional': [
+                                              {'sourceId': mic.deviceId},
+                                            ],
+                                          },
                                     'video': false,
                                   });
                               await Future<void>.delayed(
@@ -3134,25 +3169,33 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.volume_up, size: 20),
+                        leading: Icon(
+                          spk.deviceId == selectedSpeaker
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_unchecked,
+                          size: 20,
+                        ),
                         title: Text(
                           spk.label.isNotEmpty
                               ? spk.label
                               : 'Speaker ${speakers.indexOf(spk) + 1}',
                           overflow: TextOverflow.ellipsis,
                         ),
-                        trailing: TextButton(
-                          child: const Text('Test'),
-                          onPressed: () async {
-                            final player = AudioPlayer();
-                            await player.play(
-                              BytesSource(VoiceSession.connectTone),
-                            );
-                            await Future<void>.delayed(
-                              const Duration(milliseconds: 300),
-                            );
-                            await player.dispose();
-                          },
+                        subtitle: spk.deviceId == selectedSpeaker
+                            ? const Text('Voice output')
+                            : null,
+                        onTap: () async {
+                          final selected = await _selectAudioOutputDevice(
+                            spk.deviceId,
+                          );
+                          if (selected) setTabState(() {});
+                        },
+                        trailing: IconButton(
+                          icon: const Icon(Icons.play_arrow, size: 20),
+                          tooltip: 'Select and test output',
+                          onPressed: () => unawaited(
+                            _testAudioOutput(context, spk, setTabState),
+                          ),
                         ),
                       ),
                   const Divider(height: 24),
@@ -3267,6 +3310,57 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
       },
     );
+  }
+
+  Future<bool> _selectAudioOutputDevice(String deviceId) async {
+    var selected = false;
+    final voice = _voice;
+    if (voice != null) {
+      selected = await voice.setAudioOutput(deviceId);
+    } else if (kIsWeb) {
+      // Web renderers apply the persisted sink when a call receives a stream.
+      selected = true;
+    } else {
+      try {
+        await Helper.selectAudioOutput(deviceId);
+        selected = true;
+      } catch (_) {}
+    }
+    if (selected) await _settings?.setAudioOutputDevice(deviceId);
+    return selected;
+  }
+
+  Future<void> _testAudioOutput(
+    BuildContext context,
+    MediaDeviceInfo device,
+    StateSetter setTabState,
+  ) async {
+    try {
+      if (!await _selectAudioOutputDevice(device.deviceId)) {
+        throw StateError('output unavailable');
+      }
+      setTabState(() {});
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+        final played = await _windowsAudioOutput.invokeMethod<bool>('test', {
+          'deviceId': device.deviceId,
+        });
+        if (played != true) throw StateError('output unavailable');
+        return;
+      }
+      final player = _speakerTestPlayer ??= AudioPlayer();
+      await player.stop();
+      final completed = player.onPlayerComplete.first;
+      await player.play(
+        BytesSource(VoiceSession.speakerTestTone, mimeType: 'audio/wav'),
+      );
+      await completed.timeout(const Duration(seconds: 3));
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not use that audio output')),
+        );
+      }
+    }
   }
 
   Future<bool> _isSynced() async {
@@ -3804,6 +3898,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _ytController = null;
     unawaited(_voice?.leave());
     unawaited(_player?.dispose());
+    unawaited(_speakerTestPlayer?.dispose());
     _input.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
@@ -4733,6 +4828,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
         onChange: _voiceChanged,
         enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
+        audioInputId: _settings?.audioInputDevice,
+        audioOutputId: _settings?.audioOutputDevice,
         candidateCache: _channels?.candidateCache,
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,

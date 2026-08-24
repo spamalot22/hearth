@@ -13,6 +13,8 @@ class SettingsStore {
   static const _relayKey = 'relayUrl';
   static const _fallbackRelaysKey = 'fallbackRelays';
   static const _noiseKey = 'noiseSuppression';
+  static const _audioInputKey = 'audioInputDevice';
+  static const _audioOutputKey = 'audioOutputDevice';
 
   static Future<SettingsStore> open() async {
     await Hive.initFlutter();
@@ -51,6 +53,19 @@ class SettingsStore {
 
   Future<void> setNoiseSuppression(bool enabled) =>
       _box.put(_noiseKey, enabled.toString());
+
+  /// Preferred WebRTC capture device. A missing device falls back to the first
+  /// device currently reported by the platform.
+  String? get audioInputDevice => _box.get(_audioInputKey);
+
+  Future<void> setAudioInputDevice(String deviceId) =>
+      _box.put(_audioInputKey, deviceId);
+
+  /// Preferred WebRTC playout device used for voice calls.
+  String? get audioOutputDevice => _box.get(_audioOutputKey);
+
+  Future<void> setAudioOutputDevice(String deviceId) =>
+      _box.put(_audioOutputKey, deviceId);
 
   static const _themeKey = 'themeMode';
 

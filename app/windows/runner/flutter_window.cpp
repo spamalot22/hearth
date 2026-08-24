@@ -1,7 +1,10 @@
 #include "flutter_window.h"
 
+#include <flutter/standard_method_codec.h>
+
 #include <optional>
 
+#include "audio_output_test.h"
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -25,6 +28,41 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  audio_output_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "hearth/audio_output",
+          &flutter::StandardMethodCodec::GetInstance());
+  audio_output_channel_->SetMethodCallHandler(
+      [](const flutter::MethodCall<flutter::EncodableValue>& call,
+         std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() != "test") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* arguments =
+            std::get_if<flutter::EncodableMap>(call.arguments());
+        if (arguments == nullptr) {
+          result->Error("bad_arguments", "Missing audio output device ID");
+          return;
+        }
+        const auto device = arguments->find(
+            flutter::EncodableValue("deviceId"));
+        if (device == arguments->end()) {
+          result->Error("bad_arguments", "Missing audio output device ID");
+          return;
+        }
+        const auto* device_id = std::get_if<std::string>(&device->second);
+        if (device_id == nullptr || device_id->empty()) {
+          result->Error("bad_arguments", "Invalid audio output device ID");
+          return;
+        }
+        if (!PlayAudioOutputTestTone(*device_id)) {
+          result->Error("output_unavailable",
+                        "Windows could not open that audio output");
+          return;
+        }
+        result->Success(flutter::EncodableValue(true));
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -41,6 +79,7 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   if (flutter_controller_) {
+    audio_output_channel_.reset();
     flutter_controller_ = nullptr;
   }
 

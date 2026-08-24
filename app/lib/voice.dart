@@ -21,7 +21,13 @@ import 'webrtc_mesh.dart';
 /// arriving or leaving (a rising blip / falling blip), so the whole call hears
 /// someone come and go — Discord-style.
 class VoiceSession {
-  VoiceSession._(this.channelId, this._mesh, this._localStream, this._onChange);
+  VoiceSession._(
+    this.channelId,
+    this._mesh,
+    this._localStream,
+    this._onChange,
+    this._audioOutputId,
+  );
 
   /// The channel this call belongs to.
   final String channelId;
@@ -29,6 +35,7 @@ class VoiceSession {
   final WebRtcMesh _mesh;
   final MediaStream _localStream;
   final void Function() _onChange;
+  String? _audioOutputId;
 
   final AudioPlayer _cuePlayer = AudioPlayer();
   final DateTime _joinedAt = DateTime.now();
@@ -78,6 +85,8 @@ class VoiceSession {
     List<Uri> fallbackUrls = const [],
     required void Function() onChange,
     bool enhancedNoiseSuppression = false,
+    String? audioInputId,
+    String? audioOutputId,
     CandidateCache? candidateCache,
     bool Function(String peerHex)? peerAllowed,
   }) async {
@@ -99,10 +108,17 @@ class VoiceSession {
         }
         await probe.dispose();
         final devices = await navigator.mediaDevices.enumerateDevices();
-        final mics = devices.where((d) => d.kind == 'audioinput').toList();
-        if (mics.isNotEmpty && mics.first.deviceId.isNotEmpty) {
+        final mic = preferredAudioDevice(devices, 'audioinput', audioInputId);
+        if (mic != null && mic.deviceId.isNotEmpty) {
           audioConstraint = {
-            'deviceId': {'exact': mics.first.deviceId},
+            if (kIsWeb)
+              'deviceId': {'exact': mic.deviceId}
+            else
+              // flutter_webrtc's desktop native layer reads sourceId from the
+              // legacy optional constraint when choosing a recording device.
+              'optional': [
+                {'sourceId': mic.deviceId},
+              ],
             'autoGainControl': true,
             'noiseSuppression': true,
             'echoCancellation': true,
@@ -145,6 +161,29 @@ class VoiceSession {
     for (final track in stream.getAudioTracks()) {
       track.enabled = true;
     }
+
+    // flutter_webrtc does not choose a Windows playout device as a side effect
+    // of opening the microphone. Without this explicit call inbound RTP can be
+    // decoded (and report audio levels) while producing no sound.
+    String? activeOutputId = audioOutputId;
+    if (!kIsWeb &&
+        defaultTargetPlatform != TargetPlatform.android &&
+        defaultTargetPlatform != TargetPlatform.iOS) {
+      try {
+        final devices = await navigator.mediaDevices.enumerateDevices();
+        final output = preferredAudioDevice(
+          devices,
+          'audiooutput',
+          audioOutputId,
+        );
+        if (output != null && output.deviceId.isNotEmpty) {
+          activeOutputId = output.deviceId;
+          await Helper.selectAudioOutput(output.deviceId);
+        }
+      } catch (_) {
+        // Keep joining: a renderer can retry once the remote stream arrives.
+      }
+    }
     late final VoiceSession session;
     final mesh = WebRtcMesh(
       baseUrl: relayUrl,
@@ -159,7 +198,7 @@ class VoiceSession {
       onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),
       onControl: (peer, control) => session._onControl(peer, control),
     );
-    session = VoiceSession._(channelId, mesh, stream, onChange);
+    session = VoiceSession._(channelId, mesh, stream, onChange, activeOutputId);
     // The mesh only starts announcing once peerConnected is listened to.
     session._sub = mesh.peerConnected.listen((_) {});
     // On mobile, route audio to speaker (not earpiece) by default.
@@ -227,6 +266,10 @@ class VoiceSession {
       _remotes[peerHex] = renderer;
     }
     renderer.srcObject = remote;
+    final outputId = _audioOutputId;
+    if (outputId != null && outputId.isNotEmpty) {
+      await renderer.audioOutput(outputId);
+    }
     _remoteStreams[peerHex] = remote;
     await _applyVolume(peerHex); // honour deafen / a prior volume for this peer
     // Cue a join only for peers arriving after the initial mesh-connect burst,
@@ -285,6 +328,27 @@ class VoiceSession {
     _volumes[peerHex] = volume;
     await _applyVolume(peerHex);
     _onChange();
+  }
+
+  /// Switches WebRTC playout immediately and remembers the choice for remote
+  /// renderers that arrive later in this call.
+  Future<bool> setAudioOutput(String deviceId) async {
+    if (deviceId.isEmpty) return false;
+    try {
+      if (kIsWeb) {
+        var selected = true;
+        for (final renderer in _remotes.values) {
+          selected = await renderer.audioOutput(deviceId) && selected;
+        }
+        if (!selected) return false;
+      } else {
+        await Helper.selectAudioOutput(deviceId);
+      }
+      _audioOutputId = deviceId;
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   // Your mic is live only when neither muted nor deafened.
@@ -361,6 +425,7 @@ class VoiceSession {
 
   // Short generated blips so there's no asset to ship — swappable later.
   static final Uint8List connectTone = _toneWav(523.25, 784.0); // C5 → G5
+  static final Uint8List speakerTestTone = _toneWav(440.0, 660.0, ms: 700);
   static final Uint8List _disconnectTone = _toneWav(784.0, 392.0); // G5 → G4
 }
 
@@ -401,4 +466,20 @@ Uint8List _toneWav(
     u16(sample & 0xffff);
   }
   return b.toBytes();
+}
+
+/// Resolves a persisted audio choice against the devices that still exist.
+/// Device identifiers can disappear when a USB or Bluetooth device is removed.
+MediaDeviceInfo? preferredAudioDevice(
+  Iterable<MediaDeviceInfo> devices,
+  String kind,
+  String? preferredId,
+) {
+  MediaDeviceInfo? first;
+  for (final device in devices) {
+    if (device.kind != kind || device.deviceId.isEmpty) continue;
+    first ??= device;
+    if (preferredId != null && device.deviceId == preferredId) return device;
+  }
+  return first;
 }
