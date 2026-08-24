@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+
+const String youtubeEmbedIdentity = 'https://github.com/spamalot22/hearth';
+const String _youtubeEmbedOrigin = 'https://github.com';
 
 /// Extracts an 11-character YouTube video id from a raw id or any common URL
 /// form (watch?v=, youtu.be/, /embed/, /shorts/, /live/, /v/). Returns null if
@@ -34,6 +38,27 @@ String? _validId(String s) =>
 
 bool _isYoutubeHost(String host, String domain) =>
     host == domain || host.endsWith('.$domain');
+
+bool isAllowedYoutubePlayerNavigation(Uri? uri) {
+  if (uri == null) return false;
+  if (uri.scheme == 'data' || uri.scheme == 'about') return true;
+  if (uri.scheme != 'https') return false;
+  if (uri.toString() == youtubeEmbedIdentity ||
+      uri.toString() == '$youtubeEmbedIdentity/') {
+    return true;
+  }
+  const allowedHosts = [
+    'youtube.com',
+    'youtube-nocookie.com',
+    'ytimg.com',
+    'googlevideo.com',
+    'google.com',
+    'gstatic.com',
+  ];
+  return allowedHosts.any(
+    (domain) => uri.host == domain || uri.host.endsWith('.$domain'),
+  );
+}
 
 /// Asks for a YouTube URL/id and returns the raw text (null if cancelled).
 /// The caller parses it with [parseYoutubeId] so it can show its own error.
@@ -126,11 +151,13 @@ String _jsSeconds(double seconds) => _safeSeconds(seconds).toString();
 
 // A minimal page hosting the official IFrame Player API with native controls
 // hidden (controls:0) — playback is driven entirely through the JS bridge, so
-// followers can't fight the host. Loaded with a youtube.com base URL so the API
-// gets a valid origin.
-const String _kPlayerHtml = '''
+// followers can't fight the host. Its public project URL is the stable app
+// identity supplied to YouTube as the base URL, origin metadata, and Referer.
+const String _kPlayerHtml =
+    '''
 <!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <style>html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}#p{width:100%;height:100%}</style>
 </head><body>
 <div id="p"></div>
@@ -144,7 +171,8 @@ function applyMute(){ if(!player) return; if(desiredMuted){ if(player.mute)playe
 function onYouTubeIframeAPIReady(){
   player = new YT.Player('p', {
     width:'100%', height:'100%',
-    playerVars:{controls:0, rel:0, modestbranding:1, playsinline:1, disablekb:1, fs:0, iv_load_policy:3},
+    playerVars:{controls:0, rel:0, modestbranding:1, playsinline:1, disablekb:1, fs:0, iv_load_policy:3,
+      origin:'$_youtubeEmbedOrigin', widget_referrer:'$youtubeEmbedIdentity'},
     events:{
       'onReady':function(){ post('ready',{}); },
       'onStateChange':function(e){
@@ -175,7 +203,15 @@ function ytSeek(t){ if(player&&player.seekTo) player.seekTo(seconds(t),true); }
 function ytMute(m){ desiredMuted=!!m; applyMute(); }
 function ytTime(){ return (player&&player.getCurrentTime)?seconds(player.getCurrentTime()):0; }
 function ytDuration(){ return (player&&player.getDuration)?seconds(player.getDuration()):0; }
-(function(){ var t=document.createElement('script'); t.src='https://www.youtube.com/iframe_api'; document.head.appendChild(t); })();
+var apiRequested=false;
+function ytBootstrap(){
+  if(apiRequested) return;
+  apiRequested=true;
+  var t=document.createElement('script');
+  t.referrerPolicy='strict-origin-when-cross-origin';
+  t.src='https://www.youtube.com/iframe_api';
+  document.head.appendChild(t);
+}
 </script>
 </body></html>
 ''';
@@ -205,6 +241,27 @@ class WatchPartyPlayer extends StatefulWidget {
 }
 
 class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
+  Future<void> _requestIdentityReady = Future<void>.value();
+
+  Future<void> _configureRequestIdentity(
+    InAppWebViewController controller,
+  ) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) return;
+    try {
+      // YouTube error 153 means the embed request has no HTTP Referer or
+      // equivalent app identity. A data-backed WebView2 page does not provide
+      // one reliably, so set it before allowing the iframe API to load.
+      await controller.callDevToolsProtocolMethod(
+        methodName: 'Network.setExtraHTTPHeaders',
+        parameters: {
+          'headers': {'Referer': youtubeEmbedIdentity},
+        },
+      );
+    } catch (_) {
+      // The base URL + document referrer policy remain the portable fallback.
+    }
+  }
+
   @override
   void didUpdateWidget(WatchPartyPlayer old) {
     super.didUpdateWidget(old);
@@ -232,7 +289,7 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
     return InAppWebView(
       initialData: InAppWebViewInitialData(
         data: _kPlayerHtml,
-        baseUrl: WebUri('https://www.youtube.com'),
+        baseUrl: WebUri('$youtubeEmbedIdentity/'),
       ),
       initialSettings: InAppWebViewSettings(
         mediaPlaybackRequiresUserGesture: false,
@@ -240,25 +297,16 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
         javaScriptCanOpenWindowsAutomatically: false,
       ),
       shouldOverrideUrlLoading: (controller, action) async {
-        final host = action.request.url?.host ?? '';
         // Allow the YouTube player + its CDNs, matching the exact host or a real
         // subdomain. A substring check would let "youtube.com.evil.com" through;
         // this blocks navigating the embed off to a hostile page.
-        const allowed = [
-          'youtube.com',
-          'youtube-nocookie.com',
-          'ytimg.com',
-          'googlevideo.com',
-          'google.com',
-          'gstatic.com',
-        ];
-        final ok = allowed.any((d) => host == d || host.endsWith('.$d'));
-        return ok
+        return isAllowedYoutubePlayerNavigation(action.request.url)
             ? NavigationActionPolicy.ALLOW
             : NavigationActionPolicy.CANCEL;
       },
       onWebViewCreated: (web) {
         widget.controller._attach(web);
+        _requestIdentityReady = _configureRequestIdentity(web);
         web.addJavaScriptHandler(
           handlerName: 'yt',
           callback: (args) {
@@ -287,6 +335,12 @@ class _WatchPartyPlayerState extends State<WatchPartyPlayer> {
             return null;
           },
         );
+      },
+      onLoadStop: (web, _) async {
+        await _requestIdentityReady;
+        // The HTML deliberately does not request YouTube until the Windows
+        // WebView has installed its identifying Referer header.
+        await web.evaluateJavascript(source: 'ytBootstrap();');
       },
     );
   }
