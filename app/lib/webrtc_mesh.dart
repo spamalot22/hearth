@@ -43,6 +43,7 @@ class WebRtcMesh {
     this.onPeerConnectedHex,
     this.onControl,
     this.peerAllowed,
+    this.channelAuthKey,
     this.forceInitiator,
     this.candidateCache,
     http.Client? client,
@@ -106,6 +107,11 @@ class WebRtcMesh {
   /// Optional channel-level admission policy. Signalling authentication proves
   /// who a peer is; this decides whether that identity belongs in this mesh.
   final bool Function(String peerHex)? peerAllowed;
+
+  /// Optional 32-byte capability required on every SDP/ICE signal. Group chat,
+  /// voice, and screen meshes set this to the channel encryption key so merely
+  /// observing the relay namespace is insufficient to join the mesh.
+  final Uint8List? channelAuthKey;
 
   /// Who offers in this mesh. `null` (default) uses the glare rule — the
   /// lexicographically-greater pubkey offers, so exactly one side of each pair
@@ -503,6 +509,18 @@ class WebRtcMesh {
     if (!await verifySignal(from, selfPubkeyHex, channel, kind, payload)) {
       return;
     }
+    final authKey = channelAuthKey;
+    if (authKey != null &&
+        !verifySignalCapabilityProof(
+          authKey,
+          from,
+          selfPubkeyHex,
+          channel,
+          kind,
+          payload,
+        )) {
+      return;
+    }
     try {
       switch (kind) {
         case 'offer':
@@ -683,6 +701,7 @@ class WebRtcMesh {
       peerPubkeyHex: peerHex,
       authToken: _authToken,
       authTokenProvider: () => _authToken,
+      channelAuthKey: channelAuthKey,
       onReady: () {
         if (_closed || _tunnels[peerHex] != tunnel) return;
         onPeerConnectedHex?.call(peerHex);
@@ -698,12 +717,24 @@ class WebRtcMesh {
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
     final payload = (data! as Map).cast<String, Object?>();
+    final authKey = channelAuthKey;
+    final capability = authKey == null
+        ? null
+        : createSignalCapabilityProof(
+            authKey,
+            selfPubkeyHex,
+            to,
+            channel,
+            kind,
+            payload,
+          );
     // Authenticate the signal so a relay/MITM can't forge it or swap the SDP's
     // DTLS fingerprint; the signature rides inside `data`.
-    final signed = {
+    final signed = <String, Object?>{
       ...payload,
       'sig': await signSignal(identity, channel, kind, to, payload),
     };
+    if (capability != null) signed[signalCapabilityField] = capability;
     final response = await _client
         .post(
           _activeUrl.replace(path: '/signal'),

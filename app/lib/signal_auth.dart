@@ -13,9 +13,13 @@
 library;
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:crypto/crypto.dart';
+
+const String signalCapabilityField = 'cap';
 
 /// Deterministic bytes signed for a signal of [kind] addressed to [to]. Only the
 /// security-critical fields are bound; strings survive the relay's JSON
@@ -34,6 +38,68 @@ List<int> signalSigningBytes(
   // Bind the channel too, so a malicious relay can't replay a signed signal into
   // a different channel's mailbox (cross-channel connection confusion).
   return utf8.encode('$channel|$kind|$to|$payload');
+}
+
+/// Proves that a signalling peer possesses a channel's encryption capability.
+///
+/// Device signatures authenticate *who* sent a signal, but a relay observes the
+/// channel namespace and can create its own valid device identity. Group meshes
+/// therefore also require this HMAC before accepting SDP/ICE or remote media.
+String createSignalCapabilityProof(
+  List<int> channelKey,
+  String from,
+  String to,
+  String channel,
+  String kind,
+  Map<String, Object?> data,
+) {
+  if (channelKey.length != 32) {
+    throw ArgumentError.value(channelKey.length, 'channelKey');
+  }
+  final authenticated = <int>[
+    ...utf8.encode('hearth/signal-capability/v1\n$from\n'),
+    ...signalSigningBytes(channel, kind, to, data),
+  ];
+  return Hmac(sha256, channelKey).convert(authenticated).toString();
+}
+
+bool verifySignalCapabilityProof(
+  List<int> channelKey,
+  String from,
+  String to,
+  String channel,
+  String kind,
+  Map<String, Object?> data,
+) {
+  final supplied = data[signalCapabilityField];
+  if (supplied is! String || !RegExp(r'^[0-9a-f]{64}$').hasMatch(supplied)) {
+    return false;
+  }
+  try {
+    final expected = createSignalCapabilityProof(
+      channelKey,
+      from,
+      to,
+      channel,
+      kind,
+      data,
+    );
+    return _constantTimeBytes(
+      Uint8List.fromList(hex.decode(supplied)),
+      Uint8List.fromList(hex.decode(expected)),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+bool _constantTimeBytes(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  var difference = 0;
+  for (var i = 0; i < a.length; i++) {
+    difference |= a[i] ^ b[i];
+  }
+  return difference == 0;
 }
 
 /// Signs [data] (a signal of [kind] addressed to [to]) with [identity]; returns

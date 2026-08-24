@@ -99,6 +99,7 @@ void main() {
       expect(ContactCard.decode(''), isNull);
       expect(ContactCard.decode('hearth-contact:not-base64!!'), isNull);
       expect(ContactCard.decode('hearth-contact:'), isNull);
+      expect(ContactCard.decode('hearth-contact:${'a' * (16 * 1024)}'), isNull);
     });
 
     test('rejects a card missing pubkey or rendezvous', () {

@@ -216,6 +216,7 @@ class ChannelSession {
     required bool live,
     required void Function() onUpdate,
     required ChannelCipher cipher,
+    Uint8List? meshAuthKey,
     required BlobStore? blobStore,
     bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked,
     bool Function(Message message)? messageAllowed,
@@ -256,6 +257,7 @@ class ChannelSession {
         fallbackUrls: fallbackUrls,
         channel: channelId,
         identity: meshIdentity ?? identity,
+        channelAuthKey: meshAuthKey,
         candidateCache: candidateCache,
         peerAllowed: peerAllowed,
         onPeerConnectedHex: (peerHex) {
@@ -682,6 +684,7 @@ class ChannelManager {
         live: live,
         onUpdate: () => _onSessionUpdate(id),
         cipher: GroupChannelCipher(key),
+        meshAuthKey: key,
         blobStore: blobStore,
         isDeviceRevoked: isDeviceRevoked,
         candidateCache: candidateCache,

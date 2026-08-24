@@ -53,8 +53,9 @@ offline); it can verify that a message is authentic but can never read it.
 - **Cross-channel contact discovery** — connected peers share who else they're
   talking to, letting you reach contacts in other channels without the relay.
 - **Authenticated signalling** — announce requests are Ed25519-signed; signal
-  mailbox reads require a short-lived token, preventing strangers from observing
-  your ICE candidates.
+  mailbox reads require a short-lived token; and group SDP/ICE additionally
+  proves possession of the channel key, preventing the relay from joining a
+  group mesh with an identity of its own.
 
 ---
 
@@ -115,9 +116,10 @@ regardless of arrival order or duplication.
 one `RTCPeerConnection` per peer. The relay is used only for **rendezvous** —
 announce presence, discover peers, and trade SDP/ICE. To avoid glare, the peer
 with the greater public key offers. **Signalling is authenticated**: every
-offer/answer/ICE is Ed25519-signed and verified ([`signal_auth.dart`](app/lib/signal_auth.dart)),
-so a malicious relay can't impersonate a peer or swap a DTLS fingerprint. Once a
-data channel opens, a **`SyncEngine`** ([`sync.dart`](core/lib/src/sync.dart))
+offer/answer/ICE is Ed25519-signed and verified ([`signal_auth.dart`](app/lib/signal_auth.dart));
+group signals also carry a channel-key HMAC. A malicious relay therefore cannot
+impersonate a peer, swap a DTLS fingerprint, or introduce its own identity into a
+group mesh. Once a data channel opens, a **`SyncEngine`** ([`sync.dart`](core/lib/src/sync.dart))
 gossips messages with `HAVE`/`WANT`/`GIVE` frames and **verifies every message on
 receipt** — so any peer can relay anyone's messages without being trusted.
 
@@ -185,9 +187,11 @@ or relay failover, because the relay's in-memory sequence numbers restart at zer
 
 When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
 (`/tunnel`) forwards bounded, encrypted fragments between the stuck peers. Large
-frames are reassembled only after end-to-end authentication, retaining the same
-confidentiality guarantees while keeping the relay's request limits small. Both
-peers must support the encrypted fragment protocol to use this fallback path.
+frames are reassembled only after end-to-end authentication. Group fragments
+also carry a channel-key HMAC, so an endpoint must prove membership before its
+frames are accepted. This retains the same confidentiality and admission
+guarantees while keeping the relay's request limits small. Both peers must support
+the encrypted fragment protocol to use this fallback path.
 
 ---
 

@@ -32,6 +32,7 @@ class ContactCard {
   final String? relayUrl;
 
   static const _prefix = 'hearth-contact:';
+  static const _maxCodeLength = 16 * 1024;
   static final _pubkeyRe = RegExp(r'^[0-9a-f]{64}$');
   static final _rendezvousRe = RegExp(r'^[0-9a-f]{32}$');
 
@@ -52,7 +53,9 @@ class ContactCard {
   /// Parses a `hearth-contact:` code, or null if it isn't one / is malformed.
   static ContactCard? decode(String code) {
     final trimmed = code.trim();
-    if (!trimmed.startsWith(_prefix)) return null;
+    if (trimmed.length > _maxCodeLength || !trimmed.startsWith(_prefix)) {
+      return null;
+    }
     try {
       final json =
           (jsonDecode(

@@ -181,5 +181,126 @@ void main() {
         isFalse,
       );
     });
+
+    group('channel capability', () {
+      final channelKey = List<int>.generate(32, (index) => index);
+
+      test('a peer possessing the channel key verifies', () {
+        final data = offer('v=0 ... a=fingerprint:sha-256 AB:CD');
+        data[signalCapabilityField] = createSignalCapabilityProof(
+          channelKey,
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        );
+
+        expect(
+          verifySignalCapabilityProof(
+            channelKey,
+            alice.publicKeyHex,
+            bob.publicKeyHex,
+            'room',
+            'offer',
+            data,
+          ),
+          isTrue,
+        );
+      });
+
+      test(
+        'identity authentication alone is not a channel capability',
+        () async {
+          final data = offer('v=0 ...');
+          data['sig'] = await signSignal(
+            mallory,
+            'room',
+            'offer',
+            bob.publicKeyHex,
+            data,
+          );
+
+          expect(
+            await verifySignal(
+              mallory.publicKeyHex,
+              bob.publicKeyHex,
+              'room',
+              'offer',
+              data,
+            ),
+            isTrue,
+          );
+          expect(
+            verifySignalCapabilityProof(
+              channelKey,
+              mallory.publicKeyHex,
+              bob.publicKeyHex,
+              'room',
+              'offer',
+              data,
+            ),
+            isFalse,
+          );
+        },
+      );
+
+      test('proof is bound to the sender, recipient, channel, and payload', () {
+        final data = offer('v=0 ... a=fingerprint:sha-256 AB:CD');
+        data[signalCapabilityField] = createSignalCapabilityProof(
+          channelKey,
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        );
+
+        bool verifies({
+          String? from,
+          String? to,
+          String? channel,
+          String? kind,
+        }) => verifySignalCapabilityProof(
+          channelKey,
+          from ?? alice.publicKeyHex,
+          to ?? bob.publicKeyHex,
+          channel ?? 'room',
+          kind ?? 'offer',
+          data,
+        );
+
+        expect(verifies(from: mallory.publicKeyHex), isFalse);
+        expect(verifies(to: mallory.publicKeyHex), isFalse);
+        expect(verifies(channel: 'another-room'), isFalse);
+        expect(verifies(kind: 'answer'), isFalse);
+        data['sdp'] = 'v=0 ... a=fingerprint:sha-256 EV:IL';
+        expect(verifies(), isFalse);
+      });
+
+      test('a proof made with another channel key is rejected', () {
+        final data = offer('v=0 ...');
+        data[signalCapabilityField] = createSignalCapabilityProof(
+          List<int>.filled(32, 255),
+          alice.publicKeyHex,
+          bob.publicKeyHex,
+          'room',
+          'offer',
+          data,
+        );
+
+        expect(
+          verifySignalCapabilityProof(
+            channelKey,
+            alice.publicKeyHex,
+            bob.publicKeyHex,
+            'room',
+            'offer',
+            data,
+          ),
+          isFalse,
+        );
+      });
+    });
   });
 }

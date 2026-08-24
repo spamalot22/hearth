@@ -94,6 +94,7 @@ class VoiceSession {
     String? audioOutputId,
     CandidateCache? candidateCache,
     bool Function(String peerHex)? peerAllowed,
+    Uint8List? channelAuthKey,
   }) async {
     // On Windows desktop, plain `audio: true` can pick a non-functional
     // default. Enumerate devices and explicitly target the first audioinput so
@@ -198,6 +199,7 @@ class VoiceSession {
       localStream: stream,
       candidateCache: candidateCache,
       peerAllowed: peerAllowed,
+      channelAuthKey: channelAuthKey,
       onRemoteStream: (peerHex, remote) =>
           unawaited(session._onRemote(peerHex, remote)),
       onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),

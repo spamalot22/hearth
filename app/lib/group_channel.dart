@@ -24,6 +24,7 @@ class GroupChannel {
   final Set<String> knownMembers;
   static final _idRe = RegExp(r'^[0-9a-f]{32}$');
   static final _pubkeyRe = RegExp(r'^[0-9a-f]{64}$');
+  static const _maxInviteLength = 16 * 1024;
 
   /// Creates a brand-new channel (random id + key) with local [name].
   factory GroupChannel.create(String name) {
@@ -49,7 +50,9 @@ class GroupChannel {
   /// Parses an [invite] string into the channel + inviter, or null if malformed.
   static Invite? fromInvite(String invite) {
     final trimmed = invite.trim();
-    if (!trimmed.startsWith('hearth:')) return null;
+    if (trimmed.length > _maxInviteLength || !trimmed.startsWith('hearth:')) {
+      return null;
+    }
     try {
       final body = trimmed.substring('hearth:'.length);
       final json = (jsonDecode(utf8.decode(base64Url.decode(body))) as Map)

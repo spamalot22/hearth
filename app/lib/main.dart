@@ -4570,7 +4570,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final scheme = uri.scheme; // 'hearth' or 'hearth-contact'
     // For opaque URIs (no authority), the payload is in the path.
     final payload = uri.path;
-    if (scheme.isEmpty || payload.isEmpty) return;
+    if (scheme.isEmpty || payload.isEmpty || payload.length > 16 * 1024) return;
     final raw = '$scheme:$payload';
     unawaited(_handleInviteCode(raw));
   }
@@ -4878,6 +4878,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         audioInputId: _settings?.audioInputDevice,
         audioOutputId: _settings?.audioOutputDevice,
         candidateCache: _channels?.candidateCache,
+        channelAuthKey: _groups[channelId]?.key,
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
       );
@@ -4999,6 +5000,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
         source: choice.source,
         resolution: choice.resolution,
+        channelAuthKey: _groups[session.channelId]?.key,
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(session.channelId, peerHex) ??
             false,
@@ -5045,6 +5047,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         identity: widget.deviceKeys.device,
         relayUrl: _relayUrl,
         fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
+        channelAuthKey: _groups[channelId]?.key,
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
         onChange: _voiceChanged,

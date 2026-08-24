@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
 /// A [FrameChannel] that tunnels gossip frames through the relay for peers that
@@ -24,6 +25,7 @@ class RelayTunnel implements FrameChannel {
     this.authToken,
     this.authTokenProvider,
     this.onReady,
+    this.channelAuthKey,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
   }) : _client = client ?? http.Client(),
@@ -36,6 +38,7 @@ class RelayTunnel implements FrameChannel {
   final String? authToken;
   final String? Function()? authTokenProvider;
   final void Function()? onReady;
+  final Uint8List? channelAuthKey;
   final Duration pollInterval;
   final http.Client _client;
   final Uint8List _peerPublicKey;
@@ -52,7 +55,8 @@ class RelayTunnel implements FrameChannel {
 
   static const _requestTimeout = Duration(seconds: 10);
   static const _assemblyTtl = Duration(minutes: 5);
-  static const int _fragmentHeaderBytes = 20;
+  static const int _legacyFragmentHeaderBytes = 20;
+  static const int _capabilityFragmentHeaderBytes = 52;
   static const int _fragmentPayloadBytes = 40 * 1024;
   static const int _maxFrameBytes = 16 * 1024 * 1024;
   static const int _maxFragments = 512;
@@ -60,9 +64,13 @@ class RelayTunnel implements FrameChannel {
   static const int _maxAssemblyBytes = 32 * 1024 * 1024;
   static const int _maxTunnelDataBytes = 60 * 1024;
   static const String _encryptedPrefix = 'e1:';
-  static const List<int> _fragmentMagic = [0x48, 0x54, 0x31, 0x00];
+  static const List<int> _legacyFragmentMagic = [0x48, 0x54, 0x31, 0x00];
+  static const List<int> _capabilityFragmentMagic = [0x48, 0x54, 0x32, 0x00];
 
   String get selfPubkeyHex => identity.publicKeyHex;
+  int get _fragmentHeaderBytes => channelAuthKey == null
+      ? _legacyFragmentHeaderBytes
+      : _capabilityFragmentHeaderBytes;
   Uri get _url => baseUrlProvider?.call() ?? baseUrl;
   String? get _token => authTokenProvider?.call() ?? authToken;
 
@@ -105,12 +113,26 @@ class RelayTunnel implements FrameChannel {
       final start = index * _fragmentPayloadBytes;
       final end = min(start + _fragmentPayloadBytes, encoded.length);
       final packet = Uint8List(_fragmentHeaderBytes + end - start);
-      packet.setRange(0, 4, _fragmentMagic);
+      packet.setRange(
+        0,
+        4,
+        channelAuthKey == null
+            ? _legacyFragmentMagic
+            : _capabilityFragmentMagic,
+      );
       packet.setRange(4, 16, transferId);
       final header = ByteData.sublistView(packet);
       header.setUint16(16, index, Endian.big);
       header.setUint16(18, total, Endian.big);
       packet.setRange(_fragmentHeaderBytes, packet.length, encoded, start);
+      final capability = channelAuthKey;
+      if (capability != null) {
+        packet.setRange(
+          _legacyFragmentHeaderBytes,
+          _capabilityFragmentHeaderBytes,
+          _fragmentCapability(capability, selfPubkeyHex, peerPubkeyHex, packet),
+        );
+      }
 
       final boxed = await PairBox.encrypt(
         packet,
@@ -213,9 +235,26 @@ class RelayTunnel implements FrameChannel {
         self: identity,
         peerEd25519PublicKey: _peerPublicKey,
       );
+      final capability = channelAuthKey;
+      final expectedMagic = capability == null
+          ? _legacyFragmentMagic
+          : _capabilityFragmentMagic;
       if (packet.length < _fragmentHeaderBytes ||
-          !_startsWith(packet, _fragmentMagic)) {
+          !_startsWith(packet, expectedMagic)) {
         return null;
+      }
+      if (capability != null) {
+        final supplied = packet.sublist(
+          _legacyFragmentHeaderBytes,
+          _capabilityFragmentHeaderBytes,
+        );
+        final expected = _fragmentCapability(
+          capability,
+          peerPubkeyHex,
+          selfPubkeyHex,
+          packet,
+        );
+        if (!_constantTimeBytes(supplied, expected)) return null;
       }
       final header = ByteData.sublistView(packet);
       final index = header.getUint16(16, Endian.big);
@@ -291,6 +330,29 @@ class RelayTunnel implements FrameChannel {
       if (bytes[i] != prefix[i]) return false;
     }
     return true;
+  }
+
+  static List<int> _fragmentCapability(
+    List<int> key,
+    String from,
+    String to,
+    Uint8List packet,
+  ) {
+    if (key.length != 32) throw ArgumentError.value(key.length, 'key');
+    final authenticated = BytesBuilder(copy: false)
+      ..add(utf8.encode('hearth/tunnel-capability/v1\n$from\n$to\n'))
+      ..add(packet.sublist(0, _legacyFragmentHeaderBytes))
+      ..add(packet.sublist(_capabilityFragmentHeaderBytes));
+    return Hmac(sha256, key).convert(authenticated.takeBytes()).bytes;
+  }
+
+  static bool _constantTimeBytes(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    var difference = 0;
+    for (var i = 0; i < a.length; i++) {
+      difference |= a[i] ^ b[i];
+    }
+    return difference == 0;
   }
 
   Future<void> close() async {

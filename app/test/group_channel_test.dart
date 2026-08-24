@@ -47,6 +47,7 @@ void main() {
         ),
         isNull,
       );
+      expect(GroupChannel.fromInvite('hearth:${'a' * (16 * 1024)}'), isNull);
     });
   });
 }

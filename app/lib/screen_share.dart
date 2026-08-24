@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:core/core.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -72,6 +73,7 @@ class ScreenBroadcast {
     required ScreenResolution resolution,
     required void Function() onEnded,
     bool Function(String peerHex)? peerAllowed,
+    Uint8List? channelAuthKey,
   }) async {
     final stream = await navigator.mediaDevices.getDisplayMedia(
       _displayConstraints(source, resolution),
@@ -84,6 +86,7 @@ class ScreenBroadcast {
       localStream: stream,
       forceInitiator: true, // the sharer offers to every viewer
       peerAllowed: peerAllowed,
+      channelAuthKey: channelAuthKey,
     );
     final broadcast = ScreenBroadcast._(source.name, mesh, stream, onEnded);
     // The mesh only starts announcing once peerConnected is listened to.
@@ -143,6 +146,7 @@ class ScreenView {
     List<Uri> fallbackUrls = const [],
     required void Function() onChange,
     bool Function(String peerHex)? peerAllowed,
+    Uint8List? channelAuthKey,
   }) async {
     final renderer = RTCVideoRenderer();
     await renderer.initialize();
@@ -154,6 +158,7 @@ class ScreenView {
       identity: identity,
       forceInitiator: false, // answer-only; the sharer offers
       peerAllowed: peerAllowed,
+      channelAuthKey: channelAuthKey,
       onRemoteStream: (peer, stream) {
         if (view._closed || peer != sharerHex) return;
         renderer.srcObject = stream;

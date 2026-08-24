@@ -181,4 +181,104 @@ void main() {
     await sender.close();
     await receiver.close();
   });
+
+  test('group tunnels require both peers to possess the channel key', () async {
+    final alice = await Identity.generate();
+    final bob = await Identity.generate();
+    final mailbox = <String>[];
+    var posts = 0;
+    var deliveries = 0;
+
+    Future<http.Response> relay(http.Request request) async {
+      if (request.method == 'POST') {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        mailbox.add(body['data'] as String);
+        posts++;
+        return http.Response('{}', 200);
+      }
+      final batch = mailbox.toList();
+      mailbox.clear();
+      if (batch.isNotEmpty) deliveries++;
+      return http.Response(jsonEncode({'frames': batch}), 200);
+    }
+
+    final sender = RelayTunnel(
+      baseUrl: Uri.parse('https://relay.example'),
+      identity: alice,
+      peerPubkeyHex: bob.publicKeyHex,
+      authToken: 'alice-token',
+      channelAuthKey: Uint8List.fromList(List<int>.generate(32, (i) => i)),
+      client: MockClient(relay),
+    );
+    final receiver = RelayTunnel(
+      baseUrl: Uri.parse('https://relay.example'),
+      identity: bob,
+      peerPubkeyHex: alice.publicKeyHex,
+      authToken: 'bob-token',
+      channelAuthKey: Uint8List(32),
+      pollInterval: const Duration(milliseconds: 5),
+      client: MockClient(relay),
+    );
+    final frames = <SyncFrame>[];
+    final sub = receiver.frames.listen(frames.add);
+    receiver.start();
+    sender.send(const HaveFrame([]));
+
+    await _waitUntil(() => posts == 1 && deliveries == 1);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(receiver.isReady, isFalse);
+    expect(frames, isEmpty);
+
+    await sub.cancel();
+    await sender.close();
+    await receiver.close();
+  });
+
+  test('group tunnels work when both peers possess the channel key', () async {
+    final alice = await Identity.generate();
+    final bob = await Identity.generate();
+    final mailbox = <String>[];
+    final key = Uint8List.fromList(List<int>.generate(32, (i) => i));
+
+    Future<http.Response> relay(http.Request request) async {
+      if (request.method == 'POST') {
+        final body = jsonDecode(request.body) as Map<String, dynamic>;
+        mailbox.add(body['data'] as String);
+        return http.Response('{}', 200);
+      }
+      final batch = mailbox.toList();
+      mailbox.clear();
+      return http.Response(jsonEncode({'frames': batch}), 200);
+    }
+
+    final sender = RelayTunnel(
+      baseUrl: Uri.parse('https://relay.example'),
+      identity: alice,
+      peerPubkeyHex: bob.publicKeyHex,
+      authToken: 'alice-token',
+      channelAuthKey: key,
+      client: MockClient(relay),
+    );
+    final receiver = RelayTunnel(
+      baseUrl: Uri.parse('https://relay.example'),
+      identity: bob,
+      peerPubkeyHex: alice.publicKeyHex,
+      authToken: 'bob-token',
+      channelAuthKey: key,
+      pollInterval: const Duration(milliseconds: 5),
+      client: MockClient(relay),
+    );
+    final received = receiver.frames.first;
+    receiver.start();
+    sender.send(const HaveFrame([]));
+
+    expect(
+      await received.timeout(const Duration(seconds: 2)),
+      isA<HaveFrame>(),
+    );
+    expect(receiver.isReady, isTrue);
+
+    await sender.close();
+    await receiver.close();
+  });
 }
