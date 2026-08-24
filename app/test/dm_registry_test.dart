@@ -1,20 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/profile.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
 void main() {
+  const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
   late Directory temp;
 
   setUp(() async {
     temp = await Directory.systemTemp.createTemp('hearth-dm-registry-');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pathProvider, (_) async => temp.path);
     Hive.init(temp.path);
   });
 
   tearDown(() async {
     await Hive.close();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pathProvider, null);
     await temp.delete(recursive: true);
   });
 
