@@ -79,6 +79,27 @@ RandomAccessFile? _instanceLock;
 /// can find the source (AGPL-3.0).
 const String kSourceUrl = 'https://github.com/spamalot22/hearth';
 const MethodChannel _windowsAudioOutput = MethodChannel('hearth/audio_output');
+const MethodChannel _androidVoiceService = MethodChannel(
+  'hearth/voice_service',
+);
+
+Future<void> _startAndroidVoiceService() async {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    await _androidVoiceService.invokeMethod<void>('start');
+  }
+}
+
+Future<void> _stopAndroidVoiceService() async {
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    try {
+      await _androidVoiceService.invokeMethod<void>('stop');
+    } on PlatformException {
+      // Voice teardown must still complete if Android already stopped the service.
+    } on MissingPluginException {
+      // Allows teardown during tests and before the engine channel is registered.
+    }
+  }
+}
 
 class _ModelInfo {
   const _ModelInfo(
@@ -3897,6 +3918,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _ytHeartbeat?.cancel();
     _ytController = null;
     unawaited(_voice?.leave());
+    unawaited(_stopAndroidVoiceService());
     unawaited(_player?.dispose());
     unawaited(_speakerTestPlayer?.dispose());
     _input.dispose();
@@ -4820,6 +4842,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
     try {
+      await _startAndroidVoiceService();
+    } on PlatformException {
+      _setError('Unable to keep the microphone active in the background');
+      return;
+    } on MissingPluginException {
+      _setError('Background voice service is unavailable');
+      return;
+    }
+    try {
       _voice = await VoiceSession.join(
         channelId: channelId,
         identity: widget.identity,
@@ -4854,6 +4885,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
       if (mounted) setState(() {});
     } catch (_) {
+      await _stopAndroidVoiceService();
       if (mounted) {
         _setError('microphone access is needed for voice');
       }
@@ -4895,34 +4927,38 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }..remove(widget.identity.publicKeyHex);
 
   Future<void> _leaveVoice() async {
-    await _stopScreenShare(); // no-op if not sharing; tells peers before we go
-    if (_ytIsHost && _ytVideoId != null) {
-      _voice?.sendControl(
-        YoutubeControl(
-          host: widget.deviceKeys.publicKeyHex,
-          videoId: '',
-          playing: false,
-          position: 0,
-        ),
-      );
+    try {
+      await _stopScreenShare(); // tells peers before we go; no-op if idle
+      if (_ytIsHost && _ytVideoId != null) {
+        _voice?.sendControl(
+          YoutubeControl(
+            host: widget.deviceKeys.publicKeyHex,
+            videoId: '',
+            playing: false,
+            position: 0,
+          ),
+        );
+      }
+      _endWatchParty();
+      final views = _screenViews.values.toList();
+      _screenViews.clear();
+      _selectedShareHex = null;
+      _voicePresenceTimer?.cancel();
+      _voicePresenceTimer = null;
+      // Broadcast leave (empty channelId).
+      _broadcastVoicePresence('');
+      final voice = _voice;
+      _voice = null;
+      _voiceMuted.clear();
+      _speakerOn = true;
+      if (mounted) setState(() {});
+      for (final view in views) {
+        await view.close();
+      }
+      await voice?.leave();
+    } finally {
+      await _stopAndroidVoiceService();
     }
-    _endWatchParty();
-    final views = _screenViews.values.toList();
-    _screenViews.clear();
-    _selectedShareHex = null;
-    _voicePresenceTimer?.cancel();
-    _voicePresenceTimer = null;
-    // Broadcast leave (empty channelId).
-    _broadcastVoicePresence('');
-    final voice = _voice;
-    _voice = null;
-    _voiceMuted.clear();
-    _speakerOn = true;
-    if (mounted) setState(() {});
-    for (final view in views) {
-      await view.close();
-    }
-    await voice?.leave();
   }
 
   // --- screen share (Windows) ---

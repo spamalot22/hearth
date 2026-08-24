@@ -2,6 +2,7 @@ package com.hearth.app
 
 import android.app.DownloadManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -32,6 +33,7 @@ import kotlinx.coroutines.launch
  * Platform channels for native Android features:
  * - `hearth/downloader`: system DownloadManager for APK updates
  * - `hearth/credentials`: Credential Manager API for cross-device identity sync
+ * - `hearth/voice_service`: foreground microphone service for active voice calls
  */
 class MainActivity : FlutterActivity() {
     companion object {
@@ -60,6 +62,37 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         setupDownloaderChannel(flutterEngine)
         setupCredentialChannel(flutterEngine)
+        setupVoiceServiceChannel(flutterEngine)
+    }
+
+    private fun setupVoiceServiceChannel(flutterEngine: FlutterEngine) {
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hearth/voice_service")
+            .setMethodCallHandler { call, result ->
+                val intent = Intent(this, VoiceForegroundService::class.java)
+                try {
+                    when (call.method) {
+                        "start" -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            result.success(null)
+                        }
+
+                        "stop" -> {
+                            stopService(intent)
+                            result.success(null)
+                        }
+
+                        else -> result.notImplemented()
+                    }
+                } catch (e: SecurityException) {
+                    result.error("voice_service", e.message, null)
+                } catch (e: IllegalStateException) {
+                    result.error("voice_service", e.message, null)
+                }
+            }
     }
 
     override fun onDestroy() {
