@@ -492,6 +492,9 @@ class ChannelSession {
 
   /// Forces the mesh to re-announce to the relay (e.g. after relay recovery).
   void reconnect() => _mesh?.forceAnnounce();
+
+  /// Replaces native peer links that may have gone stale during app suspension.
+  Future<void> recoverConnections() async => _mesh?.recoverConnections();
 }
 
 /// Owns every open [ChannelSession] and tracks which one is active. Channels are
@@ -851,6 +854,12 @@ class ChannelManager {
     for (final session in _sessions.values) {
       session.reconnect();
     }
+  }
+
+  Future<void> recoverConnections() async {
+    await Future.wait(
+      _sessions.values.map((session) => session.recoverConnections()),
+    );
   }
 
   Future<void> enforcePeerPolicies() async {

@@ -11,6 +11,7 @@ import 'package:http/http.dart' as http;
 
 import 'candidate_cache.dart';
 import 'mesh_control.dart';
+import 'peer_connection_health.dart';
 import 'relay_tunnel.dart';
 import 'signal_auth.dart';
 import 'update_checker.dart';
@@ -47,7 +48,7 @@ class WebRtcMesh {
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
-    this.idleAnnounceInterval = const Duration(seconds: 30),
+    this.idleAnnounceInterval = const Duration(seconds: 10),
     this.idleSignalInterval = const Duration(seconds: 15),
     List<Map<String, dynamic>>? iceServers,
   }) : _client = client ?? http.Client(),
@@ -157,6 +158,7 @@ class WebRtcMesh {
   bool _pollingSignals = false;
   bool _closed = false;
   bool _started = false;
+  bool _recovering = false;
 
   /// Emits a [FrameChannel] each time a peer's data channel opens; the app wires
   /// a [SyncEngine] session onto each.
@@ -188,7 +190,19 @@ class WebRtcMesh {
   void _start() {
     if (_started) return;
     _started = true;
-    // Try cached peers with staggered delays (before waiting for relay announce).
+    // Signalling requires the short-lived token returned by /announce. Dialling
+    // cached peers before this completes makes the first offer fail with 403
+    // and needlessly puts that peer into reconnect backoff.
+    unawaited(_bootstrap());
+    _scheduleAnnounce();
+    _scheduleSignalPoll();
+  }
+
+  Future<void> _bootstrap() async {
+    if (await _announce()) _tryCachedPeers();
+  }
+
+  void _tryCachedPeers() {
     final cached = candidateCache?.peersToTry(channel) ?? [];
     for (final (:peer, :delay) in cached) {
       if (delay == Duration.zero) {
@@ -197,9 +211,6 @@ class WebRtcMesh {
         Future.delayed(delay, () => _maybeInitiate(peer));
       }
     }
-    unawaited(_announce());
-    _scheduleAnnounce();
-    _scheduleSignalPoll();
   }
 
   // Announce often while connecting or peerless, rarely once settled.
@@ -265,6 +276,41 @@ class WebRtcMesh {
     if (_started) _scheduleAnnounce();
   }
 
+  /// Replaces peer connections that may have been frozen while a mobile app
+  /// was suspended, then immediately resumes rendezvous. Native WebRTC can
+  /// leave those links in `disconnected` (or even stale `connected`) state,
+  /// which otherwise suppresses a fresh offer because the peer remains in
+  /// [_links].
+  Future<void> recoverConnections() async {
+    if (_closed || _recovering) return;
+    _recovering = true;
+    try {
+      _announceTimer?.cancel();
+      _signalTimer?.cancel();
+      _backoffUntil.clear();
+      _backoffFailures.clear();
+      _earlyRemoteIce.clear();
+
+      for (final link in _links.values.toList()) {
+        await link.dispose();
+      }
+      for (final tunnel in _tunnels.values.toList()) {
+        await tunnel.close();
+      }
+      _tunnels.clear();
+    } finally {
+      _recovering = false;
+    }
+
+    if (_closed) return;
+    if (_started) {
+      _scheduleAnnounce();
+      _scheduleSignalPoll();
+    }
+    if (await _announce()) _tryCachedPeers();
+    await _pollSignals();
+  }
+
   /// Closes links that no longer satisfy a dynamic admission policy (for
   /// example after learning that a device was revoked).
   Future<void> enforcePeerPolicy() async {
@@ -281,8 +327,8 @@ class WebRtcMesh {
   }
 
   /// Announce presence, then start offering to any peer we don't yet have.
-  Future<void> _announce() async {
-    if (_announcing || _closed) return;
+  Future<bool> _announce() async {
+    if (_announcing || _closed) return false;
     _announcing = true;
     var retrySignals = false;
     try {
@@ -338,7 +384,7 @@ class WebRtcMesh {
               _maybeInitiate(peer);
             }
           }
-          return; // success
+          return true;
         } catch (_) {
           continue; // try next
         }
@@ -347,6 +393,7 @@ class WebRtcMesh {
       _announcing = false;
       if (retrySignals && !_closed) unawaited(_pollSignals());
     }
+    return false;
   }
 
   /// Drain the signal mailbox and dispatch each entry to its peer link.
@@ -411,6 +458,7 @@ class WebRtcMesh {
   void _maybeInitiate(String peerHex) {
     // A pubkey is 32 bytes = 64 hex chars; drop anything malformed or our own.
     if (_closed ||
+        _authToken == null ||
         !_peerIdPattern.hasMatch(peerHex) ||
         peerHex == selfPubkeyHex ||
         !(peerAllowed?.call(peerHex) ?? true) ||
@@ -422,7 +470,12 @@ class WebRtcMesh {
     // policy overrides it — `true` always offers, `false` never does.
     final shouldOffer =
         forceInitiator ?? (selfPubkeyHex.compareTo(peerHex) > 0);
-    if (!shouldOffer) return;
+    if (!shouldOffer) {
+      // The answer-only side still needs to drain the offerer's mailbox now.
+      // Waiting for the idle poll can consume half the handshake timeout.
+      _bumpSignalPoll();
+      return;
+    }
     final until = _backoffUntil[peerHex];
     if (until != null && DateTime.now().isBefore(until)) return; // backing off
     final link = _createLink(peerHex, initiator: true);
@@ -494,7 +547,8 @@ class WebRtcMesh {
   }
 
   _PeerLink _createLink(String peerHex, {required bool initiator}) {
-    final link = _PeerLink(
+    late final _PeerLink link;
+    link = _PeerLink(
       peerHex: peerHex,
       initiator: initiator,
       iceServers: _iceServers,
@@ -507,8 +561,14 @@ class WebRtcMesh {
       onSignal: (kind, data) => _sendSignal(peerHex, kind, data),
       onOpen: _emitPeer,
       onClosed: () {
+        // A delayed callback from an old link must never remove a replacement.
+        if (!identical(_links[peerHex], link)) return;
         _links.remove(peerHex);
         if (_closed) return;
+        if (_recovering) {
+          onPeerLeft?.call(peerHex);
+          return;
+        }
         if (!_backoffFailures.containsKey(peerHex) &&
             _backoffFailures.length >= _kMaxRememberedFailures) {
           final oldest = _backoffFailures.keys.first;
@@ -721,6 +781,9 @@ class _PeerLink implements FrameChannel {
   bool _opened = false;
   bool _disposed = false;
   Timer? _handshakeTimer;
+  late final PeerConnectionHealthMonitor _health = PeerConnectionHealthMonitor(
+    onStale: () => unawaited(dispose()),
+  );
   Future<void> _sendTail = Future<void>.value();
   final List<RTCIceCandidate> _pendingCandidates = [];
   final WebRtcSignalOrder _outgoingSignals = WebRtcSignalOrder();
@@ -799,12 +862,8 @@ class _PeerLink implements FrameChannel {
       _outgoingSignals.addCandidate(payload, onSignal);
     };
     pc.onDataChannel = _wireChannel;
-    pc.onConnectionState = (state) {
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
-        unawaited(dispose());
-      }
-    };
+    pc.onConnectionState = _health.handlePeerState;
+    pc.onIceConnectionState = _health.handleIceState;
     // Voice/screen: attach our local media before the offer/answer so it rides
     // in the initial SDP (no renegotiation). Sharers/voice have a localStream;
     // receive-only viewers have none and just add nothing.
@@ -936,6 +995,7 @@ class _PeerLink implements FrameChannel {
     _disposed = true;
     _handshakeTimer?.cancel();
     _handshakeTimer = null;
+    _health.close();
     _pendingCandidates.clear();
     _outgoingSignals.clear();
     try {

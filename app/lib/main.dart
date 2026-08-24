@@ -3896,7 +3896,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Track focus so we don't fire OS notifications while the app is in front.
     _foreground = state == AppLifecycleState.resumed;
-    if (state == AppLifecycleState.paused ||
+    if (state == AppLifecycleState.resumed &&
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      // Mobile suspension can preserve stale native WebRTC objects while their
+      // sockets are gone. Replace them and rendezvous immediately instead of
+      // waiting for a long native timeout or falling back to relay delivery.
+      unawaited(_channels?.recoverConnections() ?? Future<void>.value());
+      unawaited(_voice?.recoverConnections() ?? Future<void>.value());
+      unawaited(_checkRelay());
+    } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       // Save fresh token for background fetch before the app sleeps.
       unawaited(_saveBackgroundState());

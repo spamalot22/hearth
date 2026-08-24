@@ -75,6 +75,11 @@ class VoiceSession {
   /// browser actually plays the audio.
   Iterable<RTCVideoRenderer> get remoteRenderers => _remotes.values;
 
+  /// Re-negotiate voice links after a mobile OS has suspended networking.
+  Future<void> recoverConnections() async {
+    if (!_closed) await _mesh.recoverConnections();
+  }
+
   /// Requests the mic and joins [channelId]'s voice mesh. Throws if mic access
   /// is denied.
   static Future<VoiceSession> join({
