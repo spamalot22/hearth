@@ -1,39 +1,26 @@
-<!--
-This README describes the package. If you publish this package to pub.dev,
-this README's contents appear on the landing page for your package.
+# Hearth Core
 
-For information about how to write a good package README, see the guide for
-[writing package pages](https://dart.dev/tools/pub/writing-package-pages).
+Pure-Dart protocol and storage primitives for Hearth. This package has no
+Flutter dependency and contains the security-critical logic shared by the app:
 
-For general information about developing packages, see the Dart guide for
-[creating packages](https://dart.dev/tools/pub/create-packages)
-and the Flutter guide for
-[developing packages and plugins](https://flutter.dev/to/develop-packages).
--->
+- Ed25519 root/device identities, certificates, bundles, and revocations.
+- Canonically encoded, signed, content-addressed message DAGs.
+- X25519/ChaCha20-Poly1305 encryption for sealed, paired, group, and
+  multi-device payloads.
+- Bounded HAVE/WANT/GIVE/ACK gossip reconciliation and blob transfer.
+- Storage and transport interfaces with in-memory test implementations.
 
-TODO: Put a short description of the package here that helps potential users
-know whether this package might be useful for them.
-
-## Features
-
-TODO: List what your package can do. Maybe include images, gifs, or videos.
-
-## Getting started
-
-TODO: List prerequisites and provide or point to information on how to
-start using the package.
-
-## Usage
-
-TODO: Include short and useful examples for package users. Add longer examples
-to `/example` folder.
+The Flutter application supplies persistent Hive stores, WebRTC links, platform
+key storage, and UI. The TypeScript relay independently verifies the canonical
+message format using locked interoperability fixtures.
 
 ```dart
-const like = 'sample';
+import 'package:core/core.dart';
+
+final identity = await Identity.generate();
 ```
 
-## Additional information
+See the repository [README](../README.md) and
+[implementation plan](../IMPLEMENTATION_PLAN.md) for the complete architecture.
 
-TODO: Tell users more about the package: where to find more information, how to
-contribute to the package, how to file issues, what response they can expect
-from the package authors, and more.
+Hearth Core is licensed under AGPL-3.0-or-later; see [LICENSE](../LICENSE).

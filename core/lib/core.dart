@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/// Hearth core — identity, signed messages, and (soon) the message DAG.
+/// Hearth core — identity, encryption, signed message DAG, and gossip sync.
 ///
 /// Pure Dart with no Flutter imports, so it stays portable across every target
 /// and could later be swapped for a Rust module without touching the UI.
@@ -13,6 +13,7 @@ export 'src/encryption.dart'
     show GroupCipher, MultiDeviceBox, PairBox, SealedBox, ed25519PublicToX25519;
 export 'src/frame.dart'
     show
+        AckFrame,
         FrameChannel,
         GiveBlobChunkFrame,
         GiveBlobFrame,
@@ -26,6 +27,7 @@ export 'src/identity.dart'
 export 'src/message.dart'
     show Message, kHearthMessageVersion, maxMessagePayloadBytes;
 export 'src/mnemonic.dart' show seedToMnemonic, mnemonicToSeed, bip39Words;
+export 'src/relay_duty.dart' show RelayDutySchedule;
 export 'src/repository.dart'
     show MessageRepository, RepositoryCapacityException;
 export 'src/storage.dart' show InMemoryMessageStorage, MessageStorage;

@@ -5,9 +5,9 @@ Discord/Signal with no servers that own your messages.**
 
 Hearth has no accounts and no central database. Your identity is a keypair on your
 device, messages sync **peer-to-peer over WebRTC**, and everything — DMs, group
-channels, voice — is **end-to-end encrypted by default**. An optional relay exists
-only to introduce peers to each other (and to courier messages to people who are
-offline); it can verify that a message is authentic but can never read it.
+channels, voice — is **end-to-end encrypted by default**. An optional coordination
+relay handles cold-start discovery, fallback encrypted courier/data traffic, and
+provider-backed media search; it can verify authenticity but cannot read messages.
 
 > **Status:** early, fast-moving work in progress. Crypto, message sync, P2P mesh,
 > channels, media, voice, identity backup/restore, signed auto-updates, P2P version
@@ -23,14 +23,15 @@ offline); it can verify that a message is authentic but can never read it.
 - **No accounts.** Your identity is an Ed25519 keypair generated on-device; your
   public key *is* your user id.
 - **Multi-device.** Phone and laptop run simultaneously under one identity.
-  Each device holds its own subkey (certified by the root); the root seed lives
-  only in a BIP39 recovery phrase (never persisted at runtime). DMs are encrypted
-  per-device — revoke a lost device and it's cryptographically locked out of
-  future messages. Manage devices from Settings → Devices (rename, revoke).
+  Each device holds its own subkey certified by the root. The root is recovered
+  from a 24-word BIP39 phrase and can optionally be backed up through Android
+  Credential Manager or Apple synchronised Keychain. DMs are encrypted per-device;
+  revoke a lost device and it is excluded from future key wraps.
 - **End-to-end encrypted everywhere** — DMs, group channels, and voice. The relay
   never holds plaintext.
-- **Peer-to-peer.** Once two peers connect over WebRTC, messages flow directly
-  between them; the backend is out of the loop.
+- **Peer-to-peer.** Once peers connect over WebRTC, messages flow directly.
+  Low-rate rendezvous and best-effort encrypted courier traffic may continue,
+  but the relay is never the source of truth.
 - **Invite-only channels.** A channel is an unguessable capability (random id +
   key) shared via an invite code. You name channels and people locally
   (petnames) — nothing is published.
@@ -56,6 +57,13 @@ offline); it can verify that a message is authentic but can never read it.
   mailbox reads require a short-lived token; and group SDP/ICE additionally
   proves possession of the channel key, preventing the relay from joining a
   group mesh with an identity of its own.
+- **Distributed relay duty** — connected channel components rotate two relay
+  workers, with handoff overlap, while other peers pause routine announce,
+  signal, and courier polling after a bounded mailbox drain. Worker selection is
+  derived locally from time-varying hashes of authenticated device links and
+  grants no message or membership authority. Every standby performs a staggered
+  fail-safe probe at least every two minutes, bounding recovery when workers are
+  suspended, malicious, or unable to reach the relay.
 
 ---
 
@@ -67,13 +75,13 @@ disposable convenience.**
 ```
 ┌─────────────── Device A ───────────────┐        ┌─────────────── Device B ───────────────┐
 │  Flutter app (UI)                       │        │  Flutter app (UI)                       │
-│  ├─ Identity (Ed25519 keypair)          │        │  ├─ Identity (Ed25519 keypair)          │
+│  ├─ Identity (root + device keys)       │        │  ├─ Identity (root + device keys)       │
 │  ├─ Hive (messages, contacts, channels, │        │  ├─ Hive (…)                            │
-│  │        blobs, media, identity seed)  │        │  │                                      │
+│  │        blobs, media, local state)    │        │  │                                      │
 │  └─ core (pure Dart)                    │        │  └─ core (pure Dart)                    │
 │     ├─ Message DAG (signed, hashed)     │        │     ├─ Message DAG                      │
-│     ├─ SyncEngine (HAVE/WANT/GIVE)      │        │     ├─ SyncEngine                       │
-│     └─ Encryption (Sealed/Pair/Group)   │        │     └─ Encryption                       │
+│     ├─ SyncEngine (HAVE/WANT/GIVE/ACK)  │        │     ├─ SyncEngine                       │
+│     └─ Encryption (MultiDevice/Group)   │        │     └─ Encryption                       │
 └───────┬─────────────────────────────┬───┘        └───┬─────────────────────────────┬──────┘
         │  encrypted data channel (gossip + blobs)      │
         └───────────────  WebRTC P2P  ──────────────────┘   ← messages/voice go here
@@ -87,20 +95,18 @@ disposable convenience.**
 ```
 
 ### Identity
-Each device generates an **Ed25519 keypair** ([`core/lib/src/identity.dart`](core/lib/src/identity.dart));
-the public key is the user id, shown as `hearth#<fingerprint>` until you give the
-person a local petname. The secret seed is held in secure storage. There is no
-registration and no server-side account. An X25519 key for encryption is derived
-from the same Ed25519 key (birational conversion), so one identity covers both
-signing and key agreement.
+An Ed25519 **root identity** ([`core/lib/src/identity.dart`](core/lib/src/identity.dart))
+is the stable user id, shown as `hearth#<fingerprint>` until you assign a local
+petname. There is no registration or server-side account. Each installed device
+uses a separate Ed25519 subkey and derives X25519 keys for encryption.
 
 **Multi-device:** your root identity certifies per-device subkeys
 ([`core/lib/src/device.dart`](core/lib/src/device.dart)). Each device holds only
-its subkey — messages are authored by the root but signed by the device (carrying
-a cert so peers verify the chain). The root seed lives only in a BIP39 recovery
-phrase; on enrollment it's derived transiently, signs the device cert + a
-`DeviceBundle` (advertises active devices), then is discarded. DMs are encrypted
-per-device via `MultiDeviceBox`; revoking a device excludes it from the key wrap.
+its subkey — messages are authored by the root but signed by the device, carrying
+a certificate so peers verify the chain. Enrollment derives the root from the
+recovery phrase or optional synced credential, signs the device certificate and
+bundle, then removes the root from device-local runtime storage. DMs use
+`MultiDeviceBox`; revocation excludes a device from future key wraps.
 
 ### Messages — a signed, content-addressed DAG
 A message ([`message.dart`](core/lib/src/message.dart)) carries its author,
@@ -113,9 +119,9 @@ regardless of arrival order or duplication.
 
 ### Transport — WebRTC mesh + gossip
 [`app/lib/webrtc_mesh.dart`](app/lib/webrtc_mesh.dart) maintains a **full mesh**:
-one `RTCPeerConnection` per peer. The relay is used only for **rendezvous** —
-announce presence, discover peers, and trade SDP/ICE. To avoid glare, the peer
-with the greater public key offers. **Signalling is authenticated**: every
+one `RTCPeerConnection` per peer. The relay provides cold-start rendezvous,
+encrypted courier holding, and an encrypted data-tunnel fallback. To avoid glare,
+the peer with the greater public key offers. **Signalling is authenticated**: every
 offer/answer/ICE is Ed25519-signed and verified ([`signal_auth.dart`](app/lib/signal_auth.dart));
 group signals also carry a channel-key HMAC. A malicious relay therefore cannot
 impersonate a peer, swap a DTLS fingerprint, or introduce its own identity into a
@@ -138,10 +144,11 @@ receipt** — so any peer can relay anyone's messages without being trusted.
 ### Encryption — E2E by default
 [`encryption.dart`](core/lib/src/encryption.dart), built on ChaCha20-Poly1305 +
 HKDF-SHA256:
-- **`PairBox`** — DMs. A shared key from static X25519 ECDH between the two
-  identities.
-- **`GroupCipher`** — group channels. A symmetric AEAD with the channel's key.
-- **`SealedBox`** — anonymous messages to a recipient (ephemeral X25519).
+- **`MultiDeviceBox`** — DMs, wrapped for every active sender and recipient device.
+- **`GroupCipher`** — epoch-labelled group-channel keys; device revocation can
+  rotate and wrap a replacement key to remaining authorised devices.
+- **`PairBox` / `SealedBox`** — retained lower-level and legacy-compatible
+  primitives used by the encryption layer and tests.
 
 The message envelope (text / gif / sticker / sound) is encrypted *inside* the
 signed message payload, so encryption composes with the DAG and the relay only
@@ -153,8 +160,8 @@ A **group channel** ([`group_channel.dart`](app/lib/group_channel.dart)) is a
 You create one or join via an **invite code** (`hearth:<base64url(id,key,name)>`).
 Two people who both make a "games" channel get different ids — no collisions, and
 only invitees can find it. **DMs** use a deterministic channel id derived from the
-two sorted pubkeys, encrypted with `PairBox`; you can only DM people you've added
-as contacts.
+two sorted root pubkeys and `MultiDeviceBox` encryption, so every enrolled device
+for either contact can decrypt them.
 
 ### Media — content-addressed blobs
 GIFs, stickers, and soundboard clips are stored as **content-addressed blobs**
@@ -187,12 +194,18 @@ macOS (Metal) and Linux/Windows (CUDA if available).
 ### The relay (backend)
 [`backend/`](backend) is a small **Hono** app, and a *dumb relay*: it verifies each
 message's signature but **never decrypts or owns history**. It's reduced to a
-**cold-start bootstrap** — a pubkey-addressed signalling mailbox — plus the
-media-search proxies; once peers have a live link, presence/peers/messages flow
-pure P2P, so the happy path needs no server. It's optional and swappable (the
-client points at any relay URL), and is designed to **self-host** as a single
-in-memory Docker container behind a tunnel (no port-forward). Deployed on a
-small always-on host via Portainer + Tailscale Funnel (public HTTPS, zero inbound ports).
+**coordination service**: cold-start signalling, bounded encrypted courier/tunnel
+stores, and media-search proxies. Direct P2P is preferred. DMs can skip a courier
+upload when an admitted participant confirms durable receipt; group messages
+retain the fallback because an arbitrary group member is not a custody authority.
+Settled components rotate two redundant relay workers instead of making every
+client poll independently. Peerless, handshaking, or tunnel-dependent clients
+immediately resume their own relay activity; outgoing workers drain signalling
+through the relay TTL window before reducing activity. Standbys make staggered,
+low-frequency probes so worker failure cannot suppress relay access indefinitely.
+The relay is optional,
+swappable, and designed to self-host as one in-memory Docker container behind a
+tunnel. The current deployment uses Portainer + Tailscale Funnel.
 Each relay process publishes a random `relayEpoch`; clients bind their signalling
 and courier cursors to that generation and reset them after a container restart
 or relay failover, because the relay's in-memory sequence numbers restart at zero.
@@ -214,8 +227,8 @@ core/      Pure-Dart, platform-agnostic engine (no Flutter):
            identity, message DAG, encryption, blobs, sync/gossip, frames.
 app/       Flutter client (web + mobile/desktop): UI, WebRTC mesh, voice,
            Hive storage, media library, channel/contact management.
-backend/   TypeScript Hono relay: cold-start signalling mailbox + media-search
-           proxies. In-memory; self-hosted as a Docker container (tunnelled).
+backend/   TypeScript Hono relay: rendezvous, encrypted courier/data tunnel, and
+           media-search proxies. In-memory; self-hosted in Docker via Tailscale.
 IMPLEMENTATION_PLAN.md   Living plan, architecture decisions log, roadmap.
 ```
 
@@ -282,12 +295,16 @@ unavailable — everything else works.
 
 ## Testing & quality
 
+Local verification should stay lightweight on constrained development hosts:
+
 ```bash
-cd app && flutter test          # client + widget tests
-cd core && dart test            # engine tests
+dart test core/test             # engine tests
 pnpm -C backend test            # relay tests (vitest)
-flutter analyze                 # static analysis (core + app)
+flutter analyze app             # client static analysis
 ```
+
+GitHub Actions runs the Flutter widget tests and native Android/Windows builds.
+See [`AGENTS.md`](AGENTS.md) before running resource-heavy tasks locally.
 
 A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 
@@ -315,21 +332,19 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
   GIF/sound provider, but the relay sees the query. Hiding *who a message is for*
   (sealed sender) is on the roadmap.
 - **Identity backup:** your identity is backed up as a 24-word BIP39 recovery
-  phrase. The root seed is never stored at runtime — it's derived transiently
-  from the phrase during device enrollment, then discarded. Lose all devices
-  *and* the phrase = identity gone (no server holds it).
+  phrase. Optional Android Credential Manager or Apple synchronised-Keychain
+  backup may retain an encrypted copy for enrollment; otherwise the root is
+  derived transiently and discarded. Hearth's relay never holds it.
 - **Per-device DM encryption:** DMs are encrypted to each of the recipient's
   active device keys individually (`MultiDeviceBox`). Revoking a device excludes
   it from the key wrap — it physically cannot decrypt future messages.
 
 ## Roadmap
 
-Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): MLS-style
-group key management (forward secrecy + per-member revocation), social recovery
-(Shamir's Secret Sharing for the recovery phrase), shorter recovery codes
-(12-word + biometric keychain sync), federation, and spam resistance. The plan
-also keeps a dated **decisions log** explaining *why* each choice was made.
+- [ ] **Authenticated LAN discovery and local signalling.** This would enable
+  relay-free same-network cold starts, but it is deliberately deferred.
 
-## License
-
-Intended to be open-source; a license has not been finalised yet.
+Highlights from [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md): forward-secret
+DM/group key management, optional group governance and member eviction,
+independent cold-start discovery, secondary-platform releases, federation, and
+public-directory spam resistance. The plan also keeps a dated decisions log.

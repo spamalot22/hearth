@@ -41,7 +41,7 @@ class Message {
   /// ties between causally-concurrent messages.
   final int timestampMs;
 
-  /// Opaque content. UTF-8 text for now; encrypted bytes later.
+  /// Opaque encrypted content-envelope bytes (or legacy plaintext payloads).
   final Uint8List payload;
 
   /// 64-byte Ed25519 signature over [signedBytes] — by [device] when set, else

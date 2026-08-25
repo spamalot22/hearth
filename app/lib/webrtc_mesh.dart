@@ -48,6 +48,10 @@ class WebRtcMesh {
     this.channelAuthKey,
     this.forceInitiator,
     this.candidateCache,
+    this.coordinateRelayDuty = false,
+    this.onRelayDutyChanged,
+    this.onRelayStandbyProbe,
+    this.standbyProbeInterval = const Duration(minutes: 2),
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
     this.signalPollInterval = const Duration(milliseconds: 700),
@@ -127,6 +131,22 @@ class WebRtcMesh {
   /// through a live mesh route, or through relay rendezvous after a cold start.
   final CandidateCache? candidateCache;
 
+  /// When true, authenticated direct peers rotate redundant relay-watch duty.
+  /// Media/star meshes leave this disabled because their topology differs.
+  final bool coordinateRelayDuty;
+
+  /// Reports whether this node should perform routine relay work for its
+  /// connected component. An outgoing worker may still drain its own signal
+  /// mailbox for a bounded handoff window.
+  final void Function(bool active)? onRelayDutyChanged;
+
+  /// Performs one courier poll alongside a standby rendezvous probe.
+  final Future<void> Function()? onRelayStandbyProbe;
+
+  /// Maximum steady-state interval between each standby's own relay probes.
+  /// A deterministic per-device offset spreads requests within the interval.
+  final Duration standbyProbeInterval;
+
   /// The signed release manifest to send to peers for version enforcement.
   /// Set from the last-verified manifest (GitHub or peer-provided).
   Map<String, Object?>? versionManifest;
@@ -167,12 +187,22 @@ class WebRtcMesh {
       StreamController<FrameChannel>.broadcast(onListen: _start);
   Timer? _announceTimer;
   Timer? _signalTimer;
+  Timer? _relayDutyTimer;
+  Timer? _standbyProbeTimer;
   int _signalSince = 0;
   bool _announcing = false;
   bool _pollingSignals = false;
   bool _closed = false;
   bool _started = false;
   bool _recovering = false;
+  bool _hasRelayDuty = true;
+  bool _standbyProbing = false;
+  DateTime? _signalDrainUntil;
+  static const RelayDutySchedule _relayDutySchedule = RelayDutySchedule();
+  static const Duration _signalHandoffDrain = Duration(seconds: 50);
+
+  /// True when this node should perform the component's routine relay work.
+  bool get hasRelayDuty => _hasRelayDuty;
 
   /// Emits a [FrameChannel] each time a peer's data channel opens; the app wires
   /// a [SyncEngine] session onto each.
@@ -226,6 +256,12 @@ class WebRtcMesh {
     unawaited(_bootstrap());
     _scheduleAnnounce();
     _scheduleSignalPoll();
+    if (coordinateRelayDuty) {
+      _relayDutyTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => _refreshRelayDuty(),
+      );
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -255,7 +291,7 @@ class WebRtcMesh {
         ? announceInterval
         : idleAnnounceInterval;
     _announceTimer = Timer(delay, () {
-      unawaited(_announce());
+      if (_hasRelayDuty) unawaited(_announce());
       _scheduleAnnounce();
     });
   }
@@ -265,7 +301,11 @@ class WebRtcMesh {
     if (_closed) return;
     final delay = _handshaking ? signalPollInterval : idleSignalInterval;
     _signalTimer = Timer(delay, () {
-      unawaited(_pollSignals());
+      if (_shouldPollRelaySignals) {
+        unawaited(_pollSignals());
+      } else {
+        _authToken = null;
+      }
       _scheduleSignalPoll();
     });
   }
@@ -282,6 +322,94 @@ class WebRtcMesh {
 
   /// We hold at least one open connection.
   bool get _connected => _links.values.any((link) => link.open);
+
+  bool get _shouldPollRelaySignals {
+    if (_hasRelayDuty) return true;
+    final until = _signalDrainUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  void _extendSignalDrain() {
+    final until = DateTime.now().add(_signalHandoffDrain);
+    if (_signalDrainUntil == null || until.isAfter(_signalDrainUntil!)) {
+      _signalDrainUntil = until;
+    }
+  }
+
+  void _refreshRelayDuty() {
+    if (!coordinateRelayDuty || _closed) return;
+    final directPeers = connectedPeers.toList(growable: false);
+    final active =
+        !_connected ||
+        _handshaking ||
+        _tunnels.isNotEmpty ||
+        _relayDutySchedule.isWorker(
+          self: selfPubkeyHex,
+          members: directPeers,
+          channel: channel,
+          now: DateTime.now(),
+        );
+    _setRelayDuty(active);
+  }
+
+  void _setRelayDuty(bool active) {
+    if (active == _hasRelayDuty) return;
+    _hasRelayDuty = active;
+    if (active) {
+      _signalDrainUntil = null;
+      _standbyProbeTimer?.cancel();
+      _standbyProbeTimer = null;
+    } else {
+      // We may remain visible in relay presence for 15 seconds. Drain this
+      // identity's mailbox through that window plus the relay's 30-second
+      // signal TTL so handoff cannot strand an offer addressed to us.
+      _extendSignalDrain();
+      _scheduleStandbyProbe();
+    }
+    onRelayDutyChanged?.call(active);
+    if (!_started) return;
+
+    _announceTimer?.cancel();
+    _signalTimer?.cancel();
+    _scheduleAnnounce();
+    _scheduleSignalPoll();
+    if (active) {
+      unawaited(() async {
+        await _announce();
+        if (!_closed && _hasRelayDuty) await _pollSignals();
+      }());
+    }
+  }
+
+  @visibleForTesting
+  void debugSetRelayDuty(bool active) => _setRelayDuty(active);
+
+  void _scheduleStandbyProbe() {
+    if (_closed || _hasRelayDuty || _standbyProbeTimer != null) return;
+    final intervalMs = max(1, standbyProbeInterval.inMilliseconds);
+    final spreadMs = max(1, intervalMs ~/ 4);
+    final prefix = selfPubkeyHex.substring(0, min(8, selfPubkeyHex.length));
+    final offset = int.tryParse(prefix, radix: 16) ?? 0;
+    final delayMs = intervalMs - spreadMs + (offset % spreadMs);
+    _standbyProbeTimer = Timer(Duration(milliseconds: delayMs), () {
+      _standbyProbeTimer = null;
+      unawaited(_runStandbyProbe());
+    });
+  }
+
+  Future<void> _runStandbyProbe() async {
+    if (_closed || _hasRelayDuty || _standbyProbing) return;
+    _standbyProbing = true;
+    _extendSignalDrain();
+    try {
+      final announced = await _announce();
+      if (announced && !_closed && !_hasRelayDuty) await _pollSignals();
+      if (!_closed && !_hasRelayDuty) await onRelayStandbyProbe?.call();
+    } finally {
+      _standbyProbing = false;
+      _scheduleStandbyProbe();
+    }
+  }
 
   String? _authToken;
 
@@ -306,6 +434,7 @@ class WebRtcMesh {
   /// Forces an immediate re-announce (e.g. after relay recovery).
   void forceAnnounce() {
     if (_closed) return;
+    if (!_hasRelayDuty) _extendSignalDrain();
     _announceTimer?.cancel();
     unawaited(_announce());
     if (_started) _scheduleAnnounce();
@@ -415,6 +544,7 @@ class WebRtcMesh {
             retrySignals = true;
           }
           _authToken = token;
+          if (!_hasRelayDuty) _extendSignalDrain();
           final peers = body['peers'];
           if (peers is List) {
             for (final peer in peers.whereType<String>().take(
@@ -633,6 +763,7 @@ class WebRtcMesh {
         _links.remove(peerHex);
         _peerSignalRouter.removeNextHop(peerHex);
         _routedSignalRates.remove(peerHex);
+        _refreshRelayDuty();
         if (_closed) return;
         if (_recovering) {
           onPeerLeft?.call(peerHex);
@@ -662,6 +793,7 @@ class WebRtcMesh {
       },
     );
     _links[peerHex] = link;
+    _refreshRelayDuty();
     _bumpSignalPoll(); // a handshake just started — poll fast for its replies
     return link;
   }
@@ -700,6 +832,7 @@ class WebRtcMesh {
     if (manifest != null) {
       link.sendControl(VersionControl(version: appVersion, manifest: manifest));
     }
+    _refreshRelayDuty();
   }
 
   /// Handles mesh control messages (peer-exchange + relayed signalling).
@@ -820,6 +953,7 @@ class WebRtcMesh {
       },
     );
     _tunnels[peerHex] = tunnel;
+    _refreshRelayDuty();
     tunnel.start();
     if (!_closed && !_peerConnected.isClosed) {
       _peerConnected.add(tunnel);
@@ -900,6 +1034,8 @@ class WebRtcMesh {
     _closed = true;
     _announceTimer?.cancel();
     _signalTimer?.cancel();
+    _relayDutyTimer?.cancel();
+    _standbyProbeTimer?.cancel();
     for (final link in _links.values.toList()) {
       await link.dispose();
     }

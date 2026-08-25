@@ -2,9 +2,9 @@
 
 > **Hearth** — a gamer-focused, open-source, decentralised Discord alternative.
 > Local-first, peer-to-peer by default, with an **optional** coordination
-> backend that improves reliability but is never required to function.
+> backend that improves reliability but is never the source of truth.
 
-_Status: living document. Last updated: 2026-07-01._
+_Status: living document. Last reconciled with `main`: 2026-08-25._
 
 ---
 
@@ -14,41 +14,41 @@ _Status: living document. Last updated: 2026-07-01._
   DAG. **Group channels** (many members) and **direct messages** (a private
   2-person channel) are the *same* primitive; only membership scope + encryption
   differ.
-- **Text now; voice next** — text chat works today. Real-time **voice, video, and
-  screen-share** come via WebRTC (Phase 3); symmetric-NAT pairs use a relay-fallback (not coturn).
-- **End-to-end encrypted by default — everything.** Signed today, encrypted next —
-  the payload is opaque bytes (and messages carry a `v` version), so encryption
-  slots in with no breaking change. **Decided:** **DMs *and* group channels are
-  E2E-encrypted by default** — privacy first. An opt-*out* to plaintext may come
-  later, but only where a specific feature genuinely needs it (server-side
-  search/moderation, content-reading bots, or open public channels — see the
-  encryption-cost note in §6). Implementation: DMs use a **sealed box** (X25519 —
-  lands first); encrypted groups need a defined member set, so group encryption
-  rides with group membership, and **MLS** adds forward secrecy + key rotation.
-  Caveat: encryption hides payloads, not relay-visible metadata (who/when).
+- **Messaging and media are implemented** — encrypted text, rich content, files,
+  voice messages, voice chat, Windows screen sharing, and synchronised YouTube
+  watch parties use the same channel model. Chat can use an encrypted app-level
+  relay tunnel when ICE cannot connect; real-time media remains direct WebRTC and
+  therefore has no symmetric-NAT fallback without TURN.
+- **End-to-end encrypted by default — everything.** DMs use per-device
+  `MultiDeviceBox` encryption derived through X25519. Groups use a shared
+  32-byte channel key with explicit key epochs; device revocation rotates the
+  group key and wraps its replacement only for authorised member devices.
+  Ed25519 signatures and device certificates authenticate every message.
+  Current limitation: these schemes do not provide DM ratcheting or MLS-style
+  forward secrecy, and encryption does not hide relay-visible metadata.
 - **No central accounts — identity is a keypair.** "Account" features map onto the
   key: **profiles** (signed metadata), **names** via the **petname model** (each
   user assigns private local petnames; the other side's self-asserted nickname is
   only a *suggestion* — no global authority; an optional directory exists later
-  just for cold discovery), **recovery** (seed backup) and **multi-device** (root
-  key certifies device subkeys, §5). Optional OIDC login is a per-community add-on.
+  just for cold discovery), **recovery** (a 24-word BIP39 phrase plus optional
+  Android Credential Manager or Apple synchronised-Keychain backup), and
+  **multi-device** (an offline root key certifies device subkeys). There is no
+  central login or OIDC dependency.
 
 ---
 
 ## 0. Guiding principles
 
 1. **Local-first.** Every device is a full node with its own copy of history.
-2. **Graceful degradation.** If the backend dies, existing chats keep working;
-   you only lose *convenience* (new-user discovery, offline relay, push). No
-   single point of failure.
+2. **Graceful degradation.** If the backend dies, existing direct P2P components
+   keep working. Cold starts, offline courier delivery, provider search, and
+   data-tunnel-only pairs degrade until a relay is available again.
 3. **Identity = keypair, not an account.** No company owns who you are.
 4. **One language per layer, clean boundary.** Dart for the client (`core` +
-   `app`); **TypeScript** for the serverless backend. The only cross-language
-   cost is re-implementing Ed25519 *verification* server-side (trivial with
-   `@noble/ed25519`). Keep `core/` free of Flutter imports so its hot paths can
-   move to Rust later if ever forced.
-5. **Ship the data model first.** Prove signed messages + ordering before
-   touching NAT traversal or voice.
+   `app`); TypeScript for the containerised relay. Canonical fixtures lock the
+   Ed25519 wire contract across languages. `core/` remains Flutter-free.
+5. **Authenticate every boundary.** Treat peers and relays as untrusted; bound
+   frames, queues, downloads, repositories, and externally supplied metadata.
 
 ---
 
@@ -56,38 +56,38 @@ _Status: living document. Last updated: 2026-07-01._
 
 | Concern | Decision | Status |
 |---|---|---|
-| UI (all platforms) | **Flutter / Dart** | ✅ decided |
-| Core logic (identity, message DAG, sync) | **Dart**, isolated behind an interface | ✅ decided |
-| Crypto (signing) | **Ed25519** — `cryptography` (Dart client) / `@noble/ed25519` (TS backend) | ✅ decided |
-| Real-time transport (P2P) | **WebRTC** (`flutter_webrtc`) data channels + media | ✅ decided |
-| Backend (cold-start rendezvous) | **Self-hosted Hono relay** (TypeScript, Docker, in-memory, no DB) — pubkey signalling mailbox + media proxies; **tunnelled** (Cloudflare Tunnel), not port-forwarded | 🔄 revised — was Firebase (see Rendezvous & Deployment) |
-| Backend framework / tooling | **Hono** · Docker Compose (the IaC) · **GitHub Actions on a version tag → GHCR**, box pulls | ✅ decided |
-| NAT fallback (symmetric NAT) | **App-level encrypted relay** through the tunnelled relay — no coturn, no UDP, no port-forward; hole-punching (WebRTC ICE) handles every other pair | ✅ decided |
-| E2E encryption (default) | DMs **sealed box** (X25519, next); groups need membership → **MLS (RFC 9420)** for forward secrecy / rotation (likely Rust `openmls`) | 🔜 next |
-| Heavy P2P (DHT / libp2p) | **Decided against** (2026-06-25) — doesn't reach zero-servers (media proxies + bootstrap remain) and costs a full Rust integration; the no-coturn goal is met in Dart | ❌ dropped |
+| UI | **Flutter / Dart** | Implemented |
+| Core logic | **Dart**, isolated from Flutter in `core/` | Implemented |
+| Identity and signing | **Ed25519** root/device identities; `cryptography` in Dart and `@noble/ed25519` in the relay | Implemented |
+| P2P transport | **WebRTC** (`flutter_webrtc`) data channels and media | Implemented |
+| Bootstrap/backend | Self-hosted **Hono** relay (TypeScript, Docker, bounded in-memory stores) behind **Tailscale Funnel**; pluggable relay URLs and failover | Implemented |
+| Relay services | Cold-start signalling, encrypted offline courier, encrypted chat tunnel, GIF/sound search proxies | Implemented, best effort |
+| Data NAT fallback | App-level encrypted relay tunnel for chat/gossip; no coturn or UDP port-forward | Implemented |
+| Media NAT fallback | Direct WebRTC only; no TURN or app-level media relay | Deliberate limitation |
+| E2E encryption | Per-device DM boxes and epoch-based group keys | Implemented; no ratchet/MLS forward secrecy |
+| Heavy P2P | DHT/libp2p rejected; it would still require bootstrap and materially increase native complexity | Dropped |
 
 ### Target platforms (priority order)
-1. **Windows + Android** — the primary targets. Iterate locally on **Android**
-   (builds on the Mac) plus macOS/web for speed; **Windows builds via CI/VM**
-   (can't build Windows on macOS).
-2. **Later / secondary:** iOS, macOS, Linux, web. The Flutter project already has
-   all platform folders, so adding them later is free — just not a focus now.
+1. **Windows + Android** — primary installed targets. Tagged releases publish a
+   signed Windows installer and Android APK; both support native update flows.
+2. **Web** — built and published by CI; updates by loading the new deployment.
+3. **Later / secondary:** iOS, macOS, and Linux are scaffolded but are not built
+   or published by the release workflow and do not have full feature parity.
 
 Deferring iOS removes the only hard cost floor (Apple Developer $99/yr); it
 returns only if/when we ship iOS.
 
 ### Why TypeScript for the backend (not Dart)?
-- The backend is a thin rendezvous surface, not shared client logic — the
-  "reuse `core`" argument is weak here.
-- TS is the native language of Firebase Cloud Functions; that first-class tooling
-  matters more than language unity for a handful of small functions.
-- Cost: re-implement Ed25519 *verification* server-side. Trivial — both sides are
-  RFC 8032 Ed25519, so they interoperate given a canonical signed encoding.
+- The backend is a thin Hono service, not shared client logic, so reusing the
+  local-first Dart core would create coupling without meaningful reuse.
+- Node has straightforward container tooling for the HTTP relay and provider
+  proxies. Cross-language Ed25519 verification is locked by shared fixtures and
+  canonical message encoding.
 
 ### Why not a Rust core from day one?
-- It triples build complexity (FFI + building for 6 targets) for a prototype
-  that may still pivot.
-- The only place Dart is genuinely weak (MLS group crypto) is a Phase 3+ concern.
+- It materially increases FFI and cross-platform build complexity without
+  improving the current message/sync hot paths.
+- The main likely reason to add Rust is a proven MLS implementation, not speed.
 - **Mitigation:** keep `core/` free of UI and Flutter imports so it can become a
   Rust module later with the UI untouched.
 
@@ -100,54 +100,54 @@ returns only if/when we ship iOS.
 ## 2. Architecture
 
 ```
-Flutter UI — Windows · macOS · Linux · iOS · Android · web
+Flutter UI — Windows · Android · web (primary/released targets)
 │
 ├─ core/  (pure Dart, no Flutter imports)
-│    identity/   Ed25519 keypair = user ID
-│    model/      signed, content-addressed message
-│    dag/        causal ordering + CRDT merge
-│    store/      local persistence
-│    transport/  RelayTransport (Phase 1) · WebRtcTransport (Phase 2, P2P)
+│    identity    offline root + certified device keys
+│    model       signed, content-addressed message DAG
+│    crypto      X25519/AEAD boxes and canonical Ed25519 signatures
+│    sync        HAVE/WANT/GIVE gossip + content-addressed blobs
 │
-└─▶ rendezvous only — never a source of truth
-        │
-   backend/  (TypeScript · Hono · self-hosted Docker · tunnelled · in-memory)
-        cold-start  pubkey-addressed signalling mailbox (offer/answer/ICE)
-        media       GIF/sound search proxies (server-side API keys)
-        ── only hit on cold start; steady-state presence/peers/msgs are P2P ──
-        ── pluggable URL (rides in invite) · holds NO plaintext / history ──
-        │
-   relay-fallback  (same relay, app-level · no coturn · no UDP)
-        forwards opaque ciphertext for the ~15% symmetric-NAT↔symmetric pairs
+├─ app/   (Flutter orchestration and platform integration)
+│    WebRTC meshes      direct chat, voice, and screen media
+│    peer signalling    signed SDP/ICE routed over live mesh links
+│    local storage      Hive message/blob/profile/device state
+│    updates            signed GitHub manifest + native installers
+│
+└─ backend/  (optional TypeScript/Hono relay; never source of truth)
+     cold start         announce/peer/signal mailboxes
+     offline courier    bounded encrypted-message holding
+     data fallback      bounded encrypted gossip tunnel
+     media search       GIF/sound provider proxies
 ```
 
 ### Repo layout (polyglot monorepo)
 ```
 /core      Dart package, no Flutter — protocol, identity, DAG (shared by app)
 /app       Flutter app (depends on core)        ── Dart pub workspace ──┘
-/backend   TypeScript — Hono relay; Dockerfile + docker-compose.yml (the IaC),
-           tunnelled (Cloudflare Tunnel); shipped via GitHub Actions on a tag → GHCR
-           (TURN, when needed, is managed/VPS — not in this repo's deploy)
+/backend   TypeScript Hono relay; Docker/Compose deployment behind Tailscale
+           Funnel; a version tag publishes multi-architecture images to GHCR
 ```
 
 ### The client/backend relationship (important)
-- **The client works P2P with no backend at all.** Two installed clients talk
-  directly (WebRTC) once they can reach each other. This is the default.
-- **The backend is optional rendezvous infrastructure**, not a host of truth. It
-  only helps peers *find* each other and relays encrypted, TTL'd data.
+- **The client is local-first and P2P by default.** Connected clients exchange
+  messages, blobs, controls, voice, and screen media directly over WebRTC.
+- **The backend is optional coordination infrastructure**, not a source of
+  truth. It bootstraps disconnected peers, temporarily holds encrypted courier
+  messages, can tunnel encrypted chat data, and proxies media searches.
 - **Default deploy = a self-hosted, tunnelled Hono container ($0 on hardware you
-  already run).** Self-hosters run the *same* in-memory relay image (GHCR) as a
-  Docker Compose stack behind a Cloudflare/Tailscale tunnel — no Firebase, no DB,
-  no separate server codebase. (Firebase was the original plan; superseded by the
-  2026-06-25 self-hosted-relay pivot logged below.)
+  already run).** Self-hosters run the same bounded in-memory relay image from
+  GHCR behind a Tailscale Funnel sidecar. Cloudflare remains an alternative
+  Compose profile; Firebase and Firestore are not part of the current system.
 - **The rendezvous endpoint is pluggable in the client** (point at any backend
   URL). That is what keeps it decentralised: your self-hosted relay is just the
   default bootstrap node — replaceable, not authoritative.
-- **Cold-start caveat:** two peers who've *never* connected need a rendezvous point
-  (the self-hosted relay, or LAN/mDNS) for the first handshake. Fully serverless first
-  contact would need a DHT, which we've decided against — the relay stays.
-- **Single point of failure is limited to *new* connections:** if the backend is
-  down, existing P2P sessions keep working.
+- **Cold-start caveat:** peers with no live route between their connected
+  components need a relay rendezvous. LAN/mDNS and a distributed relay directory
+  are not implemented; a DHT was explicitly rejected.
+- **A relay outage does not break an existing direct component.** Live links
+  exchange peers and route authenticated SDP/ICE to re-form the same channel.
+  A fully disconnected or partitioned component cannot discover the other side.
 - **Offline delivery is epidemic, not routed.** Every message is signed +
   content-addressed, so *any* peer can carry and re-serve another's messages
   without forging or altering them (recipients verify the author's signature
@@ -155,63 +155,60 @@ Flutter UI — Windows · macOS · Linux · iOS · Android · web
   So A can message an offline C, go offline, and C later syncs it from a carrier B
   who couriered it without reading it. The optional backend relay is just "a
   carrier that's always online" — it makes best-effort peer carry reliable. No
-  durable database is required for this, only for the *convenience* of an always-on
-  holder (and for push). Caveat: a carrier still learns it holds a message authored
-  by A; hiding the recipient is a later sealed-sender step.
+  durable database is required for local-first operation. The relay's courier is
+  bounded and in-memory, so relay restarts can drop held copies; later P2P gossip
+  repairs them if another device still has the message. A carrier still learns
+  authorship metadata; sealed sender is not implemented.
 
-### Rendezvous & connectivity (server-minimal, contact-graph)
+### Rendezvous & connectivity
 
-**Principle: the server is a cold-start bootstrap, not a participant.** Once a peer
-has *any* live P2P link, the backend is out of the loop — messages, presence, peer
-discovery and address updates all flow over the mesh. The happy path (any peer
-reachable) touches **no server**; a server outage only blocks the narrow "came
-online and literally nobody is reachable" cold start.
+Relay namespaces are **channel capabilities**: a random group id or derived DM
+id plus a device public key. Possessing a group id is not enough to join it;
+group SDP/ICE also carries an HMAC proving possession of the channel key. The
+relay returns other recently announced device keys in that namespace and stores
+short-lived per-recipient signalling mail.
 
-**Identity-addressed, contact-scoped — no channel-wide presence, no strangers.** We
-never broadcast presence to a channel or track strangers; each peer is reached by
-its **pubkey**, and you only care about your **contacts'** presence.
+**Connection ladder:**
+1. **Relay rendezvous for an entry link.** A signed announce returns a short-lived
+   token, peer list, and access to the authenticated signal mailbox. The app
+   cycles through configured fallback relays and periodically re-prefers the
+   primary after recovery.
+2. **Same-channel peer exchange.** Every opened data channel introduces the new
+   peer to existing live peers in both directions. Successfully connected peer
+   identities are retained in `CandidateCache`; network addresses and stale ICE
+   candidates are deliberately not persisted.
+3. **Peer-routed signalling.** Existing links carry end-to-end signed SDP/ICE to
+   newly introduced or reachable cached identities. Every hop verifies the
+   origin signature and optional group-key capability. Six-hop TTLs, bounded
+   flooding, deduplication, frame-size limits, connection caps, and per-ingress
+   rate limits constrain loops and abuse.
+4. **Encrypted data tunnel.** After repeated ICE failure, chat/gossip can use a
+   fragmented, authenticated relay tunnel. Direct WebRTC replaces it if a later
+   attempt succeeds. Voice and screen media never use this tunnel.
 
-**Re-establishing a connection — the ladder, cheapest first:**
-1. **Cached last-known candidates → direct reconnect.** Works for peers with a
-   stable reachable endpoint (static IP / port-forward / non-symmetric NAT with a
-   live mapping). Free, instant, no server. *(Caveat: a NAT port mapping is
-   ephemeral and often symmetric, so a cached address is frequently a dead door —
-   this rung succeeds for the minority, not everyone.)*
-2. **Punch via an online mutual contact.** Once you hold *one* live link, ask that
-   peer for everyone's *current* candidates and coordinate a simultaneous
-   hole-punch (peer-exchange). Reaches the rest of your graph with no server.
-3. **Cold-start mailbox (server)** — only when nothing above is reachable: drop a
-   signed offer in the peer's **pubkey-addressed mailbox** to get your *first* live
-   link, then #1/#2 take over. The only server signalling, and brief — **stop
-   polling once connected; no steady-state heartbeat.**
-4. **Relay-fallback** — symmetric-NAT↔symmetric-NAT pairs can't go direct at all, so
-   the tunnelled relay forwards their (already-encrypted) traffic app-level. No
-   coturn, no UDP, no port-forward — a minority case (see Deployment).
+Connected channel components deterministically rotate two redundant relay
+workers, with previous-slot overlap during handoff. Every participant ranks the
+same authenticated device identifiers. Other members pause routine
+announce, signal, and courier polling; peerless, handshaking, and
+tunnel-dependent clients remain active. A departing worker stops
+announcing/courier polling but drains its identity-addressed signal mailbox for
+50 seconds, covering relay presence plus signal TTL. Every standby independently
+performs a staggered rendezvous, signal, and courier probe at least every two
+minutes, bounding recovery if workers are suspended, malicious, or cannot reach
+the relay. A locally published DM skips its encrypted courier copy only when an
+admitted DM device confirms durable receipt within 1.5 seconds; group messages
+always retain the courier fallback. Direct P2P remains the preferred data path,
+but describing steady state as "no server traffic" is incorrect. STUN remains
+external infrastructure used by WebRTC to discover public mappings.
 
-> STUN is still used, but only so each peer learns its *own* current public mapping
-> to advertise — a free public service, not our cost.
-
-**Presence & peer-exchange are P2P (steady state):** on coming online you re-enter
-the mesh and "I'm online / here's my address" propagates over existing links +
-gossip; connected peers tell each other about peers + fresh candidates; address
-changes propagate the same way. No server polling.
-
-**The contact graph stays connected — no islands:** accepting an invite
-**mandatorily adds the inviter as a contact**, and the invite carries the inviter's
-**pubkey** (which doubles as the cold-start bootstrap peer). So a channel's
-connection edges form the **invite tree**, which is by definition connected.
-Bulk-add / new-member prompts densify the tree (resilience if an inviter is
-offline); epidemic gossip + carriers cover offline branches (a delay, not a loss).
-
-**So the server's whole job is:** a tunnelled, pubkey-addressed **cold-start
-signalling mailbox** + the **media-search proxies** (server-side API keys). It holds
-no plaintext, verifies signatures, and is rarely hit. (Fully-serverless first contact
-would need a DHT, which we've **decided against**, so the self-hosted bootstrap node
-stays — the contact graph keeps it rarely-needed.)
+Group invites include the channel capability, key, inviter identity, and relay
+URL. Joining records the inviter as a contact; connected members and gossip then
+densify the topology. This improves resilience but does not eliminate the true
+cold-start/partition boundary.
 
 ### Deployment (self-hosted, tunnelled)
 
-Because the server is a thin, rarely-hit bootstrap, it's cheapest *and* most private
+Because the server is a thin coordination service, it is practical and private
 to **self-host** — and a single always-on container on hardware you already run
 (NAS / Proxmox) keeps it dead simple: the relay stays the current **in-memory Hono
 app** — no Firestore, no serverless cold-start-state rewrite, no scale-to-zero
@@ -219,16 +216,13 @@ gymnastics (all of which existed only to dodge *cloud* cost). On your own box,
 polling cost is irrelevant.
 
 **Shape — one Docker Compose stack (this *is* the IaC):**
-- **Relay container** (Hono): the pubkey cold-start mailbox + media-search proxies.
-  HTTP only, in-memory, no DB.
-- **Exposure: a tunnel, not a port-forward.** Behind a **Cloudflare Tunnel** (or
-  Tailscale Funnel) the box dials *out*, so **zero inbound ports**, home IP never
-  exposed, TLS + hostname for free — strictly safer than forwarding a port, and a
-  dynamic home IP becomes a non-issue.
-- **No coturn, no TURN box, ever.** The symmetric-NAT minority is handled by an
-  **app-level encrypted relay-fallback through this same tunnelled relay** — it
-  forwards opaque ciphertext between two stuck peers. No UDP, no port-forward,
-  nothing extra to run.
+- **Relay container** (Hono): rendezvous, bounded encrypted courier/tunnel stores,
+  release compatibility endpoint, and media-search proxies. No database.
+- **Exposure: Tailscale Funnel sidecar.** The current deployment uses kernel-mode
+  Tailscale with `/dev/net/tun` and `NET_ADMIN`, forwarding privately to the relay
+  over the Compose bridge. Cloudflare Tunnel is retained as an alternative.
+- **No coturn or TURN service.** The app-level tunnel covers encrypted chat data
+  only. Media remains P2P and may fail where ICE cannot establish a direct path.
 
 **CI/CD — IaC + tag-triggered pipeline:** the `docker-compose.yml` (+ relay
 `Dockerfile` + tunnel config) is the infrastructure as code. **GitHub Actions on a
@@ -242,29 +236,35 @@ the default bootstrap node.
 
 ---
 
-## 3. Data model (the part to nail first)
+## 3. Current data model
 
 Every message is a signed, content-addressed object forming a DAG:
 
 ```jsonc
 {
-  "id":        "<hash(payload)>",     // content address
-  "author":    "<ed25519 pubkey>",    // == user identity
+  "v":         1,
+  "id":        "<sha2-256 multihash of canonical signed bytes>",
+  "author":    "<root ed25519 pubkey>",
   "channel":   "<channel id>",
   "prev":      ["<id>", "<id>"],      // heads this msg "saw" -> causal order
-  "timestamp": 1718900000,            // advisory only, tiebreak
-  "payload":   "<bytes>",             // plaintext for now; encrypted later
-  "sig":       "<ed25519 signature>"
+  "timestamp": 1718900000000,         // advisory only, tiebreak
+  "payload":   "<encrypted content-envelope bytes>",
+  "sig":       "<ed25519 signature>",
+  "device":    "<optional certified device pubkey>",
+  "cert":      "<optional root-signed device certificate>"
 }
 ```
 
 - **Ordering:** topological sort of the DAG; ties broken by `(timestamp, id)`.
 - **Merge:** append-only set of signed messages = a simple CRDT. Concurrent
   offline posts both survive and order deterministically.
-- **Integrity:** altering history breaks every downstream hash.
-- **Canonical encoding:** the signed bytes use a *deterministic* serialization
-  (canonical CBOR or fixed field concatenation), **not JSON** — so Dart signing
-  and TypeScript verification agree byte-for-byte.
+- **Integrity:** altering any signed field invalidates the id and signature;
+  downstream `prev` links content-address that id.
+- **Canonical encoding:** signed fields use the implemented deterministic
+  DAG-CBOR-style encoder, with a locked Dart/TypeScript interoperability fixture.
+- **Multi-device:** `author` remains the stable root identity while an optional
+  certified device key signs on its behalf. Revocation is applied by sync/app
+  policy because it depends on the latest root-signed revocation state.
 
 ---
 
@@ -273,8 +273,8 @@ Every message is a signed, content-addressed object forming a DAG:
 ### Phase 0 — Skeleton
 - [x] `flutter create` app + `core/` Dart package, wired as a pub workspace;
       `pub get` + `flutter analyze` clean.
-- [x] Toolchain green (Flutter · Android · Xcode/iOS/macOS · web).
-- [x] Removed the scaffolded Dart `server` (backend is now Firebase/TS, Phase 1).
+- [x] CI verifies core/app/backend and builds Android, Windows installer, and web.
+- [x] Removed the scaffolded Dart server; backend is TypeScript/Hono.
 - [x] Name: **Hearth** (personal project; low trademark risk accepted).
 
 ### Phase 1 — Text chat via the backend relay
@@ -294,11 +294,12 @@ Prove the data model._
       against the P2P mesh + relay courier.
 
 ### Phase 2 — Peer-to-peer transport
-_Goal: backend becomes signalling-only; messages flow peer↔peer._
+_Outcome: direct P2P is primary; the backend remains an optional encrypted
+courier, cold-start rendezvous, and data-tunnel fallback._
 - [x] `core`: abstract `Transport` interface; `RelayTransport` is stream-based.
 - [x] `backend`: signalling + presence endpoints (announce / peers / signal),
       in-memory for now.
-- [x] `app`: `WebRtcTransport` (flutter_webrtc) + mesh manager — Flutter-only, so
+- [x] `app`: `WebRtcMesh` (`flutter_webrtc`) — Flutter-only, so
       it lives app-side; public STUN for ICE, deterministic offerer avoids glare.
       Verified two-window: host↔host pair, DTLS up, `hearth` data channel open,
       messages crossing P2P (relay only brokered the handshake).
@@ -313,37 +314,51 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       verified against the sender's pubkey (`signal_auth`), binding the SDP's DTLS
       fingerprint to identity. Closes the active-MITM hole; the relay stays a dumb
       pipe (still sees metadata). Verified two-window + 6 unit tests.
-- [x] **DM encryption** — `SealedBox` + `PairBox` (X25519 derived from the Ed25519
-      id) in `core`; the app sends encrypted DMs over a derived DM channel and
-      carriers relay blind. Independent of group MLS. (Limitation: both parties must
-      open the DM — no auto-join/notify yet.)
+- [x] **DM encryption** — `MultiDeviceBox` encrypts each payload for all active
+      sender and recipient devices using X25519-derived AEAD keys. First-contact
+      rendezvous, message requests, negotiated private relay mailboxes, and
+      durable pending retries handle the pre-DM connection flow.
 - [x] **Self-hosted relay deploy** — DONE. Dockerised in-memory Hono relay shipped
       via GitHub Actions (version tag → GHCR), deployed as a **Portainer stack** on a
       small always-on host, exposed public-HTTPS via a **Tailscale Funnel sidecar** (no
       domain, no port-forward; the tailnet node is the container, not the host). The
       app's relay URL is configurable. Funnel needs **kernel mode** (TUN device).
       Cloudflare Tunnel kept as an alt profile. See `backend/DEPLOY.md`.
-- [x] **Stop polling once connected** — adaptive signalling: fast poll (700ms/5s)
-      only while a handshake's in flight or peerless, idle (15s/30s) once settled.
-- [x] **Server-minimal connectivity (rest)** — cached-candidate direct reconnect +
-      mutual-contact hole-punch (peer-exchange) + P2P presence/gossip, so the server
-      is touched *only* on cold start.
-- [x] **Invite carries the inviter's pubkey**; accepting mandatorily adds the
-      inviter (keeps the invite-tree contact graph connected → no islands). Still to
-      wire: the mesh actually *using* the inviter as the first cold-start target.
-- [x] **Relay-fallback for symmetric-NAT pairs** — the tunnelled relay forwards their
-      already-encrypted traffic app-level (no coturn, no UDP, no port-forward). Pure
-      Dart; only needed once real users hit a symmetric↔symmetric pair.
+- [x] **Adaptive relay activity** — signalling polls at 700ms only during a
+      handshake and settles to 15s; announces settle from 5s to 10s to remain
+      inside the relay's 15-second presence TTL. Distributed workers perform
+      routine courier polling while relay-dependent clients fail open to polling.
+- [x] **On-demand DM courier uploads** — a peer acknowledges only after verifying
+      and durably accepting a message. A DM sender accepts receipts only from a
+      currently admitted DM device, skipping the relay copy after an ACK and
+      falling back after 1.5 seconds. Groups always retain the courier fallback.
+- [x] **Distributed relay duty** — primary channel meshes rotate two redundant
+      relay workers with handoff overlap. Selection applies time-varying SHA-256
+      priorities to consistent authenticated device ids and grants no protocol
+      authority. Partial views create additional local workers, relay-dependent
+      states fail open to polling, and every standby makes a staggered fail-safe
+      probe within two minutes. Outgoing workers drain their signal mailbox
+      through the relay TTL window.
+- [x] **Server-minimal connectivity** — cached peer identities, symmetric live
+      peer exchange, and authenticated P2P-routed signalling re-knit a connected
+      channel component without relay rendezvous.
+- [x] **Invite bootstrap metadata** — group/contact invites carry the inviter's
+      identity and relay URL. Accepting records the inviter and joins the shared
+      capability namespace used for rendezvous.
+- [x] **Data relay fallback** — after repeated ICE failure, the tunnelled relay
+      forwards encrypted gossip frames app-level (no coturn, UDP, or port-forward).
+      Voice and screen media remain direct-only.
 
 ### Phase 3 — Groups, voice, and the hard stuff
-- [x] Group = replicated log + membership-as-messages (capability model).
+- [x] Group = replicated encrypted log + random id/key capability; observed
+      signed member/device state is retained locally and gossiped in the log.
 - [x] ~~Permission-conflict resolution rule (owner-key-wins)~~ — **rejected**
       (2026-06-29): no channel ownership model. Block & mute are purely local.
-- [x] Voice/video over WebRTC media (signaled over the existing layer).
-- [x] **Group encryption** — encrypt each message to the channel's member set
-      (sealed-box per member); requires the membership above. **MLS** (Rust
-      `openmls`) is the upgrade for forward secrecy + efficient key rotation. (DMs
-      are already sealed-box-encrypted from Phase 2.)
+- [x] Voice and Windows screen-share video over WebRTC media, signalled through
+      the same authenticated mesh layer.
+- [x] **Group encryption** — messages use an epoch-labelled shared channel key.
+      Root-signed device revocation triggers a replacement key wrapped to each
+      remaining authorised device. MLS remains a possible forward-secrecy upgrade.
 - Multi-device identity, two tiers:
       - [x] **(a) export/import the root seed** — DONE. A settings "reveal
         recovery phrase" screen shows a **BIP39 24-word mnemonic** (+ a QR
@@ -359,7 +374,7 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       identities and gossip currently reachable members. Existing data channels
       carry authenticated SDP/ICE with bounded forwarding, reverse-route learning,
       deduplication, and rate limits, so stale network addresses are never treated
-      as durable routes (server = true cold-start fallback only).
+      as durable routes. A relay is still needed for a true cold start or partition.
 - [x] **Pluggable bootstrap relay** — the cold-start relay URL rides in the invite
       and is swappable; a community self-hosts its own. Multi-relay failover
       implemented (2026-06-28).
@@ -380,22 +395,19 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       - Rich in-app notifications: sender name, content preview, tap-to-open;
         suppressed for muted channels and blocked users.
       - Self-hoster option later: **UnifiedPush** for de-Googled Android.
-- [ ] **Rich content** — typed message payloads via a **content envelope**
-      (`{t: text|gif|sticker|sound, …}` inside the payload; composes under
-      encryption, since we encrypt the envelope):
+- [x] **Rich content** — typed message payloads via an encrypted content envelope:
       - [x] **Emoji** — quick picker added (Unicode text already worked).
-      - [x] **GIFs (URL)** — paste-a-URL renders inline; **Giphy/Tenor search** still
-            needs a provider **API key** (credentials — ask the user for it).
+      - [x] **GIFs** — relay-proxied Giphy search or URL fallback; selected GIFs
+            are downloaded once, content-addressed, and transferred P2P.
       - [x] **Stickers** — sticker picker panel (browse your library of received/
             sent stickers for quick reuse, like the emoji picker but for images).
       - [x] **Soundboards** — per-channel uploadable audio clips, tap to play
             (`audioplayers`), shared channel-wide. Voice panel has a soundboard
             button; plays for all voice participants via control frame.
-      - [x] **Media-blob subsystem — foundation** — content-addressed `BlobStore`
-            + want/give-blob transfer over the data channel, fetched on demand and
-            content-address-verified. *Unit-tested.* Remaining (needs live verify +
-            deps): app-side Hive blob store, upload (`file_picker`), inline render,
-            soundboard playback (`audioplayers`).
+      - [x] **Files, images, and voice messages** — file picker/recorder inputs,
+            inline rendering/playback, and bounded content-addressed storage.
+      - [x] **Media blobs** — Hive-backed `BlobStore`, chunked WANT/GIVE transfer,
+            content-hash verification, size/assembly limits, and a reusable library.
 - [x] **Messaging UX** (all shipped): **replies** (quote-and-respond),
       **emoji reactions** (chips on the target message), **pinned messages**
       (local, per-channel), **in-channel search**, per-channel **mute** toggle,
@@ -423,39 +435,42 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
         DMs silently dropped (never stored); auto-muted in voice. Accessible from
         channel member list + contacts. Unblock restores group messages.
       - No hierarchy, no owner, no kick — the blocked person doesn't know.
-- [ ] Optional federation between communities.
-- [ ] Spam resistance (proof-of-work / invite gating / web-of-trust).
-- [ ] Plugins (WASM) and local bots.
+- [x] **Local/decentralised AI bot** — optional on-device GGUF inference; peers
+      request it through bounded channel controls and the first available host responds.
+- [ ] Optional federation or automatic relay-directory exchange.
+- [ ] Public-discovery spam resistance (proof-of-work/web-of-trust). Current
+      channels are invite capabilities and relay endpoints are rate-limited.
+- [ ] WASM plugin system.
+- [ ] iOS/macOS/Linux release and feature-parity work.
 
 ---
 
-## 5. Open decisions (need a call before they bite)
+## 5. Outstanding decisions and limitations
 
-1. ~~**Multi-device identity flow.**~~ **RESOLVED (2026-07-04).** Root key
-   certifies per-device subkeys (Ed25519 cert chain). Each device holds only its
-   subkey at runtime; the root is derived transiently from the BIP39 phrase
-   during enrollment and then discarded. DMs encrypted per-device via
-   `MultiDeviceBox`; revoked devices cryptographically locked out. See Phase A+B
-   in the decisions log.
-2. **Spam resistance.** Keypairs are free to mint. Proof-of-work? Invite-only
-   communities? Web-of-trust? Decide before any public discovery exists.
-3. **Permission conflicts.** Two admins act contradictorily while offline — who
-   wins? Leaning: one designated owner key whose actions always take precedence.
-4. **Bundle / application IDs.** ~~Scaffolding left the default `com.example.*`;
-   set real ones (e.g. `com.spamalot22.hearth`) before any app-store release.~~
-   Done — renamed to `com.hearth.app` (2026-06-27).
-5. **Channel ownership + kick (maybe).** The creator's pubkey rides in the invite
-   already; a "kick" could be a signed message from the creator that honest peers
-   enforce (drop the target from their mesh, refuse to gossip to them). The kicked
-   user still holds the old key (can read history), so a key rotation + re-invite
-   for remaining members is needed for true eviction. Alternatively, rotate the
-   channel key on kick and distribute the new key to everyone except the kicked
-   user. Ties into #3 (permission conflicts). Not urgent — small trusted groups
-   don't need it yet.
+1. **Forward secrecy.** Current DM and group encryption is authenticated and
+   device-aware but does not ratchet. Decide whether the complexity and native
+   integration cost of a DM double ratchet and/or MLS is justified.
+2. **Group governance and member eviction.** Hearth deliberately has no owner,
+   admin, or kick hierarchy. Adding real eviction requires a conflict rule plus a
+   new key epoch distributed to everyone except the removed member.
+3. **Cold-start expansion.** Today a disconnected component needs one configured
+   relay. LAN/mDNS or signed relay-directory exchange could add independent entry
+   paths; DHT/libp2p remains rejected.
+4. **Public discovery and abuse controls.** Invite capabilities and current rate
+   limits are appropriate for private groups. A future public directory would
+   need stronger Sybil/spam resistance before launch.
+5. **Media connectivity policy.** Voice and screen sharing are direct-only. Keep
+   that strict P2P guarantee, or explicitly choose a media relay design for NAT
+   pairs that cannot connect directly.
+6. **Secondary platforms.** Decide whether iOS, macOS, and Linux should become
+   release targets; they currently have Flutter scaffolding but no release gate.
 
 ---
 
 ## 6. Decisions log
+
+These entries record the design chronologically. Later entries supersede older
+choices where they conflict with the current-state sections above.
 
 - **2026-06-20** — UI in Flutter; `core` in Dart, isolated behind an interface so
   P2P/MLS can move to Rust later. Ed25519 identity. WebRTC for real-time. Backend
@@ -1033,3 +1048,29 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   join disconnected components. Contacts-online routes are scoped to their
   originating channel so one mesh cannot install a bogus next hop learned from
   another.
+- **2026-08-25** — **DM courier uploads made on-demand.** Added a bounded ACK
+  gossip frame that a peer sends only after validating and durably storing a
+  message. Local publication registers its ACK waiter before gossiping to avoid
+  races. A DM accepts a receipt only from a currently admitted participant; if
+  one confirms custody within 1.5 seconds, the sender skips the relay copy and
+  relies on epidemic forwarding. Groups always retain their encrypted courier
+  copy because arbitrary group members are not trusted custody witnesses.
+  Invalid, disallowed, revoked-device, and capacity-rejected messages are never
+  ACKed. Authenticated LAN discovery remains a deferred README item.
+- **2026-08-25** — **Routine relay work distributed across the live component.**
+  Primary channel meshes now select two rotating relay workers using
+  time-varying SHA-256 priorities over consistent authenticated direct device
+  ids. A node compares itself with its direct neighbours, so the component-wide
+  highest priority always self-selects even under partial topology views. The previous
+  slot overlaps for 30 seconds, small components keep every peer active, and
+  peerless, handshaking, or tunnel-dependent nodes always perform their own
+  relay work. Standby peers pause announce and courier polling, drain
+  identity-addressed signals for 50 seconds, then make staggered fail-safe
+  rendezvous, signal, and courier probes at least every two minutes. They
+  immediately resume full activity on duty change or connectivity loss. The role
+  confers no admission, decryption, or verification authority.
+  Rotation prevents permanent lowest-key capture; redundancy tolerates one
+  uncooperative selected member; differing topology or clock views create extra
+  workers rather than a relay blackout. Voice and
+  screen-star meshes remain unchanged until their distinct topologies receive a
+  separate design.

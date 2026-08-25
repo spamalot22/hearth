@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.22.0",
-  "description": "Hearth rendezvous backend — self-hosted Hono relay (cold-start signalling mailbox + media proxies).",
+  "description": "Self-hosted Hearth coordination relay for rendezvous, encrypted courier/tunnel traffic, and media proxies.",
   "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "tsx watch src/dev-server.ts",

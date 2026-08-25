@@ -12,7 +12,9 @@ import 'repository.dart';
 
 /// Owns a channel's [MessageRepository] and one [SyncSession] per connected
 /// peer. Spreads every newly-stored message to all peers (epidemic forwarding),
-/// while each session backfills missing history when it connects.
+/// while each session backfills missing history when it connects. Frames are
+/// parsed defensively; ingest rates, frame fanout, repository capacity, pending
+/// wants, and blob assemblies are bounded.
 ///
 /// This is the seam between the app and the mesh: the UI [publish]es and listens
 /// to [updates]; the transport hands connected peers to [addPeer].
@@ -23,6 +25,7 @@ class SyncEngine {
     this.blobStore,
     this.isDeviceRevoked,
     this.messageAllowed,
+    this.peerReceiptAllowed,
   });
 
   final MessageRepository repository;
@@ -43,11 +46,18 @@ class SyncEngine {
   /// valid messages signed by unrelated identities.
   final bool Function(Message message)? messageAllowed;
 
+  /// Optional dynamic policy for accepting storage receipts from a peer. DMs
+  /// use the same root/device admission policy as their mesh so a revoked or
+  /// unrelated device cannot suppress the courier fallback with an ACK.
+  final bool Function(String peerHex)? peerReceiptAllowed;
+
   final Set<SyncSession> _sessions = {};
   final Set<String> _pendingBlobs = {};
   final _ingestLimiter = _IngestRateLimiter(1200, const Duration(minutes: 1));
   final StreamController<void> _updates = StreamController<void>.broadcast();
   final StreamController<String> _blobArrived =
+      StreamController<String>.broadcast();
+  final StreamController<String> _peerStored =
       StreamController<String>.broadcast();
 
   /// Fires whenever a message is stored (locally published or gossiped in), so a
@@ -70,6 +80,11 @@ class SyncEngine {
       isDeviceRevoked: isDeviceRevoked,
       messageAllowed: messageAllowed,
       allowIngest: _ingestLimiter.allow,
+      onPeerStored: (idHex) {
+        if (peerReceiptAllowed?.call(link.peerHex) ?? true) {
+          _onPeerStored(idHex);
+        }
+      },
       onClosed: () => _sessions.remove(session),
     );
     _sessions.add(session);
@@ -88,11 +103,42 @@ class SyncEngine {
 
   /// Persists a locally-authored [message] and gossips it to every peer. For
   /// *local* messages only — they're trusted, so no signature check.
-  Future<void> publish(Message message) async {
+  ///
+  /// When [peerConfirmationTimeout] is supplied and at least one peer is
+  /// connected, waits until a peer confirms it durably accepted the message.
+  /// Returns false when there were no peers or none confirmed before timeout.
+  Future<bool> publish(
+    Message message, {
+    Duration? peerConfirmationTimeout,
+  }) async {
     if (message.channel != channel) {
       throw ArgumentError.value(message.channel, 'message', 'wrong channel');
     }
+    final confirmation = peerConfirmationTimeout != null && _sessions.isNotEmpty
+        ? _waitForPeerStorage(message.idHex, peerConfirmationTimeout)
+        : null;
     if (await repository.add(message)) _onNewMessage(message, null);
+    return confirmation == null ? false : await confirmation;
+  }
+
+  Future<bool> _waitForPeerStorage(String idHex, Duration timeout) async {
+    if (timeout <= Duration.zero) return false;
+    try {
+      await _peerStored.stream
+          .firstWhere((confirmedId) => confirmedId == idHex)
+          .timeout(timeout);
+      return true;
+    } on TimeoutException {
+      return false;
+    } on StateError {
+      return false; // The engine closed while waiting.
+    }
+  }
+
+  void _onPeerStored(String idHex) {
+    if (repository.getByHex(idHex) != null && !_peerStored.isClosed) {
+      _peerStored.add(idHex);
+    }
   }
 
   /// Ingests a message from an **untrusted** source (the relay courier) — it
@@ -157,6 +203,7 @@ class SyncEngine {
     _sessions.clear();
     await _updates.close();
     await _blobArrived.close();
+    await _peerStored.close();
   }
 }
 
@@ -171,9 +218,8 @@ class SyncEngine {
 /// Security: every GIVE is [Message.verify]-ed before it is stored — a peer
 /// can't forge an author, alter content, or lie about an id, since verify
 /// recomputes the id and checks the signature — and messages for a different
-/// [channel] are dropped. Frames are parsed defensively. This bounds, but does
-/// not immunise against, a peer flooding validly-signed messages; rate-limiting
-/// is a later hardening pass.
+/// [channel] are dropped. Frames and ingest rates are bounded. A valid channel
+/// member can still consume its share of the repository and processing limits.
 class SyncSession {
   SyncSession({
     required this.repository,
@@ -185,6 +231,7 @@ class SyncSession {
     this.isDeviceRevoked,
     this.messageAllowed,
     this.allowIngest,
+    this.onPeerStored,
     this.onClosed,
   }) {
     _sub = _link.frames.listen(
@@ -202,6 +249,7 @@ class SyncSession {
   final bool Function(String rootKeyHex, String deviceKeyHex)? isDeviceRevoked;
   final bool Function(Message message)? messageAllowed;
   final bool Function()? allowIngest;
+  final void Function(String idHex)? onPeerStored;
   final void Function()? onClosed;
 
   /// Called after this session stores a *new* message, so the engine can spread
@@ -266,6 +314,8 @@ class SyncSession {
         }
       case GiveFrame(:final message):
         await _receive(message);
+      case AckFrame(:final id):
+        if (_idBytes(id) != null) onPeerStored?.call(id.toLowerCase());
       case WantBlobFrame(:final hash, :final chunked):
         if (!_blobPattern.hasMatch(hash)) return;
         final bytes = await blobStore?.get(hash);
@@ -379,7 +429,12 @@ class SyncSession {
     }
     _wanted.remove(message.idHex);
     try {
-      if (await repository.add(message)) {
+      final added = await repository.add(message);
+      // Acknowledge only after the verified message is durably present. This is
+      // deliberately sent for duplicates too: already having the message is a
+      // valid custody confirmation.
+      _link.send(AckFrame(message.idHex));
+      if (added) {
         onAdded(message, this); // new → the engine spreads it onward
         _requestMissing(message.prev.map(hex.encode)); // backfill its parents
       }

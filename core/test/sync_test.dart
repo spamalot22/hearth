@@ -125,6 +125,73 @@ void main() {
       expect(b.ordered().map((m) => utf8.decode(m.payload)), ['live']);
     });
 
+    test('a live peer confirms only after durable receipt', () async {
+      final a = _repo();
+      final b = _repo();
+      final engA = SyncEngine(a, 'general');
+      final engB = SyncEngine(b, 'general');
+      final (la, lb) = _pair();
+      engA.addPeer(la);
+      engB.addPeer(lb);
+
+      final confirmed = await engA.publish(
+        await msg('confirmed'),
+        peerConfirmationTimeout: const Duration(seconds: 1),
+      );
+
+      expect(confirmed, isTrue);
+      expect(b.length, 1);
+      await engA.close();
+      await engB.close();
+    });
+
+    test('publish times out when a connected peer does not confirm', () async {
+      final engine = SyncEngine(_repo(), 'general');
+      engine.addPeer(_Link());
+
+      final confirmed = await engine.publish(
+        await msg('unconfirmed'),
+        peerConfirmationTimeout: const Duration(milliseconds: 5),
+      );
+
+      expect(confirmed, isFalse);
+      await engine.close();
+    });
+
+    test('an ACK from a disallowed receipt peer is ignored', () async {
+      final a = _repo();
+      final b = _repo();
+      final engA = SyncEngine(a, 'general', peerReceiptAllowed: (_) => false);
+      final engB = SyncEngine(b, 'general');
+      final (la, lb) = _pair();
+      engA.addPeer(la);
+      engB.addPeer(lb);
+
+      final confirmed = await engA.publish(
+        await msg('receipt rejected'),
+        peerConfirmationTimeout: const Duration(milliseconds: 20),
+      );
+
+      expect(confirmed, isFalse);
+      expect(b.length, 1);
+      await engA.close();
+      await engB.close();
+    });
+
+    test('a peer does not confirm a message it cannot store', () async {
+      final full = MessageRepository(InMemoryMessageStorage(), maxMessages: 0);
+      final link = _Link();
+      final engine = SyncEngine(full, 'general');
+      engine.addPeer(link);
+
+      link.incoming.add(GiveFrame(await msg('over capacity')));
+      await _pump();
+
+      expect(full.length, 0);
+      expect(link.sent.whereType<AckFrame>(), isEmpty);
+      await engine.close();
+    });
+
     test('a closed peer session is retired from future gossip', () async {
       final repository = _repo();
       final engine = SyncEngine(repository, 'general');
@@ -176,6 +243,7 @@ void main() {
 
       await _pump();
       expect(b.length, 0);
+      expect(link.sent.whereType<AckFrame>(), isEmpty);
     });
 
     test('drops a message addressed to another channel', () async {

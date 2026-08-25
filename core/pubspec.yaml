@@ -1,16 +1,16 @@
 name: core
-description: A starting point for Dart libraries or applications.
+description: Pure-Dart identity, encryption, message DAG, and gossip core for Hearth.
 version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+repository: https://github.com/spamalot22/hearth
 
 environment:
   sdk: ^3.12.2
 
 resolution: workspace
 
-# Add regular dependencies here.
 dependencies:
   convert: ^3.1.2
+  crypto: ^3.0.0
   cryptography: ^2.9.0
   http: ^1.6.0
 

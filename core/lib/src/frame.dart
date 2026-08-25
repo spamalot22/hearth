@@ -22,7 +22,8 @@ abstract interface class FrameChannel {
 }
 
 /// A frame in the gossip protocol: advertise heads ([HaveFrame]), request
-/// messages by id ([WantFrame]), or deliver a message ([GiveFrame]).
+/// messages by id ([WantFrame]), deliver a message ([GiveFrame]), or confirm
+/// durable receipt ([AckFrame]).
 sealed class SyncFrame {
   const SyncFrame();
 
@@ -45,6 +46,8 @@ sealed class SyncFrame {
           return GiveFrame(
             Message.fromJson((json['m']! as Map).cast<String, Object?>()),
           );
+        case 'ack':
+          return AckFrame(json['id']! as String);
         case 'wantblob':
           return WantBlobFrame(
             json['h']! as String,
@@ -99,6 +102,17 @@ class GiveFrame extends SyncFrame {
 
   @override
   Map<String, Object?> toJson() => {'t': 'give', 'm': message.toJson()};
+}
+
+/// "I verified and durably accepted this message." This lets a sender avoid an
+/// unnecessary relay-courier copy after at least one peer has taken custody.
+class AckFrame extends SyncFrame {
+  const AckFrame(this.id);
+
+  final String id;
+
+  @override
+  Map<String, Object?> toJson() => {'t': 'ack', 'id': id};
 }
 
 /// "Send me the media blob with this id" (hex). Media is fetched on demand.

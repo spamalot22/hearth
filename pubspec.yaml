@@ -1,7 +1,7 @@
 # Pub workspace root — unifies dependency resolution across all packages.
-# This is not a real package; it just ties the monorepo together so one
-# `flutter pub get` resolves app, core, and server with a shared lockfile.
-name: _chat_workspace
+# This is not a real package; it ties the Flutter app and pure-Dart core together
+# so one `flutter pub get` resolves both with a shared lockfile.
+name: _hearth_workspace
 publish_to: none
 
 environment:

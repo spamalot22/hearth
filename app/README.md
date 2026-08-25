@@ -1,17 +1,23 @@
-# chat_app
+# Hearth App
 
-A new Flutter project.
+Flutter client for Hearth. It provides the user interface, persistent Hive
+storage, WebRTC data/media meshes, platform key storage, notifications, and
+native update integration on top of the pure-Dart `core` package.
 
-## Getting Started
+Run commands from the repository root:
 
-This project is a starting point for a Flutter application.
+```bash
+flutter analyze app
+cd app && flutter run
+```
 
-A few resources to get you started if this is your first Flutter project:
+Native builds and the full Flutter test suite run in GitHub Actions because the
+development host is resource constrained. Read [`../AGENTS.md`](../AGENTS.md)
+before running build or test commands locally.
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+The primary release targets are Android, Windows, and web. iOS, macOS, and Linux
+currently have Flutter scaffolding but are not release-gated for feature parity.
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+See the repository [`README.md`](../README.md) and
+[`IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) for architecture and
+feature status.

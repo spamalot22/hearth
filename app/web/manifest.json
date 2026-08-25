@@ -3,10 +3,9 @@
     "short_name": "Hearth",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#F8F9FB",
+    "theme_color": "#A8400B",
+    "description": "Local-first, end-to-end encrypted P2P messaging.",
     "prefer_related_applications": false,
     "icons": [
         {

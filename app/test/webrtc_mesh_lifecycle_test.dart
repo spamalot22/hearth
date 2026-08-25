@@ -111,4 +111,58 @@ void main() {
       await mesh.close();
     },
   );
+
+  test('a standby periodically probes relay services', () async {
+    final identity = await Identity.generate();
+    var announces = 0;
+    var signalPolls = 0;
+    var courierProbes = 0;
+    final client = MockClient((request) async {
+      if (request.method == 'POST' && request.url.path == '/announce') {
+        announces++;
+        return http.Response(
+          jsonEncode({
+            'peers': <String>[],
+            'token': 'token-$announces',
+            'relayEpoch': 'epoch',
+          }),
+          200,
+        );
+      }
+      if (request.method == 'GET' && request.url.path == '/signal') {
+        signalPolls++;
+        return http.Response(
+          jsonEncode({'signals': <Object>[], 'seq': 0, 'relayEpoch': 'epoch'}),
+          200,
+        );
+      }
+      return http.Response('not found', 404);
+    });
+    final mesh = WebRtcMesh(
+      baseUrl: Uri.parse('https://relay.example'),
+      channel: 'channel',
+      identity: identity,
+      client: client,
+      coordinateRelayDuty: true,
+      standbyProbeInterval: const Duration(milliseconds: 20),
+      announceInterval: const Duration(hours: 1),
+      idleAnnounceInterval: const Duration(hours: 1),
+      signalPollInterval: const Duration(hours: 1),
+      idleSignalInterval: const Duration(hours: 1),
+      onRelayStandbyProbe: () async {
+        courierProbes++;
+      },
+    );
+    final subscription = mesh.peerConnected.listen((_) {});
+
+    await _waitUntil(() => announces >= 1);
+    mesh.debugSetRelayDuty(false);
+    await _waitUntil(
+      () => announces >= 2 && signalPolls >= 1 && courierProbes >= 1,
+    );
+
+    expect(mesh.hasRelayDuty, isFalse);
+    await subscription.cancel();
+    await mesh.close();
+  });
 }

@@ -479,5 +479,42 @@ void main() {
       await transport.poll();
       expect(capturedUrl!.host, 'primary.test');
     });
+
+    test('probe polls and emits while routine polling is paused', () async {
+      final message = await Message.create(
+        author: author,
+        channel: 'general',
+        payload: _b('standby delivery'),
+      );
+      var polls = 0;
+      final client = MockClient((request) async {
+        polls++;
+        return http.Response(
+          jsonEncode({
+            'messages': [message.toJson()],
+            'seq': 1,
+            'more': false,
+          }),
+          200,
+        );
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'general',
+        client: client,
+        pollInterval: const Duration(hours: 1),
+      );
+      final received = <Message>[];
+      final subscription = transport.incoming.listen(received.add);
+      transport.pause();
+
+      await transport.probe();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(polls, 1);
+      expect(received.map((entry) => entry.idHex), [message.idHex]);
+      await subscription.cancel();
+      await transport.close();
+    });
   });
 }

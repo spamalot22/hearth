@@ -10,7 +10,6 @@ import 'candidate_cache.dart';
 import 'content.dart';
 import 'mesh_control.dart';
 import 'message_storage_hive.dart';
-import 'relay_tunnel.dart';
 import 'update_checker.dart';
 import 'webrtc_mesh.dart';
 
@@ -157,6 +156,10 @@ Future<String> dmChannelId(String aHex, String bHex) async {
 /// feeds peers in, and the [cipher] for its (always-encrypted) payloads. A DM
 /// also carries [peerPubkey], for display; a group channel does not.
 class ChannelSession {
+  static const Duration _courierConfirmationTimeout = Duration(
+    milliseconds: 1500,
+  );
+
   ChannelSession._(
     this.channelId,
     this.repository,
@@ -265,6 +268,7 @@ class ChannelSession {
       blobStore: blobStore,
       isDeviceRevoked: isDeviceRevoked,
       messageAllowed: messageAllowed,
+      peerReceiptAllowed: peerAllowed,
     );
     final updatesSub = engine.updates.listen((_) => onUpdate());
     // A fetched blob arriving just triggers a refresh; refreshContent loads it
@@ -274,6 +278,14 @@ class ChannelSession {
     WebRtcMesh? mesh;
     StreamSubscription<FrameChannel>? peersSub;
     RelayTransport? courier;
+    void syncCourierDuty() {
+      if (mesh?.hasRelayDuty ?? true) {
+        courier?.resume();
+      } else {
+        courier?.pause();
+      }
+    }
+
     if (live) {
       mesh = WebRtcMesh(
         baseUrl: relayUrl,
@@ -283,13 +295,20 @@ class ChannelSession {
         channelAuthKey: meshAuthKey,
         candidateCache: candidateCache,
         peerAllowed: peerAllowed,
+        coordinateRelayDuty: true,
+        onRelayDutyChanged: (_) {
+          syncCourierDuty();
+          onUpdate();
+        },
+        onRelayStandbyProbe: () async {
+          await courier?.probe();
+        },
         onPeerConnectedHex: (peerHex) {
           onPeerConnectedHex?.call(peerHex);
           onUpdate();
         },
         onPeerLeft: (_) {
-          // Resume relay polling when the last P2P peer drops.
-          if (mesh?.connectedPeers.isEmpty ?? true) courier?.resume();
+          syncCourierDuty();
           onUpdate(); // Refresh UI so member online status updates.
         },
         onControl: (fromHex, control) {
@@ -310,10 +329,7 @@ class ChannelSession {
       );
       peersSub = mesh.peerConnected.listen((peer) {
         engine.addPeer(peer);
-        // A provisional tunnel still depends on the relay. Keep the courier
-        // polling until a direct P2P link exists, so an offline peer cannot
-        // suppress normal relay delivery merely by failing ICE three times.
-        if (peer is! RelayTunnel) courier?.pause();
+        syncCourierDuty();
         onPeerConnected?.call();
         onUpdate(); // Refresh UI so new peer appears in member list.
       });
@@ -328,6 +344,7 @@ class ChannelSession {
         pollInterval: const Duration(seconds: 10),
         baseUrlProvider: () => mesh?.activeUrl ?? relayUrl,
       );
+      syncCourierDuty();
     }
 
     final session = ChannelSession._(
@@ -378,10 +395,15 @@ class ChannelSession {
     }
   }
 
-  /// Publishes a message to the P2P mesh AND the relay courier (best-effort).
-  /// The relay copy ensures offline peers can pick it up later.
+  /// Publishes over P2P first. A DM can skip its relay copy after an admitted
+  /// participant confirms durable receipt; groups always retain the courier
+  /// fallback because a group member is not a trusted custody witness.
   Future<void> publish(Message message) async {
-    await engine.publish(message);
+    final peerStored = await engine.publish(
+      message,
+      peerConfirmationTimeout: isDm ? _courierConfirmationTimeout : null,
+    );
+    if (isDm && peerStored) return;
     // Best-effort relay send — failure is fine (relay might be down, or peer
     // will get it via P2P later).
     try {
@@ -761,27 +783,35 @@ class ChannelManager {
   }
 
   bool _dmPeerAllowed(String peerRootHex, String peerHex) {
-    String? rootHex;
-    if (peerHex == identity.publicKeyHex) {
-      rootHex = identity.publicKeyHex;
-    } else if (peerHex == peerRootHex) {
-      rootHex = peerRootHex;
-    } else if ((ownDeviceKeys?.call() ?? const <Uint8List>[]).any(
-      (key) => hex.encode(key) == peerHex,
-    )) {
-      rootHex = identity.publicKeyHex;
-    } else if (peerDeviceKeysLookup
-            ?.call(peerRootHex)
-            .any((key) => hex.encode(key) == peerHex) ??
-        false) {
-      rootHex = peerRootHex;
-    }
+    final rootHex = _dmPeerRoot(peerRootHex, peerHex);
     return rootHex != null &&
         !(isDeviceRevoked?.call(rootHex, peerHex) ?? false);
   }
 
+  String? _dmPeerRoot(String peerRootHex, String peerHex) {
+    if (peerHex == identity.publicKeyHex) {
+      return identity.publicKeyHex;
+    }
+    if (peerHex == peerRootHex) return peerRootHex;
+    if ((ownDeviceKeys?.call() ?? const <Uint8List>[]).any(
+      (key) => hex.encode(key) == peerHex,
+    )) {
+      return identity.publicKeyHex;
+    }
+    if (peerDeviceKeysLookup
+            ?.call(peerRootHex)
+            .any((key) => hex.encode(key) == peerHex) ??
+        false) {
+      return peerRootHex;
+    }
+    return null;
+  }
+
+  String? _groupPeerRoot(String peerHex) =>
+      peerRootLookup?.call(peerHex) ?? deviceToRoot[peerHex];
+
   bool _groupPeerAllowed(String peerHex) {
-    final rootHex = peerRootLookup?.call(peerHex) ?? deviceToRoot[peerHex];
+    final rootHex = _groupPeerRoot(peerHex);
     return rootHex == null ||
         !(isDeviceRevoked?.call(rootHex, peerHex) ?? false);
   }

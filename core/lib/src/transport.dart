@@ -91,12 +91,17 @@ class RelayTransport implements Transport {
   /// Resumes polling (e.g. when the last P2P peer disconnects).
   void resume() => _paused = false;
 
+  /// Performs one poll even while routine polling is paused. Distributed relay
+  /// standbys use this as a low-frequency fail-safe when elected workers are
+  /// unreachable or suspended.
+  Future<void> probe() => _pollOnce(ignorePause: true);
+
   void _startPolling() {
     _timer ??= Timer.periodic(pollInterval, (_) => unawaited(_pollOnce()));
   }
 
-  Future<void> _pollOnce() async {
-    if (_busy || _paused) return;
+  Future<void> _pollOnce({bool ignorePause = false}) async {
+    if (_busy || (_paused && !ignorePause)) return;
     _busy = true;
     try {
       // Drain a bounded number of server pages per tick. Each HTTP response is

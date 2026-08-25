@@ -38,6 +38,14 @@ void main() {
       expect(await give.message.verify(), isTrue);
     });
 
+    test('AckFrame round-trips', () {
+      const id =
+          '1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      final decoded = SyncFrame.decode(const AckFrame(id).encode());
+      expect(decoded, isA<AckFrame>());
+      expect((decoded! as AckFrame).id, id);
+    });
+
     test('WantBlobFrame round-trips', () {
       final frame = WantBlobFrame('blobhash123');
       final decoded = SyncFrame.decode(frame.encode());
@@ -94,6 +102,7 @@ void main() {
     test('missing required fields returns null', () {
       expect(SyncFrame.decode('{"t":"have"}'), isNull);
       expect(SyncFrame.decode('{"t":"want"}'), isNull);
+      expect(SyncFrame.decode('{"t":"ack"}'), isNull);
       expect(SyncFrame.decode('{"t":"wantblob"}'), isNull);
       expect(SyncFrame.decode('{"t":"blobchunk","h":"x"}'), isNull);
     });
