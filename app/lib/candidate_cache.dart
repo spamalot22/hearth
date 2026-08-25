@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -69,7 +70,7 @@ class CandidateCache {
       // >90 days: pruned (not added to updated).
     }
 
-    _save(channel, updated);
+    unawaited(_save(channel, updated));
     return results;
   }
 
@@ -77,7 +78,7 @@ class CandidateCache {
   Future<void> touch(String channel, String peerHex) async {
     final entries = _load(channel);
     entries[peerHex] = DateTime.now().millisecondsSinceEpoch;
-    _save(channel, entries);
+    await _save(channel, entries);
   }
 
   /// Removes a specific peer.
@@ -86,7 +87,7 @@ class CandidateCache {
     if (entries.isEmpty) {
       await _box.delete(channel);
     } else {
-      _save(channel, entries);
+      await _save(channel, entries);
     }
   }
 
@@ -99,18 +100,18 @@ class CandidateCache {
         for (final entry in decoded.entries)
           if (RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(entry.key) &&
               entry.value is int)
-            entry.key: entry.value! as int,
+            entry.key.toLowerCase(): entry.value! as int,
       };
     } catch (_) {
       return {};
     }
   }
 
-  void _save(String channel, Map<String, int> entries) {
+  Future<void> _save(String channel, Map<String, int> entries) async {
     if (entries.isEmpty) {
-      _box.delete(channel);
+      await _box.delete(channel);
     } else {
-      _box.put(channel, jsonEncode(entries));
+      await _box.put(channel, jsonEncode(entries));
     }
   }
 

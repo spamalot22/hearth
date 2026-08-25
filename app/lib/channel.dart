@@ -246,7 +246,8 @@ class ChannelSession {
     String? relayMailbox,
     void Function()? onPeerConnected,
     void Function(String peerHex)? onPeerConnectedHex,
-    void Function(String fromHex, List<String> peers)? onContactsOnline,
+    void Function(String channelId, String fromHex, List<String> peers)?
+    onContactsOnline,
     void Function(Map<String, Object?> manifest)? onVersionControl,
     void Function(String peerHex, bool typing)? onTyping,
     bool Function(String peerHex)? peerAllowed,
@@ -293,7 +294,7 @@ class ChannelSession {
         },
         onControl: (fromHex, control) {
           if (control is ContactsOnlineControl) {
-            onContactsOnline?.call(fromHex, control.peers);
+            onContactsOnline?.call(channelId, fromHex, control.peers);
           } else if (control is VersionControl) {
             onVersionControl?.call(control.manifest);
           } else if (control is TypingControl) {
@@ -646,20 +647,23 @@ class ChannelManager {
   /// channel we have but aren't connected to, try reaching them through the
   /// sender's mesh. Capped to prevent a malicious peer from flooding us with
   /// connection attempts.
-  void _handleContactsOnline(String fromHex, List<String> onlinePeers) {
+  void _handleContactsOnline(
+    String channelId,
+    String fromHex,
+    List<String> onlinePeers,
+  ) {
+    final session = _sessions[channelId];
+    final mesh = session?._mesh;
+    if (mesh == null || !mesh.connectedPeers.contains(fromHex)) return;
+
     // Cap to 20 peers per message to prevent amplification attacks.
     final capped = onlinePeers.take(20);
     for (final peerHex in capped) {
-      // Only reach for a peer we already know in some channel (candidate cache)
-      // and aren't already connected to — punch through the sender's mesh.
-      for (final session in _sessions.values) {
-        final mesh = session._mesh;
-        if (mesh == null) continue;
-        final cached = candidateCache?.knownPeers(session.channelId) ?? {};
-        if (cached.contains(peerHex) &&
-            !mesh.connectedPeers.contains(peerHex)) {
-          mesh.maybeInitiateVia(peerHex);
-        }
+      // Only reach for a peer already known in this same channel. A next hop
+      // learned on one mesh is not valid in another mesh's signalling scope.
+      final cached = candidateCache?.knownPeers(channelId) ?? {};
+      if (cached.contains(peerHex) && !mesh.connectedPeers.contains(peerHex)) {
+        mesh.maybeInitiateVia(peerHex, viaPeerHex: fromHex);
       }
     }
   }

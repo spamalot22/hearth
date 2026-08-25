@@ -47,11 +47,11 @@ offline); it can verify that a message is authentic but can never read it.
   epidemically. The app verifies the signature and asset hashes against a
   hardcoded public key. Numeric version ordering plus a monotonic sequence prevent
   downgrades.
-- **Peer-exchange & cached candidates** — once you hold a single live link, you
-  discover all other reachable peers through the mesh (no relay). Known peers are
-  cached locally for near-instant reconnection on restart.
-- **Cross-channel contact discovery** — connected peers share who else they're
-  talking to, letting you reach contacts in other channels without the relay.
+- **Peer-exchange & cached peers** — once you hold a single live link, peers in
+  that shared channel introduce each other and carry authenticated SDP/ICE, so
+  the mesh can re-knit without the relay. Successfully reached peer identities
+  are cached locally for quick retries; historical/offline contacts are not
+  broadcast, avoiding unnecessary social-graph disclosure.
 - **Authenticated signalling** — announce requests are Ed25519-signed; signal
   mailbox reads require a short-lived token; and group SDP/ICE additionally
   proves possession of the channel key, preventing the relay from joining a
@@ -119,7 +119,19 @@ with the greater public key offers. **Signalling is authenticated**: every
 offer/answer/ICE is Ed25519-signed and verified ([`signal_auth.dart`](app/lib/signal_auth.dart));
 group signals also carry a channel-key HMAC. A malicious relay therefore cannot
 impersonate a peer, swap a DTLS fingerprint, or introduce its own identity into a
-group mesh. Once a data channel opens, a **`SyncEngine`** ([`sync.dart`](core/lib/src/sync.dart))
+group mesh.
+
+After one data channel opens, peer exchange becomes the signalling network:
+connected members introduce all sides of the shared channel and forward those
+same signed SDP/ICE envelopes. Reverse routes are learned from authenticated
+traffic; bounded hop counts, per-link rate limits, and short-lived deduplication
+stop loops and amplification. The relay receives a best-effort duplicate while
+available, but is no longer required to add newly introduced peers or cached
+peers that are reachable through the live component. If every live link is lost,
+or peers are split into disconnected components, the relay (or another future
+bootstrap mechanism) is still needed for rendezvous.
+
+Once a data channel opens, a **`SyncEngine`** ([`sync.dart`](core/lib/src/sync.dart))
 gossips messages with `HAVE`/`WANT`/`GIVE` frames and **verifies every message on
 receipt** — so any peer can relay anyone's messages without being trusted.
 

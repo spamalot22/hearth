@@ -355,9 +355,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
       - [x] **(b) per-device subkeys** certified by a root key — DONE. Full
         concurrent multi-device + per-device DM encryption + device revocation +
         offline-root enrollment ceremony. See 2026-07-04 decisions log.
-- [x] **Address cache + peer-exchange** — clients cache contacts'/members'
-      last-known WebRTC candidates and gossip current ones over the mesh, so
-      reconnects mostly skip the server (server = cold-start fallback only).
+- [x] **Peer cache + peer-exchange** — clients cache successfully reached peer
+      identities and gossip currently reachable members. Existing data channels
+      carry authenticated SDP/ICE with bounded forwarding, reverse-route learning,
+      deduplication, and rate limits, so stale network addresses are never treated
+      as durable routes (server = true cold-start fallback only).
 - [x] **Pluggable bootstrap relay** — the cold-start relay URL rides in the invite
       and is swappable; a community self-hosts its own. Multi-relay failover
       implemented (2026-06-28).
@@ -682,12 +684,11 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   you hold a single live link. Together with the **candidate cache** (Hive-backed
   `CandidateCache` storing known peer pubkeys per channel, TTL-based expiry at
   7/14/60/90 days with staggered startup retries), reconnection is near-instant.
-- **2026-06-27** — **Cross-channel contacts-online discovery (Option B).**
-  `ContactsOnlineControl` broadcasts all currently-connected peers (across all
-  channels) to every connection when a new peer joins anywhere. Receivers check
-  if any listed pubkey is someone they want to reach and attempt connections.
-  Metadata trade-off accepted: a peer learns who you're connected to, but not
-  which channels or message content — similar to the relay's existing visibility.
+- **2026-06-27** — **Contacts-online discovery (later privacy-scoped).** The
+  initial implementation broadcast connected identities across channels. It was
+  subsequently restricted to peers currently connected in the same channel:
+  cross-channel identities did not provide a valid signalling route and leaked
+  unnecessary social-graph metadata. See the 2026-08-25 routing decision below.
 - **2026-06-27** — **Signed auto-update with P2P version enforcement.** A release
   signing key (Ed25519, generated offline via `sign-release.ts keygen`) produces
   signed manifests with a monotonic `seq` (downgrade protection). The relay serves
@@ -1017,3 +1018,18 @@ _Goal: backend becomes signalling-only; messages flow peer↔peer._
   two clients behind one router each maintain channel, voice, and standing
   contact rendezvous loops, and the old ceiling could rate-limit their own SDP
   and ICE before a direct P2P link formed.
+- **2026-08-25** — **Peer-routed signalling completed and hardened.** The
+  previously defined `SignalControl` is now used for outbound offers, answers,
+  and ICE whenever any live same-channel link exists. Peer exchange teaches
+  next hops in both directions; authenticated traffic teaches reverse routes;
+  bounded flooding covers missing routes; and relay delivery remains a
+  best-effort duplicate rather than a dependency. Every hop verifies the
+  origin signature and group capability before forwarding. Six-hop TTLs,
+  two-minute/4096-entry deduplication, 256 KiB signal limits, 64-peer fanout,
+  and 512 routed signals per ingress peer per minute bound abuse. Cached peers
+  are retried whenever a surviving link opens and the live component can route
+  to them, while historical peer lists stay private because an offline identity
+  is not a usable route. A relay is still required for a true cold start or to
+  join disconnected components. Contacts-online routes are scoped to their
+  originating channel so one mesh cannot install a bogus next hop learned from
+  another.

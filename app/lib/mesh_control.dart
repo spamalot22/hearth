@@ -14,6 +14,7 @@ import 'package:core/core.dart';
 /// untagged message is safely treated as legacy gossip from a peer on an older build.
 const String kGossipTag = '0';
 const String kControlTag = '1';
+const int kDefaultSignalRouteHops = 6;
 
 sealed class MeshControl {
   const MeshControl();
@@ -36,6 +37,8 @@ sealed class MeshControl {
           from: json['from'] as String? ?? '',
           kind: json['kind'] as String? ?? '',
           data: ((json['data'] as Map?) ?? const {}).cast<String, Object?>(),
+          hopsRemaining:
+              (json['hops'] as num?)?.toInt() ?? kDefaultSignalRouteHops,
         ),
         'contacts_online' => ContactsOnlineControl(
           ((json['peers'] as List?) ?? const []).cast<String>(),
@@ -106,12 +109,22 @@ class SignalControl extends MeshControl {
     required this.from,
     required this.kind,
     required this.data,
+    this.hopsRemaining = kDefaultSignalRouteHops,
   });
 
   final String to; // recipient pubkey hex
   final String from; // origin pubkey hex
   final String kind; // 'offer' | 'answer' | 'ice'
   final Map<String, Object?> data; // signed signal payload
+  final int hopsRemaining;
+
+  SignalControl forwarded() => SignalControl(
+    to: to,
+    from: from,
+    kind: kind,
+    data: data,
+    hopsRemaining: hopsRemaining - 1,
+  );
 
   @override
   Map<String, Object?> toJson() => {
@@ -120,18 +133,18 @@ class SignalControl extends MeshControl {
     'from': from,
     'kind': kind,
     'data': data,
+    'hops': hopsRemaining,
   };
 }
 
-/// "These contacts of mine are online right now" — cross-channel peer discovery.
-/// Sent periodically to connected peers. The receiver checks if any listed pubkeys
-/// are their own contacts and, if so, can route signalling through the sender to
-/// reach them without the relay.
+/// "These peers in our shared channel are online right now." The receiver only
+/// attempts identities it already knows in that channel, avoiding disclosure of
+/// either side's wider social graph.
 class ContactsOnlineControl extends MeshControl {
   const ContactsOnlineControl(this.peers);
 
   final List<String>
-  peers; // pubkey hex of currently-connected peers (all channels)
+  peers; // pubkey hex of currently-connected peers in the shared channel
 
   @override
   Map<String, Object?> toJson() => {'t': 'contacts_online', 'peers': peers};

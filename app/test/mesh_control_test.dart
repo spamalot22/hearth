@@ -27,6 +27,18 @@ void main() {
       final s = back! as SignalControl;
       expect([s.to, s.from, s.kind], ['x', 'y', 'offer']);
       expect(s.data['sig'], 'deadbeef');
+      expect(s.hopsRemaining, kDefaultSignalRouteHops);
+      expect(s.forwarded().hopsRemaining, kDefaultSignalRouteHops - 1);
+    });
+
+    test('legacy SignalControl defaults to the bounded hop limit', () {
+      final back = MeshControl.decodeBody(
+        '{"t":"signal","to":"x","from":"y","kind":"ice",'
+        '"data":{"candidate":"candidate","sig":"signature"}}',
+      );
+
+      expect(back, isA<SignalControl>());
+      expect((back! as SignalControl).hopsRemaining, kDefaultSignalRouteHops);
     });
 
     test('ScreenShareControl round-trips sharer + active flag', () {

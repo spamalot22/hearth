@@ -13,6 +13,7 @@ import 'bounded_download.dart';
 import 'candidate_cache.dart';
 import 'mesh_control.dart';
 import 'peer_connection_health.dart';
+import 'peer_signal_router.dart';
 import 'relay_tunnel.dart';
 import 'signal_auth.dart';
 import 'update_checker.dart';
@@ -21,11 +22,11 @@ import 'webrtc_signal_order.dart';
 /// A peer-to-peer WebRTC mesh that surfaces each connected peer to the gossip
 /// layer as a [FrameChannel].
 ///
-/// The relay is used only for rendezvous: we announce presence, discover peers,
-/// and trade SDP + ICE through per-recipient mailboxes (`/announce`, `/peers`,
-/// `/signal`). Once a peer's data channel opens it surfaces on [peerConnected];
-/// from then on the backend is out of the loop and a [SyncEngine] session
-/// reconciles directly over the channel.
+/// The relay bootstraps a true cold start through `/announce`, `/peers`, and
+/// `/signal`. Once any data channel is open, peers introduce the rest of that
+/// channel and route signed SDP/ICE over existing links; cached identities can
+/// therefore reconnect without the relay while one entry link survives. Open
+/// channels surface on [peerConnected], where [SyncEngine] reconciles directly.
 ///
 /// Full mesh: one [RTCPeerConnection] per peer. To avoid both sides offering at
 /// once (glare), the peer with the lexicographically-greater public key offers
@@ -122,7 +123,8 @@ class WebRtcMesh {
   /// also makes the screen mesh a star rather than a full mesh.
   final bool? forceInitiator;
 
-  /// Optional persistent cache of known peers — enables instant reconnect.
+  /// Optional persistent cache of known peer identities. They can reconnect
+  /// through a live mesh route, or through relay rendezvous after a cold start.
   final CandidateCache? candidateCache;
 
   /// The signed release manifest to send to peers for version enforcement.
@@ -152,6 +154,11 @@ class WebRtcMesh {
   final Map<String, int> _backoffFailures = {}; // consecutive failure count
   final Map<String, RelayTunnel> _tunnels = {}; // peerHex -> active tunnel
   final Map<String, List<Map<String, Object?>>> _earlyRemoteIce = {};
+  late final PeerSignalRouter _peerSignalRouter = PeerSignalRouter(
+    selfPeer: selfPubkeyHex,
+    channel: channel,
+  );
+  final Map<String, _SignalRateWindow> _routedSignalRates = {};
   String? _relayEpoch;
   Uri? _signalCursorUrl;
   bool _relayObserved = false;
@@ -180,8 +187,13 @@ class WebRtcMesh {
     if (link != null && link.open) link.sendControl(control);
   }
 
-  /// Attempts to connect to a peer we've learned about (e.g. via contacts-online).
-  void maybeInitiateVia(String peerHex) => _maybeInitiate(peerHex);
+  /// Attempts to connect to a peer learned through an existing mesh link.
+  void maybeInitiateVia(String peerHex, {String? viaPeerHex}) {
+    if (viaPeerHex != null) {
+      _peerSignalRouter.learnRoute(peerHex, viaPeerHex);
+    }
+    _maybeInitiate(peerHex);
+  }
 
   /// Connected peers' underlying connections (peerHex → pc) — for reading voice
   /// audio-level stats.
@@ -217,8 +229,13 @@ class WebRtcMesh {
   }
 
   Future<void> _bootstrap() async {
-    if (await _announce()) _tryCachedPeers();
+    await _announce();
+    _tryCachedPeers();
   }
+
+  Iterable<String> get _openPeerIds => _links.entries
+      .where((entry) => entry.value.open)
+      .map((entry) => entry.key);
 
   void _tryCachedPeers() {
     final cached = candidateCache?.peersToTry(channel) ?? [];
@@ -325,7 +342,8 @@ class WebRtcMesh {
       _scheduleAnnounce();
       _scheduleSignalPoll();
     }
-    if (await _announce()) _tryCachedPeers();
+    await _announce();
+    _tryCachedPeers();
     await _pollSignals();
   }
 
@@ -484,12 +502,17 @@ class WebRtcMesh {
   void _maybeInitiate(String peerHex) {
     // A pubkey is 32 bytes = 64 hex chars; drop anything malformed or our own.
     if (_closed ||
-        _authToken == null ||
         !_peerIdPattern.hasMatch(peerHex) ||
         peerHex == selfPubkeyHex ||
         !(peerAllowed?.call(peerHex) ?? true) ||
         _links.containsKey(peerHex) ||
         _links.length >= _kMaxPeerConnections) {
+      return;
+    }
+    // A relay token or one existing data-channel route can carry the SDP/ICE.
+    // With neither, this is a true cold start and there is no rendezvous path.
+    if (_authToken == null &&
+        !_peerSignalRouter.hasPath(peerHex, _openPeerIds)) {
       return;
     }
     // Default policy: the greater key offers (one offerer per pair). A forced
@@ -514,7 +537,11 @@ class WebRtcMesh {
     }());
   }
 
-  Future<void> _handleSignal(Map<String, Object?> signal) async {
+  Future<void> _handleSignal(
+    Map<String, Object?> signal, {
+    String? routedVia,
+    bool authenticated = false,
+  }) async {
     final fromValue = signal['from'];
     final kindValue = signal['kind'];
     final data = signal['data'];
@@ -524,22 +551,24 @@ class WebRtcMesh {
     if (!_peerIdPattern.hasMatch(from) || from == selfPubkeyHex) return;
     if (!(peerAllowed?.call(from) ?? true)) return;
     final payload = data.cast<String, Object?>();
-    // Drop anything not validly signed by the claimed sender — this is what
-    // stops a relay/MITM impersonating a peer or substituting a fingerprint.
-    if (!await verifySignal(from, selfPubkeyHex, channel, kind, payload)) {
-      return;
-    }
-    final authKey = channelAuthKey;
-    if (authKey != null &&
-        !verifySignalCapabilityProof(
-          authKey,
-          from,
-          selfPubkeyHex,
-          channel,
-          kind,
-          payload,
+    final control = SignalControl(
+      to: selfPubkeyHex,
+      from: from,
+      kind: kind,
+      data: payload,
+    );
+    // Relay and P2P signalling take the same authenticated path. This also
+    // deduplicates a signal delivered over both transports during failover.
+    if (!authenticated &&
+        !await _peerSignalRouter.authenticate(
+          control,
+          channelAuthKey: channelAuthKey,
         )) {
       return;
+    }
+    if (!_peerSignalRouter.remember(control)) return;
+    if (routedVia != null) {
+      _peerSignalRouter.learnRoute(from, routedVia);
     }
     try {
       switch (kind) {
@@ -602,6 +631,8 @@ class WebRtcMesh {
         // A delayed callback from an old link must never remove a replacement.
         if (!identical(_links[peerHex], link)) return;
         _links.remove(peerHex);
+        _peerSignalRouter.removeNextHop(peerHex);
+        _routedSignalRates.remove(peerHex);
         if (_closed) return;
         if (_recovering) {
           onPeerLeft?.call(peerHex);
@@ -642,6 +673,7 @@ class WebRtcMesh {
     }
     _backoffUntil.remove(link.peerHex); // connected — reset its backoff
     _backoffFailures.remove(link.peerHex);
+    _peerSignalRouter.removeNextHop(link.peerHex);
     // Close any relay tunnel for this peer — direct connection wins.
     final tunnel = _tunnels.remove(link.peerHex);
     if (tunnel != null) unawaited(tunnel.close());
@@ -649,12 +681,20 @@ class WebRtcMesh {
     onPeerConnectedHex?.call(link.peerHex);
     // Persist this peer so next startup can try them immediately.
     unawaited(candidateCache?.touch(channel, link.peerHex) ?? Future.value());
-    // Peer-exchange: tell the new peer about everyone else we're connected to.
-    final otherPeers = _links.entries
+    // Peer-exchange is symmetric: the newcomer learns the existing mesh, and
+    // every existing peer learns the newcomer. Either side may be the offerer
+    // under the deterministic glare rule, so both directions are required.
+    final otherLinks = _links.entries
         .where((e) => e.key != link.peerHex && e.value.open)
-        .map((e) => e.key)
         .toList();
+    final otherPeers = otherLinks.map((entry) => entry.key).toList();
     if (otherPeers.isNotEmpty) link.sendControl(PeersControl(otherPeers));
+    for (final other in otherLinks) {
+      other.value.sendControl(PeersControl([link.peerHex]));
+    }
+    // A single surviving link can now route handshakes to cached peers even
+    // when every configured relay is unavailable.
+    _tryCachedPeers();
     // Version enforcement: share our version + the signed manifest.
     final manifest = versionManifest;
     if (manifest != null) {
@@ -667,16 +707,11 @@ class WebRtcMesh {
     switch (control) {
       case PeersControl(:final peers):
         for (final peerHex in peers.take(_kMaxPeerFanout)) {
+          _peerSignalRouter.learnRoute(peerHex, fromHex);
           _maybeInitiate(peerHex);
         }
-      case SignalControl(:final to, :final from, :final kind, :final data):
-        if (to == selfPubkeyHex) {
-          // Addressed to us — handle as if it came from the relay.
-          unawaited(_handleSignal({'from': from, 'kind': kind, 'data': data}));
-        } else {
-          // Not for us — forward to the target if we have a link.
-          _links[to]?.sendControl(control);
-        }
+      case SignalControl():
+        unawaited(_handleRoutedSignal(fromHex, control));
       case ContactsOnlineControl():
         break; // Handled by the external onControl callback (app layer).
       case VersionControl():
@@ -702,6 +737,62 @@ class WebRtcMesh {
       case DeviceRevocationControl():
         break; // Handled by the external onControl callback (app layer).
     }
+  }
+
+  Future<void> _handleRoutedSignal(
+    String fromLinkHex,
+    SignalControl control,
+  ) async {
+    if (!_allowRoutedSignal(fromLinkHex) ||
+        !(peerAllowed?.call(control.from) ?? true) ||
+        (control.to != selfPubkeyHex &&
+            !(peerAllowed?.call(control.to) ?? true)) ||
+        !await _peerSignalRouter.authenticate(
+          control,
+          channelAuthKey: channelAuthKey,
+        )) {
+      return;
+    }
+
+    if (control.to == selfPubkeyHex) {
+      await _handleSignal(
+        {'from': control.from, 'kind': control.kind, 'data': control.data},
+        routedVia: fromLinkHex,
+        authenticated: true,
+      );
+      return;
+    }
+
+    if (!_peerSignalRouter.remember(control)) return;
+    _peerSignalRouter.learnRoute(control.from, fromLinkHex);
+    if (control.hopsRemaining == 0) return;
+    _routeSignal(control.forwarded(), exclude: fromLinkHex);
+  }
+
+  bool _allowRoutedSignal(String fromLinkHex) {
+    final now = DateTime.now();
+    final current = _routedSignalRates[fromLinkHex];
+    if (current == null ||
+        now.difference(current.started) >= const Duration(minutes: 1)) {
+      _routedSignalRates[fromLinkHex] = _SignalRateWindow(now, 1);
+      return true;
+    }
+    if (current.count >= 512) return false;
+    current.count++;
+    return true;
+  }
+
+  bool _routeSignal(SignalControl control, {String? exclude}) {
+    final nextHops = _peerSignalRouter.nextHops(
+      destination: control.to,
+      openPeers: _openPeerIds,
+      exclude: exclude,
+      maxFanout: _kMaxPeerFanout,
+    );
+    for (final nextHop in nextHops) {
+      _links[nextHop]?.sendControl(control);
+    }
+    return nextHops.isNotEmpty;
   }
 
   /// Opens a relay tunnel as a fallback when ICE fails — symmetric NAT on both
@@ -755,17 +846,42 @@ class WebRtcMesh {
       'sig': await signSignal(identity, channel, kind, to, payload),
     };
     if (capability != null) signed[signalCapabilityField] = capability;
+    final control = SignalControl(
+      to: to,
+      from: selfPubkeyHex,
+      kind: kind,
+      data: signed,
+    );
+    if (!_peerSignalRouter.remember(control)) return;
+
+    final routed = _routeSignal(control);
+    if (routed) {
+      // Dual-deliver when a relay token exists. The P2P route is immediate; the
+      // relay copy is best-effort resilience and is deduplicated at receipt.
+      if (_authToken != null) {
+        unawaited(_sendSignalToRelay(control).catchError((Object _) {}));
+      }
+      return;
+    }
+    await _sendSignalToRelay(control);
+  }
+
+  Future<void> _sendSignalToRelay(SignalControl control) async {
+    final token = _authToken;
+    if (token == null) {
+      throw StateError('no signalling route is currently available');
+    }
     final request = http.Request('POST', _activeUrl.replace(path: '/signal'))
       ..headers.addAll({
         'content-type': 'application/json',
-        if (_authToken != null) 'Authorization': 'Bearer $_authToken',
+        'Authorization': 'Bearer $token',
       })
       ..body = jsonEncode({
         'channel': channel,
-        'to': to,
-        'from': selfPubkeyHex,
-        'kind': kind,
-        'data': signed,
+        'to': control.to,
+        'from': control.from,
+        'kind': control.kind,
+        'data': control.data,
       });
     final response = await _client
         .send(request)
@@ -789,6 +905,7 @@ class WebRtcMesh {
     }
     _links.clear();
     _earlyRemoteIce.clear();
+    _routedSignalRates.clear();
     for (final tunnel in _tunnels.values) {
       await tunnel.close();
     }
@@ -796,6 +913,13 @@ class WebRtcMesh {
     _client.close();
     if (!_peerConnected.isClosed) await _peerConnected.close();
   }
+}
+
+class _SignalRateWindow {
+  _SignalRateWindow(this.started, this.count);
+
+  final DateTime started;
+  int count;
 }
 
 /// One peer connection, exposed to the gossip layer as a [FrameChannel]: it owns
