@@ -62,6 +62,7 @@ import 'unread.dart';
 import 'update_checker.dart';
 import 'updater.dart';
 import 'voice.dart';
+import 'windows_data_migration.dart';
 import 'youtube_share.dart';
 
 /// Relay endpoint for local dev (signalling only).
@@ -153,6 +154,16 @@ const _kAvailableModels = [
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+    try {
+      await migrateAccidentalWindowsDataDirectory(
+        canonicalPath: (await getApplicationSupportDirectory()).path,
+      );
+    } catch (error, stackTrace) {
+      debugPrint('Windows data-directory migration failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
+  }
   // Single-instance guard: if another instance is running, show it and exit.
   if (!kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.windows ||

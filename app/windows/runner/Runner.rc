@@ -89,7 +89,10 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "Hearth contributors" "\0"
+            // path_provider and flutter_secure_storage use CompanyName and
+            // ProductName as the persistent Windows application-data identity.
+            // Keep this legacy value stable or existing users appear signed out.
+            VALUE "CompanyName", "com.example" "\0"
             VALUE "FileDescription", "Hearth" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "hearth" "\0"
