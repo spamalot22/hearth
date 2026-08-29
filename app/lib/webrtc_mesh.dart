@@ -44,6 +44,7 @@ class WebRtcMesh {
     this.onPeerLeft,
     this.onPeerConnectedHex,
     this.onControl,
+    this.onRelayPresenceChanged,
     this.peerAllowed,
     this.channelAuthKey,
     this.forceInitiator,
@@ -110,6 +111,9 @@ class WebRtcMesh {
   /// signalling) over the data channel. Null until track A wires a handler.
   final void Function(String peerHex, MeshControl control)? onControl;
 
+  /// Called when independently-verified, short-lived relay presence changes.
+  final VoidCallback? onRelayPresenceChanged;
+
   /// Optional channel-level admission policy. Signalling authentication proves
   /// who a peer is; this decides whether that identity belongs in this mesh.
   final bool Function(String peerHex)? peerAllowed;
@@ -174,6 +178,7 @@ class WebRtcMesh {
   final Map<String, int> _backoffFailures = {}; // consecutive failure count
   final Map<String, RelayTunnel> _tunnels = {}; // peerHex -> active tunnel
   final Map<String, List<Map<String, Object?>>> _earlyRemoteIce = {};
+  final Map<String, DateTime> _relayPresenceUntil = {};
   late final PeerSignalRouter _peerSignalRouter = PeerSignalRouter(
     selfPeer: selfPubkeyHex,
     channel: channel,
@@ -189,6 +194,7 @@ class WebRtcMesh {
   Timer? _signalTimer;
   Timer? _relayDutyTimer;
   Timer? _standbyProbeTimer;
+  Timer? _relayPresenceTimer;
   int _signalSince = 0;
   bool _announcing = false;
   bool _pollingSignals = false;
@@ -245,6 +251,20 @@ class WebRtcMesh {
   Iterable<String> get reachablePeers => {
     ...connectedPeers,
     ...relayConnectedPeers,
+  };
+
+  /// Peers with a fresh signed relay announcement, whether or not WebRTC opened.
+  Iterable<String> get relayVisiblePeers {
+    final now = DateTime.now();
+    return _relayPresenceUntil.entries
+        .where((entry) => entry.value.isAfter(now))
+        .map((entry) => entry.key);
+  }
+
+  /// Peers known online through either a data path or authenticated presence.
+  Iterable<String> get presentPeers => {
+    ...reachablePeers,
+    ...relayVisiblePeers,
   };
 
   void _start() {
@@ -499,14 +519,22 @@ class WebRtcMesh {
     try {
       final ts = DateTime.now().toUtc().millisecondsSinceEpoch;
       final sigBytes = await identity.sign(
-        utf8.encode('announce|$channel|$selfPubkeyHex|$ts'),
+        presenceSigningBytes(channel, selfPubkeyHex, ts),
       );
       final sig = hex.encode(sigBytes);
+      final authKey = channelAuthKey;
       final payload = jsonEncode({
         'channel': channel,
         'pubkey': selfPubkeyHex,
         'ts': ts,
         'sig': sig,
+        if (authKey != null)
+          'cap': createPresenceCapabilityProof(
+            authKey,
+            selfPubkeyHex,
+            channel,
+            ts,
+          ),
       });
       // Re-probe the primary ~once a minute so we return to it after it
       // recovers — otherwise failover is sticky and we'd stay on a fallback
@@ -544,6 +572,7 @@ class WebRtcMesh {
             retrySignals = true;
           }
           _authToken = token;
+          await _replaceRelayPresence(body['presence']);
           if (!_hasRelayDuty) _extendSignalDrain();
           final peers = body['peers'];
           if (peers is List) {
@@ -563,6 +592,75 @@ class WebRtcMesh {
       if (retrySignals && !_closed) unawaited(_pollSignals());
     }
     return false;
+  }
+
+  Future<void> _replaceRelayPresence(Object? raw) async {
+    final List<Object?> claims = raw is List
+        ? raw.take(_kMaxPeerFanout).toList()
+        : const <Object?>[];
+    final valid = await Future.wait(
+      claims.map((claim) async {
+        if (claim is! Map) return null;
+        final value = claim.cast<Object?, Object?>();
+        final pubkey = value['pubkey'];
+        final ts = value['ts'];
+        final sig = value['sig'];
+        if (pubkey is! String ||
+            ts is! int ||
+            sig is! String ||
+            pubkey == selfPubkeyHex ||
+            !(peerAllowed?.call(pubkey) ?? true)) {
+          return null;
+        }
+        final verified = await verifyRelayPresenceClaim(
+          channel: channel,
+          pubkey: pubkey,
+          timestampMs: ts,
+          signatureHex: sig,
+          channelKey: channelAuthKey,
+          capability: value['cap'],
+        );
+        return verified ? pubkey : null;
+      }),
+    );
+    if (_closed) return;
+
+    final before = relayVisiblePeers.toSet();
+    final expires = DateTime.now().add(const Duration(seconds: 20));
+    _relayPresenceUntil
+      ..clear()
+      ..addEntries(
+        valid.whereType<String>().map((peer) => MapEntry(peer, expires)),
+      );
+    _scheduleRelayPresenceExpiry();
+    if (!setEquals(before, relayVisiblePeers.toSet())) {
+      onRelayPresenceChanged?.call();
+    }
+  }
+
+  void _scheduleRelayPresenceExpiry() {
+    _relayPresenceTimer?.cancel();
+    _relayPresenceTimer = null;
+    if (_relayPresenceUntil.isEmpty || _closed) return;
+    final earliest = _relayPresenceUntil.values.reduce(
+      (a, b) => a.isBefore(b) ? a : b,
+    );
+    final delay = earliest.difference(DateTime.now());
+    _relayPresenceTimer = Timer(
+      delay.isNegative ? Duration.zero : delay,
+      _expireRelayPresence,
+    );
+  }
+
+  void _expireRelayPresence() {
+    if (_closed) return;
+    final before = _relayPresenceUntil.keys.toSet();
+    final now = DateTime.now();
+    _relayPresenceUntil.removeWhere((_, expires) => !expires.isAfter(now));
+    _scheduleRelayPresenceExpiry();
+    if (!setEquals(before, relayVisiblePeers.toSet())) {
+      onRelayPresenceChanged?.call();
+    }
   }
 
   /// Drain the signal mailbox and dispatch each entry to its peer link.
@@ -650,9 +748,11 @@ class WebRtcMesh {
     final shouldOffer =
         forceInitiator ?? (selfPubkeyHex.compareTo(peerHex) > 0);
     if (!shouldOffer) {
-      // The answer-only side still needs to drain the offerer's mailbox now.
-      // Waiting for the idle poll can consume half the handshake timeout.
-      _bumpSignalPoll();
+      // The answer-only side must drain the offerer's mailbox now. Do not call
+      // _bumpSignalPoll here: while there is no link yet, it selects the idle
+      // interval. Repeated five-second announces then keep cancelling and
+      // postponing that 15-second timer forever, so the offer is never read.
+      unawaited(_pollSignals());
       return;
     }
     final until = _backoffUntil[peerHex];
@@ -1036,12 +1136,14 @@ class WebRtcMesh {
     _signalTimer?.cancel();
     _relayDutyTimer?.cancel();
     _standbyProbeTimer?.cancel();
+    _relayPresenceTimer?.cancel();
     for (final link in _links.values.toList()) {
       await link.dispose();
     }
     _links.clear();
     _earlyRemoteIce.clear();
     _routedSignalRates.clear();
+    _relayPresenceUntil.clear();
     for (final tunnel in _tunnels.values) {
       await tunnel.close();
     }

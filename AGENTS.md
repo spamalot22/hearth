@@ -27,3 +27,10 @@ analysis, and tests outside the Flutter package that are known not to invoke
 native or Gradle compilation. Run all Flutter tests in GitHub Actions. Before
 running a command whose resource cost is uncertain, treat it as
 resource-intensive and use GitHub Actions instead.
+
+## User approval for repository changes
+
+Prepare and validate changes locally, then stop and report what is ready. Do
+not commit, push, tag, publish a release, or manually trigger a remote workflow
+until the user explicitly asks for that specific action. Prior approval from an
+earlier task does not carry forward to later changes.

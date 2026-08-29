@@ -30,6 +30,7 @@ const SIGNAL_TTL_MS = 30_000;
 const TOKEN_TTL_MS = 60_000; // 60 seconds (signal/search/tunnel only)
 const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/i;
+const HEX_CAPABILITY = /^[0-9a-f]{64}$/i;
 const SIGNAL_KINDS = new Set(['offer', 'answer', 'ice']);
 const MAX_PRESENCE_PER_CHANNEL = 256;
 const MAX_TOKENS = 1000;
@@ -55,9 +56,21 @@ interface StoredSignal {
   ts: number;
 }
 
+export interface RelayPresence {
+  pubkey: string;
+  ts: number;
+  sig: string;
+  cap?: string;
+}
+
+interface StoredPresence {
+  seenMs: number;
+  claim?: RelayPresence;
+}
+
 export class SignalHub {
-  // channel -> (pubkey -> lastSeenMs)
-  private readonly presence = new Map<string, Map<string, number>>();
+  // channel -> (pubkey -> last-seen time and optional signed presence claim)
+  private readonly presence = new Map<string, Map<string, StoredPresence>>();
   // recipient pubkey -> pending signals
   private readonly mailboxes = new Map<string, StoredSignal[]>();
   // Auth tokens: token -> { pubkey, expiresMs }
@@ -66,7 +79,12 @@ export class SignalHub {
   private seq = 0;
 
   /** Marks [pubkey] present in [channel] and returns the other live peers. */
-  announce(channel: string, pubkey: string, nowMs: number): string[] {
+  announce(
+    channel: string,
+    pubkey: string,
+    nowMs: number,
+    claim?: RelayPresence,
+  ): string[] {
     let chan = this.presence.get(channel);
     if (!chan) {
       chan = new Map();
@@ -81,7 +99,7 @@ export class SignalHub {
     }
     this.presence.set(channel, chan);
     chan.delete(pubkey);
-    chan.set(pubkey, nowMs);
+    chan.set(pubkey, { seenMs: nowMs, claim });
     while (chan.size > MAX_PRESENCE_PER_CHANNEL) {
       const oldest = chan.keys().next().value;
       if (oldest === undefined) break;
@@ -123,14 +141,26 @@ export class SignalHub {
     const chan = this.presence.get(channel);
     if (!chan) return [];
     const live: string[] = [];
-    for (const [pubkey, seen] of chan) {
-      if (nowMs - seen > PRESENCE_TTL_MS) {
+    for (const [pubkey, entry] of chan) {
+      if (nowMs - entry.seenMs > PRESENCE_TTL_MS) {
         chan.delete(pubkey);
       } else if (pubkey !== exclude) {
         live.push(pubkey);
       }
     }
     return live;
+  }
+
+  /** Signed claims for live peers. Clients independently verify every claim. */
+  peerPresence(channel: string, exclude: string, nowMs: number): RelayPresence[] {
+    const live = new Set(this.peers(channel, exclude, nowMs));
+    const chan = this.presence.get(channel);
+    if (!chan) return [];
+    const claims: RelayPresence[] = [];
+    for (const [pubkey, entry] of chan) {
+      if (live.has(pubkey) && entry.claim) claims.push(entry.claim);
+    }
+    return claims;
   }
 
   // Mailboxes are keyed by (channel, recipient): a peer runs one connection per
@@ -215,6 +245,7 @@ export function addSignalingRoutes(
       pubkey?: string;
       ts?: number;
       sig?: string;
+      cap?: string;
     };
     try {
       body = (await c.req.json()) as typeof body;
@@ -236,6 +267,12 @@ export function addSignalingRoutes(
       if (!HEX_SIGNATURE.test(body.sig) || ts < 0) {
         return c.json({ error: 'invalid signature' }, 403);
       }
+      if (
+        body.cap !== undefined &&
+        (typeof body.cap !== 'string' || !HEX_CAPABILITY.test(body.cap))
+      ) {
+        return c.json({ error: 'invalid presence capability' }, 400);
+      }
       const msg = new TextEncoder().encode(
         `announce|${body.channel}|${body.pubkey}|${ts}`,
       );
@@ -250,13 +287,22 @@ export function addSignalingRoutes(
         valid = false;
       }
       if (!valid) return c.json({ error: 'invalid signature' }, 403);
-      // Reject stale timestamps (>30s old).
-      if (Math.abs(now() - ts) > 30_000) {
+      // Use one clock reading for freshness and all state written by this
+      // announce, which also keeps injected test clocks deterministic.
+      const currentMs = now();
+      if (Math.abs(currentMs - ts) > 30_000) {
         return c.json({ error: 'timestamp too old' }, 403);
       }
-      const peers = hub.announce(body.channel, body.pubkey, now());
-      const token = hub.issueToken(body.pubkey, now());
-      return c.json({ peers, token, relayEpoch });
+      const claim: RelayPresence = {
+        pubkey: body.pubkey,
+        ts,
+        sig: body.sig,
+        ...(body.cap ? { cap: body.cap } : {}),
+      };
+      const peers = hub.announce(body.channel, body.pubkey, currentMs, claim);
+      const presence = hub.peerPresence(body.channel, body.pubkey, currentMs);
+      const token = hub.issueToken(body.pubkey, currentMs);
+      return c.json({ peers, presence, token, relayEpoch });
     }
     // Unsigned announce — reject (no backward compat needed).
     return c.json({ error: 'signature required' }, 403);

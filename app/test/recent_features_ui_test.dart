@@ -92,6 +92,23 @@ Future<void> _finish(WidgetTester tester) async {
 void main() {
   setUp(warnings.clear);
 
+  testWidgets('relay-only presence uses a distinct accessible icon', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) =>
+              Scaffold(body: Center(child: relayPresenceIcon(context))),
+        ),
+      ),
+    );
+
+    expect(find.byIcon(Icons.dns_outlined), findsOneWidget);
+    final tooltip = tester.widget<Tooltip>(find.byType(Tooltip));
+    expect(tooltip.message, 'Online via relay; direct connection unavailable');
+  });
+
   test(
     'settings device cert sort accepts DeviceStore immutable lists',
     () async {

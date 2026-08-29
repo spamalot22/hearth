@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'package:convert/convert.dart';
 import 'package:core/core.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/signal_auth.dart';
@@ -16,6 +17,85 @@ void main() {
     });
 
     Map<String, Object?> offer(String sdp) => {'sdp': sdp, 'type': 'offer'};
+
+    group('relay presence', () {
+      test('signed channel-capability presence verifies', () async {
+        final now = DateTime.now().toUtc();
+        final ts = now.millisecondsSinceEpoch;
+        final channelKey = List<int>.generate(32, (index) => index);
+        final signature = hex.encode(
+          await alice.sign(
+            presenceSigningBytes('room', alice.publicKeyHex, ts),
+          ),
+        );
+        final capability = createPresenceCapabilityProof(
+          channelKey,
+          alice.publicKeyHex,
+          'room',
+          ts,
+        );
+
+        expect(
+          await verifyRelayPresenceClaim(
+            channel: 'room',
+            pubkey: alice.publicKeyHex,
+            timestampMs: ts,
+            signatureHex: signature,
+            channelKey: channelKey,
+            capability: capability,
+            now: now,
+          ),
+          isTrue,
+        );
+      });
+
+      test('forged, stale, or wrong-channel presence is rejected', () async {
+        final now = DateTime.now().toUtc();
+        final ts = now.millisecondsSinceEpoch;
+        final signature = hex.encode(
+          await mallory.sign(
+            presenceSigningBytes('room', alice.publicKeyHex, ts),
+          ),
+        );
+
+        expect(
+          await verifyRelayPresenceClaim(
+            channel: 'room',
+            pubkey: alice.publicKeyHex,
+            timestampMs: ts,
+            signatureHex: signature,
+            now: now,
+          ),
+          isFalse,
+        );
+
+        final validSignature = hex.encode(
+          await alice.sign(
+            presenceSigningBytes('room', alice.publicKeyHex, ts),
+          ),
+        );
+        expect(
+          await verifyRelayPresenceClaim(
+            channel: 'another-room',
+            pubkey: alice.publicKeyHex,
+            timestampMs: ts,
+            signatureHex: validSignature,
+            now: now,
+          ),
+          isFalse,
+        );
+        expect(
+          await verifyRelayPresenceClaim(
+            channel: 'room',
+            pubkey: alice.publicKeyHex,
+            timestampMs: ts,
+            signatureHex: validSignature,
+            now: now.add(const Duration(minutes: 1)),
+          ),
+          isFalse,
+        );
+      });
+    });
 
     test('a correctly signed offer verifies', () async {
       final data = offer('v=0 ... a=fingerprint:sha-256 AB:CD');

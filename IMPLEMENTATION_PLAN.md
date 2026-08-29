@@ -165,8 +165,11 @@ Flutter UI — Windows · Android · web (primary/released targets)
 Relay namespaces are **channel capabilities**: a random group id or derived DM
 id plus a device public key. Possessing a group id is not enough to join it;
 group SDP/ICE also carries an HMAC proving possession of the channel key. The
-relay returns other recently announced device keys in that namespace and stores
-short-lived per-recipient signalling mail.
+relay returns other recently announced device keys and their original signed
+presence claims in that namespace, and stores short-lived per-recipient
+signalling mail. Group presence claims include a channel-key HMAC. Clients verify
+both proofs themselves before displaying relay-visible presence. Presence only
+decorates identities already established locally; it cannot create membership.
 
 **Connection ladder:**
 1. **Relay rendezvous for an entry link.** A signed announce returns a short-lived
@@ -1074,3 +1077,11 @@ choices where they conflict with the current-state sections above.
   workers rather than a relay blackout. Voice and
   screen-star meshes remain unchanged until their distinct topologies receive a
   separate design.
+- **2026-08-26** — **Authenticated relay-visible presence and rendezvous fix.**
+  Announcements now return short-lived Ed25519 presence evidence; group claims
+  additionally carry a channel-key HMAC. Clients verify the evidence locally and
+  use it only to decorate already-known identities, showing a distinct relay icon
+  beside members and contacts who are online without a direct WebRTC path. Direct
+  peers retain the normal green status without the icon. Answer-only WebRTC peers
+  now poll the signal mailbox immediately instead of repeatedly postponing the
+  incoming offer behind the idle poll interval.

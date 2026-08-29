@@ -420,6 +420,17 @@ Duration _motionDuration(BuildContext context, Duration duration) {
   return media?.disableAnimations == true ? Duration.zero : duration;
 }
 
+@visibleForTesting
+Widget relayPresenceIcon(BuildContext context, {double size = 16}) => Tooltip(
+  message: 'Online via relay; direct connection unavailable',
+  child: Icon(
+    Icons.dns_outlined,
+    size: size,
+    color: Theme.of(context).colorScheme.onSurfaceVariant,
+    semanticLabel: 'Online via relay; direct connection unavailable',
+  ),
+);
+
 /// The Hearth theme for a given [brightness]. Ember remains the brand and action
 /// colour, while cool secondary accents and neutral surfaces keep dense chat UI
 /// readable and give status, voice, and navigation their own visual roles.
@@ -2816,18 +2827,40 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (keepActive != null) channels.activate(keepActive);
   }
 
-  /// Members (by id) who've posted in [session], excluding you.
-  /// All peers currently connected across all channel meshes.
-  Set<String> _allOnlinePeers() {
+  Set<String> _allDirectPeers() {
     final result = <String>{};
     for (final s in _channels?.sessions ?? <ChannelSession>[]) {
-      result.addAll(
-        (s.mesh?.reachablePeers ?? const <String>[]).map(_rootHexForPeer),
-      );
+      final mesh = s.mesh;
+      if (mesh == null) continue;
+      result.addAll(mesh.connectedPeers.map(_rootHexForPeer));
     }
     result.remove(widget.identity.publicKeyHex);
     return result;
   }
+
+  Set<String> _allRelayOnlyPeers() {
+    final direct = _allDirectPeers();
+    final result = <String>{};
+    for (final s in _channels?.sessions ?? <ChannelSession>[]) {
+      final mesh = s.mesh;
+      if (mesh == null) continue;
+      result.addAll(mesh.relayConnectedPeers.map(_rootHexForPeer));
+      // Presence is status evidence, not membership evidence. Unknown device
+      // keys remain hidden until a root-signed message or bundle maps them to a
+      // locally known identity, avoiding duplicate/phantom group members.
+      result.addAll(mesh.relayVisiblePeers.map(_rootHexForPeer));
+    }
+    result
+      ..remove(widget.identity.publicKeyHex)
+      ..removeAll(direct);
+    return result;
+  }
+
+  /// Members (by id) visible over a direct path or authenticated relay presence.
+  Set<String> _allOnlinePeers() => {
+    ..._allDirectPeers(),
+    ..._allRelayOnlyPeers(),
+  };
 
   /// Last message timestamp per peer across all sessions.
   Map<String, int> _computeLastSeen() {
@@ -2899,6 +2932,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final now = DateTime.now().millisecondsSinceEpoch;
     const sevenDays = 7 * 24 * 60 * 60 * 1000;
     final onlinePeers = _allOnlinePeers();
+    final relayOnlyPeers = _allRelayOnlyPeers();
     final active = members
         .where(
           (k) =>
@@ -2915,7 +2949,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
     return [
       for (final key in active)
-        _memberTile(key, online: onlinePeers.contains(key)),
+        _memberTile(
+          key,
+          online: onlinePeers.contains(key),
+          relayOnly: relayOnlyPeers.contains(key),
+        ),
       if (inactive.isNotEmpty)
         ExpansionTile(
           tilePadding: EdgeInsets.zero,
@@ -2928,14 +2966,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           initiallyExpanded: false,
           children: [
             for (final key in inactive)
-              _memberTile(key, online: onlinePeers.contains(key)),
+              _memberTile(
+                key,
+                online: onlinePeers.contains(key),
+                relayOnly: relayOnlyPeers.contains(key),
+              ),
           ],
         ),
     ];
   }
 
-  Widget _memberTile(String key, {bool? online}) {
+  Widget _memberTile(String key, {bool? online, bool? relayOnly}) {
     final isOnline = online ?? _allOnlinePeers().contains(key);
+    final isRelayOnly = relayOnly ?? _allRelayOnlyPeers().contains(key);
     return Material(
       type: MaterialType.transparency,
       child: ListTile(
@@ -2962,9 +3005,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
           ],
         ),
-        title: Text(
-          _displayName(Uint8List.fromList(hex.decode(key))),
-          overflow: TextOverflow.ellipsis,
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                _displayName(Uint8List.fromList(hex.decode(key))),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (isRelayOnly) ...[
+              const SizedBox(width: 6),
+              relayPresenceIcon(context),
+            ],
+          ],
         ),
         onTap: () =>
             unawaited(_peerActions(Uint8List.fromList(hex.decode(key)))),
@@ -6408,6 +6461,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           groups: _groups,
           identity: widget.identity,
           onlinePeers: _allOnlinePeers(),
+          relayOnlyPeers: _allRelayOnlyPeers(),
           lastSeen: _computeLastSeen(),
           onDm: (pubkeyHex) async {
             await _channels?.openDm(hex.decode(pubkeyHex));
@@ -9109,6 +9163,7 @@ class _ContactsPage extends StatefulWidget {
     required this.groups,
     required this.identity,
     required this.onlinePeers,
+    required this.relayOnlyPeers,
     required this.lastSeen,
     required this.onDm,
     required this.onInvite,
@@ -9121,6 +9176,7 @@ class _ContactsPage extends StatefulWidget {
   final Map<String, GroupChannel> groups;
   final Identity identity;
   final Set<String> onlinePeers;
+  final Set<String> relayOnlyPeers;
   final Map<String, int> lastSeen; // pubkeyHex -> epoch ms
   final Future<void> Function(String pubkeyHex) onDm;
   final void Function(String pubkeyHex, String channelId) onInvite;
@@ -9223,6 +9279,9 @@ class _ContactsPageState extends State<_ContactsPage> {
                       final pubkeyHex = entries.keys.elementAt(i);
                       final name = entries.values.elementAt(i);
                       final online = widget.onlinePeers.contains(pubkeyHex);
+                      final relayOnly = widget.relayOnlyPeers.contains(
+                        pubkeyHex,
+                      );
                       return ListTile(
                         leading: Stack(
                           children: [
@@ -9247,7 +9306,20 @@ class _ContactsPageState extends State<_ContactsPage> {
                             ),
                           ],
                         ),
-                        title: Text(name),
+                        title: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                name,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (relayOnly) ...[
+                              const SizedBox(width: 6),
+                              relayPresenceIcon(context),
+                            ],
+                          ],
+                        ),
                         subtitle: Text(
                           online
                               ? 'Online'

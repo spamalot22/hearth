@@ -311,6 +311,7 @@ class ChannelSession {
           syncCourierDuty();
           onUpdate(); // Refresh UI so member online status updates.
         },
+        onRelayPresenceChanged: onUpdate,
         onControl: (fromHex, control) {
           if (control is ContactsOnlineControl) {
             onContactsOnline?.call(channelId, fromHex, control.peers);

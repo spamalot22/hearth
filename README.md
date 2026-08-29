@@ -53,10 +53,11 @@ provider-backed media search; it can verify authenticity but cannot read message
   the mesh can re-knit without the relay. Successfully reached peer identities
   are cached locally for quick retries; historical/offline contacts are not
   broadcast, avoiding unnecessary social-graph disclosure.
-- **Authenticated signalling** — announce requests are Ed25519-signed; signal
-  mailbox reads require a short-lived token; and group SDP/ICE additionally
-  proves possession of the channel key, preventing the relay from joining a
-  group mesh with an identity of its own.
+- **Authenticated signalling and presence** — announce requests are
+  Ed25519-signed; group announcements additionally prove possession of the
+  channel key; and signal mailbox reads require a short-lived token. Clients
+  verify relay-returned presence claims themselves and distinguish relay-visible
+  members from peers with a direct connection.
 - **Distributed relay duty** — connected channel components rotate two relay
   workers, with handoff overlap, while other peers pause routine announce,
   signal, and courier polling after a bounded mailbox drain. Worker selection is
@@ -126,6 +127,13 @@ offer/answer/ICE is Ed25519-signed and verified ([`signal_auth.dart`](app/lib/si
 group signals also carry a channel-key HMAC. A malicious relay therefore cannot
 impersonate a peer, swap a DTLS fingerprint, or introduce its own identity into a
 group mesh.
+
+The same signed announcements provide short-lived relay-visible presence. Group
+presence also carries a channel-key HMAC, and clients independently verify both
+proofs before showing a member online. Presence only decorates identities already
+known locally; it is not accepted as membership evidence. A small relay icon
+distinguishes this fallback status from a direct WebRTC connection; it does not
+imply that the relay can read messages or join voice.
 
 After one data channel opens, peer exchange becomes the signalling network:
 connected members introduce all sides of the shared channel and forward those
@@ -318,6 +326,9 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 - **Signal mailbox reads are token-gated** — announces are Ed25519-signed and
   return a short-lived token; reading your signal mailbox requires the token, so
   strangers can't observe your ICE candidates.
+- **Relay-visible presence is verified client-side** — the relay returns the
+  peer's original short-lived signed announcement, with a channel-key proof for
+  groups. It can suppress status, but cannot forge an accepted member claim.
 - **Auto-updates are signature-verified** — clients fetch the latest manifest
   from GitHub Releases and peers may relay it, but the app trusts it only when it
   is signed by the hardcoded release key. GitHub or a peer can withhold an update,

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import * as ed from '@noble/ed25519';
 import { describe, expect, it } from 'vitest';
 
 import { createRelay } from './relay';
@@ -21,6 +22,15 @@ describe('SignalHub', () => {
     hub.announce('general', 'bob', 0);
     // 20s later only bob is live; alice has expired.
     expect(hub.announce('general', 'bob', 20_000)).toEqual([]);
+  });
+
+  it('returns signed claims only while their peer is live', () => {
+    const hub = new SignalHub();
+    const claim = { pubkey: aliceHex, ts: 1000, sig: 'c'.repeat(128) };
+    hub.announce('general', aliceHex, 1000, claim);
+
+    expect(hub.peerPresence('general', bobHex, 1000)).toEqual([claim]);
+    expect(hub.peerPresence('general', bobHex, 20_000)).toEqual([]);
   });
 
   it('delivers signals to a recipient mailbox by cursor', () => {
@@ -73,6 +83,56 @@ describe('signalling routes', () => {
       body: JSON.stringify(body),
     });
   }
+
+  async function signedAnnounce(channel: string, cap?: string) {
+    const seed = ed.utils.randomPrivateKey();
+    const pubkey = Buffer.from(await ed.getPublicKeyAsync(seed)).toString('hex');
+    const ts = Date.now();
+    const sig = Buffer.from(
+      await ed.signAsync(
+        new TextEncoder().encode(`announce|${channel}|${pubkey}|${ts}`),
+        seed,
+      ),
+    ).toString('hex');
+    return { channel, pubkey, ts, sig, ...(cap ? { cap } : {}) };
+  }
+
+  it('returns verifiable relay-presence evidence unchanged', async () => {
+    const app = createRelay();
+    const channel = 'presence-room';
+    const cap = 'd'.repeat(64);
+    const alice = await signedAnnounce(channel, cap);
+    const bob = await signedAnnounce(channel);
+
+    expect((await postJson(app, '/announce', alice)).status).toBe(200);
+    const response = await postJson(app, '/announce', bob);
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      peers: string[];
+      presence: Array<{ pubkey: string; ts: number; sig: string; cap?: string }>;
+    };
+
+    expect(body.peers).toContain(alice.pubkey);
+    expect(body.presence).toEqual([
+      {
+        pubkey: alice.pubkey,
+        ts: alice.ts,
+        sig: alice.sig,
+        cap,
+      },
+    ]);
+  });
+
+  it('rejects malformed relay-presence capabilities', async () => {
+    const app = createRelay();
+    const claim = await signedAnnounce('presence-room');
+    const response = await postJson(app, '/announce', {
+      ...claim,
+      cap: 'not-a-capability',
+    });
+
+    expect(response.status).toBe(400);
+  });
 
   it('announce -> signal round-trips', async () => {
     const hub = new SignalHub();

@@ -21,6 +21,94 @@ import 'package:crypto/crypto.dart';
 
 const String signalCapabilityField = 'cap';
 
+List<int> presenceSigningBytes(
+  String channel,
+  String pubkey,
+  int timestampMs,
+) => utf8.encode('announce|$channel|$pubkey|$timestampMs');
+
+String createPresenceCapabilityProof(
+  List<int> channelKey,
+  String pubkey,
+  String channel,
+  int timestampMs,
+) {
+  if (channelKey.length != 32) {
+    throw ArgumentError.value(channelKey.length, 'channelKey');
+  }
+  return Hmac(sha256, channelKey)
+      .convert(
+        utf8.encode(
+          'hearth/presence-capability/v1\n$pubkey\n$channel\n$timestampMs',
+        ),
+      )
+      .toString();
+}
+
+bool verifyPresenceCapabilityProof(
+  List<int> channelKey,
+  String pubkey,
+  String channel,
+  int timestampMs,
+  Object? supplied,
+) {
+  if (supplied is! String || !RegExp(r'^[0-9a-f]{64}$').hasMatch(supplied)) {
+    return false;
+  }
+  try {
+    final expected = createPresenceCapabilityProof(
+      channelKey,
+      pubkey,
+      channel,
+      timestampMs,
+    );
+    return _constantTimeBytes(
+      Uint8List.fromList(hex.decode(supplied)),
+      Uint8List.fromList(hex.decode(expected)),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> verifyRelayPresenceClaim({
+  required String channel,
+  required String pubkey,
+  required int timestampMs,
+  required String signatureHex,
+  List<int>? channelKey,
+  Object? capability,
+  DateTime? now,
+  Duration maxAge = const Duration(seconds: 30),
+}) async {
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(pubkey) ||
+      !RegExp(r'^[0-9a-f]{128}$').hasMatch(signatureHex) ||
+      timestampMs < 0) {
+    return false;
+  }
+  final currentMs = (now ?? DateTime.now()).toUtc().millisecondsSinceEpoch;
+  if ((currentMs - timestampMs).abs() > maxAge.inMilliseconds) return false;
+  if (channelKey != null &&
+      !verifyPresenceCapabilityProof(
+        channelKey,
+        pubkey,
+        channel,
+        timestampMs,
+        capability,
+      )) {
+    return false;
+  }
+  try {
+    return await Identity.verifySignature(
+      presenceSigningBytes(channel, pubkey, timestampMs),
+      signature: hex.decode(signatureHex),
+      publicKey: hex.decode(pubkey),
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Deterministic bytes signed for a signal of [kind] addressed to [to]. Only the
 /// security-critical fields are bound; strings survive the relay's JSON
 /// round-trip unchanged, so signatures stay valid end-to-end.
