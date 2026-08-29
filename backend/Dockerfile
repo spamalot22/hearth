@@ -2,7 +2,7 @@
 # No shell, no package manager, no attack surface in the final image.
 
 # --- Stage 1: build ---
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 
 RUN corepack enable && corepack prepare pnpm@11.22.0 --activate
 
