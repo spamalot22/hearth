@@ -172,12 +172,11 @@ class _NetworkStatusState extends State<NetworkStatus>
   }
 
   String _healthMessage(bool connected, bool relayOk) {
-    final directPeers = widget.peerCount - widget.relayPeerCount;
-    if (widget.relayPeerCount > 0 && directPeers <= 0) {
-      return 'Peers reachable through encrypted relay fallback.';
+    if (widget.relayPeerCount > 0 && !connected) {
+      return 'Peers visible through relay; attempting direct P2P.';
     }
-    if (widget.relayPeerCount > 0 && directPeers > 0) {
-      return 'Direct P2P active; some peers use encrypted relay fallback.';
+    if (widget.relayPeerCount > 0 && connected) {
+      return 'Direct P2P active; other peers are relay-visible.';
     }
     if (connected && relayOk) return 'Fully connected — messages flow P2P.';
     if (connected && !relayOk) {

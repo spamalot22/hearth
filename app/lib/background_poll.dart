@@ -118,25 +118,45 @@ Future<Map<String, dynamic>?> _fetchPoll(
   String mailbox,
   int since,
 ) async {
-  final params = <String, String>{'channel': mailbox, 'since': '$since'};
-  final request = http.Request(
+  final params = <String, String>{'since': '$since'};
+  var request = http.Request(
     'GET',
-    relay.replace(path: '/poll', queryParameters: params),
-  );
+    relay.replace(path: '/v2/poll', queryParameters: params),
+  )..headers[relayMailboxHeader] = mailbox;
   final client = http.Client();
   try {
-    final res = await client.send(request).timeout(const Duration(seconds: 10));
-    if (res.statusCode != 200) return null;
     const maxBytes = 8 * 1024 * 1024;
-    if ((res.contentLength ?? 0) > maxBytes) return null;
-    final bytes = BytesBuilder(copy: false);
-    var received = 0;
-    await for (final chunk in res.stream.timeout(const Duration(seconds: 10))) {
-      received += chunk.length;
-      if (received > maxBytes) return null;
-      bytes.add(chunk);
+    Future<(http.StreamedResponse, Uint8List?)> perform() async {
+      final res = await client
+          .send(request)
+          .timeout(const Duration(seconds: 10));
+      if ((res.contentLength ?? 0) > maxBytes) return (res, null);
+      final bytes = BytesBuilder(copy: false);
+      var received = 0;
+      await for (final chunk in res.stream.timeout(
+        const Duration(seconds: 10),
+      )) {
+        received += chunk.length;
+        if (received > maxBytes) return (res, null);
+        bytes.add(chunk);
+      }
+      return (res, bytes.takeBytes());
     }
-    return jsonDecode(utf8.decode(bytes.takeBytes())) as Map<String, dynamic>;
+
+    var result = await perform();
+    if (result.$1.statusCode == 404 || result.$1.statusCode == 405) {
+      request = http.Request(
+        'GET',
+        relay.replace(
+          path: '/poll',
+          queryParameters: {'channel': mailbox, ...params},
+        ),
+      );
+      result = await perform();
+    }
+    final (res, bytes) = result;
+    if (res.statusCode != 200 || bytes == null) return null;
+    return jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>;
   } finally {
     client.close();
   }

@@ -6,12 +6,12 @@ Discord/Signal with no servers that own your messages.**
 Hearth has no accounts and no central database. Your identity is a keypair on your
 device, messages sync **peer-to-peer over WebRTC**, and everything — DMs, group
 channels, voice — is **end-to-end encrypted by default**. An optional coordination
-relay handles cold-start discovery, fallback encrypted courier/data traffic, and
+relay handles cold-start discovery, bounded encrypted courier traffic, and
 provider-backed media search; it can verify authenticity but cannot read messages.
 
 > **Status:** early, fast-moving work in progress. Crypto, message sync, P2P mesh,
 > channels, media, voice, identity backup/restore, signed auto-updates, P2P version
-> enforcement, relay tunnel fallback, and peer-exchange all work today. The relay is
+> enforcement, relay fallback, and peer-exchange all work today. The relay is
 > deployed (self-hosted behind a Tailscale Funnel). See
 > [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) for the living plan and the
 > decisions log.
@@ -91,7 +91,6 @@ disposable convenience.**
         └──────────────►   Relay (Hono)   ◄──────────────┘   ← never sees plaintext
                          /announce /peers /signal
                          /messages /poll  (offline courier)
-                         /tunnel (symmetric-NAT fallback)
                          /gif/search /sound/search (keyed proxy)
 ```
 
@@ -120,8 +119,9 @@ regardless of arrival order or duplication.
 
 ### Transport — WebRTC mesh + gossip
 [`app/lib/webrtc_mesh.dart`](app/lib/webrtc_mesh.dart) maintains a **full mesh**:
-one `RTCPeerConnection` per peer. The relay provides cold-start rendezvous,
-encrypted courier holding, and an encrypted data-tunnel fallback. To avoid glare,
+one `RTCPeerConnection` per peer. The relay provides cold-start rendezvous and
+bounded encrypted courier holding; it never acts as a WebRTC media or data
+transport. To avoid glare,
 the peer with the greater public key offers. **Signalling is authenticated**: every
 offer/answer/ICE is Ed25519-signed and verified ([`signal_auth.dart`](app/lib/signal_auth.dart));
 group signals also carry a channel-key HMAC. A malicious relay therefore cannot
@@ -139,11 +139,10 @@ After one data channel opens, peer exchange becomes the signalling network:
 connected members introduce all sides of the shared channel and forward those
 same signed SDP/ICE envelopes. Reverse routes are learned from authenticated
 traffic; bounded hop counts, per-link rate limits, and short-lived deduplication
-stop loops and amplification. The relay receives a best-effort duplicate while
-available, but is no longer required to add newly introduced peers or cached
-peers that are reachable through the live component. If every live link is lost,
-or peers are split into disconnected components, the relay (or another future
-bootstrap mechanism) is still needed for rendezvous.
+stop loops and amplification. Successfully peer-routed signalling is not copied
+to the relay. If repeated P2P-routed attempts fail, or every live link is lost,
+the relay (or another future bootstrap mechanism) is used only to exchange fresh
+signed SDP/ICE for another direct attempt.
 
 Once a data channel opens, a **`SyncEngine`** ([`sync.dart`](core/lib/src/sync.dart))
 gossips messages with `HAVE`/`WANT`/`GIVE` frames and **verifies every message on
@@ -187,7 +186,13 @@ local blob — after that it's pure P2P, with no CDN dependency at render.
 the offer so audio rides in the initial SDP — no renegotiation is bolted onto the
 gossip-critical mesh. Includes mute, deafen, per-user volume, generated join/leave
 cues every client plays locally, and live speaking indicators driven by WebRTC
-`audioLevel` stats.
+`audioLevel` stats. Voice occupancy is announced directly to channel peers and,
+when the relay is reachable, as a short-lived independently signed flag on the
+channel's existing presence heartbeat. That fallback only keeps the participant
+count accurate; voice media is always direct P2P and never traverses the relay.
+Voice signalling first travels over the already-established channel data mesh,
+including bounded forwarding by shared channel peers. Relay rendezvous is enabled
+only after that direct path has had time to connect.
 
 ### AI bot (local LLM, decentralised hosting)
 [`app/lib/inference_bot.dart`](app/lib/inference_bot.dart) provides an **@bot**
@@ -202,12 +207,13 @@ macOS (Metal) and Linux/Windows (CUDA if available).
 ### The relay (backend)
 [`backend/`](backend) is a small **Hono** app, and a *dumb relay*: it verifies each
 message's signature but **never decrypts or owns history**. It's reduced to a
-**coordination service**: cold-start signalling, bounded encrypted courier/tunnel
-stores, and media-search proxies. Direct P2P is preferred. DMs can skip a courier
-upload when an admitted participant confirms durable receipt; group messages
-retain the fallback because an arbitrary group member is not a custody authority.
+**coordination service**: cold-start signalling, a bounded encrypted courier
+store, and media-search proxies. Direct P2P is preferred. DMs can skip a courier
+upload only when a device owned by the remote identity confirms durable receipt;
+group messages retain the fallback because an arbitrary group member is not a
+custody authority.
 Settled components rotate two redundant relay workers instead of making every
-client poll independently. Peerless, handshaking, or tunnel-dependent clients
+client poll independently. Peerless or handshaking clients
 immediately resume their own relay activity; outgoing workers drain signalling
 through the relay TTL window before reducing activity. Standbys make staggered,
 low-frequency probes so worker failure cannot suppress relay access indefinitely.
@@ -218,13 +224,10 @@ Each relay process publishes a random `relayEpoch`; clients bind their signallin
 and courier cursors to that generation and reset them after a container restart
 or relay failover, because the relay's in-memory sequence numbers restart at zero.
 
-When WebRTC ICE fails completely (symmetric NAT on both sides), a **relay tunnel**
-(`/tunnel`) forwards bounded, encrypted fragments between the stuck peers. Large
-frames are reassembled only after end-to-end authentication. Group fragments
-also carry a channel-key HMAC, so an endpoint must prove membership before its
-frames are accepted. This retains the same confidentiality and admission
-guarantees while keeping the relay's request limits small. Both peers must support
-the encrypted fragment protocol to use this fallback path.
+When WebRTC ICE fails completely, Hearth reports that no direct route is
+available. Without TURN, two incompatible symmetric NATs cannot exchange voice
+or live data; relay signalling can discover fresh candidates but cannot make an
+impossible direct path work.
 
 ---
 
@@ -235,7 +238,7 @@ core/      Pure-Dart, platform-agnostic engine (no Flutter):
            identity, message DAG, encryption, blobs, sync/gossip, frames.
 app/       Flutter client (web + mobile/desktop): UI, WebRTC mesh, voice,
            Hive storage, media library, channel/contact management.
-backend/   TypeScript Hono relay: rendezvous, encrypted courier/data tunnel, and
+backend/   TypeScript Hono relay: rendezvous, encrypted courier, and
            media-search proxies. In-memory; self-hosted in Docker via Tailscale.
 IMPLEMENTATION_PLAN.md   Living plan, architecture decisions log, roadmap.
 ```
@@ -338,6 +341,9 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
   applies verified updates through the installer.
 - **Per-pubkey rate limiting** on signal and message endpoints prevents mailbox
   flooding from anonymous attackers.
+- **Courier mailbox IDs are capabilities** carried in a request header rather
+  than the URL, keeping them out of routine reverse-proxy access logs. Messages
+  are still independently signature-checked by both the relay and recipient.
 - **What the relay still learns:** that a peer is online, who they're signalling
   with, and (for media search) your search terms — proxying hides your IP from the
   GIF/sound provider, but the relay sees the query. Hiding *who a message is for*

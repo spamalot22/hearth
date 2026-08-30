@@ -4,7 +4,7 @@
 > Local-first, peer-to-peer by default, with an **optional** coordination
 > backend that improves reliability but is never the source of truth.
 
-_Status: living document. Last reconciled with `main`: 2026-08-25._
+_Status: living document. Last reconciled with working tree: 2026-08-30._
 
 ---
 
@@ -16,9 +16,8 @@ _Status: living document. Last reconciled with `main`: 2026-08-25._
   differ.
 - **Messaging and media are implemented** — encrypted text, rich content, files,
   voice messages, voice chat, Windows screen sharing, and synchronised YouTube
-  watch parties use the same channel model. Chat can use an encrypted app-level
-  relay tunnel when ICE cannot connect; real-time media remains direct WebRTC and
-  therefore has no symmetric-NAT fallback without TURN.
+  watch parties use the same channel model. Live transport remains direct WebRTC
+  and therefore has no symmetric-NAT fallback without TURN.
 - **End-to-end encrypted by default — everything.** DMs use per-device
   `MultiDeviceBox` encryption derived through X25519. Groups use a shared
   32-byte channel key with explicit key epochs; device revocation rotates the
@@ -41,8 +40,8 @@ _Status: living document. Last reconciled with `main`: 2026-08-25._
 
 1. **Local-first.** Every device is a full node with its own copy of history.
 2. **Graceful degradation.** If the backend dies, existing direct P2P components
-   keep working. Cold starts, offline courier delivery, provider search, and
-   data-tunnel-only pairs degrade until a relay is available again.
+   keep working. Cold starts, offline courier delivery, and provider search
+   degrade until a relay is available again.
 3. **Identity = keypair, not an account.** No company owns who you are.
 4. **One language per layer, clean boundary.** Dart for the client (`core` +
    `app`); TypeScript for the containerised relay. Canonical fixtures lock the
@@ -61,8 +60,8 @@ _Status: living document. Last reconciled with `main`: 2026-08-25._
 | Identity and signing | **Ed25519** root/device identities; `cryptography` in Dart and `@noble/ed25519` in the relay | Implemented |
 | P2P transport | **WebRTC** (`flutter_webrtc`) data channels and media | Implemented |
 | Bootstrap/backend | Self-hosted **Hono** relay (TypeScript, Docker, bounded in-memory stores) behind **Tailscale Funnel**; pluggable relay URLs and failover | Implemented |
-| Relay services | Cold-start signalling, encrypted offline courier, encrypted chat tunnel, GIF/sound search proxies | Implemented, best effort |
-| Data NAT fallback | App-level encrypted relay tunnel for chat/gossip; no coturn or UDP port-forward | Implemented |
+| Relay services | Cold-start signalling, encrypted offline courier, GIF/sound search proxies | Implemented, best effort |
+| Data NAT fallback | Direct WebRTC only; no TURN or app-level transport relay | Deliberate limitation |
 | Media NAT fallback | Direct WebRTC only; no TURN or app-level media relay | Deliberate limitation |
 | E2E encryption | Per-device DM boxes and epoch-based group keys | Implemented; no ratchet/MLS forward secrecy |
 | Heavy P2P | DHT/libp2p rejected; it would still require bootstrap and materially increase native complexity | Dropped |
@@ -185,15 +184,15 @@ decorates identities already established locally; it cannot create membership.
    origin signature and optional group-key capability. Six-hop TTLs, bounded
    flooding, deduplication, frame-size limits, connection caps, and per-ingress
    rate limits constrain loops and abuse.
-4. **Encrypted data tunnel.** After repeated ICE failure, chat/gossip can use a
-   fragmented, authenticated relay tunnel. Direct WebRTC replaces it if a later
-   attempt succeeds. Voice and screen media never use this tunnel.
+4. **Bounded relay rendezvous fallback.** Peer-routed signalling is attempted
+   first. The relay exchanges fresh authenticated SDP/ICE only after those paths
+   fail; it does not carry live data or media.
 
 Connected channel components deterministically rotate two redundant relay
 workers, with previous-slot overlap during handoff. Every participant ranks the
 same authenticated device identifiers. Other members pause routine
-announce, signal, and courier polling; peerless, handshaking, and
-tunnel-dependent clients remain active. A departing worker stops
+announce, signal, and courier polling; peerless and handshaking clients remain
+active. A departing worker stops
 announcing/courier polling but drains its identity-addressed signal mailbox for
 50 seconds, covering relay presence plus signal TTL. Every standby independently
 performs a staggered rendezvous, signal, and courier probe at least every two
@@ -219,13 +218,13 @@ gymnastics (all of which existed only to dodge *cloud* cost). On your own box,
 polling cost is irrelevant.
 
 **Shape — one Docker Compose stack (this *is* the IaC):**
-- **Relay container** (Hono): rendezvous, bounded encrypted courier/tunnel stores,
+- **Relay container** (Hono): rendezvous, a bounded encrypted courier store,
   release compatibility endpoint, and media-search proxies. No database.
 - **Exposure: Tailscale Funnel sidecar.** The current deployment uses kernel-mode
   Tailscale with `/dev/net/tun` and `NET_ADMIN`, forwarding privately to the relay
   over the Compose bridge. Cloudflare Tunnel is retained as an alternative.
-- **No coturn or TURN service.** The app-level tunnel covers encrypted chat data
-  only. Media remains P2P and may fail where ICE cannot establish a direct path.
+- **No coturn or TURN service.** Data and media remain P2P and may fail where ICE
+  cannot establish a direct path.
 
 **CI/CD — IaC + tag-triggered pipeline:** the `docker-compose.yml` (+ relay
 `Dockerfile` + tunnel config) is the infrastructure as code. **GitHub Actions on a
@@ -298,7 +297,7 @@ Prove the data model._
 
 ### Phase 2 — Peer-to-peer transport
 _Outcome: direct P2P is primary; the backend remains an optional encrypted
-courier, cold-start rendezvous, and data-tunnel fallback._
+courier and cold-start rendezvous._
 - [x] `core`: abstract `Transport` interface; `RelayTransport` is stream-based.
 - [x] `backend`: signalling + presence endpoints (announce / peers / signal),
       in-memory for now.
@@ -333,8 +332,9 @@ courier, cold-start rendezvous, and data-tunnel fallback._
       routine courier polling while relay-dependent clients fail open to polling.
 - [x] **On-demand DM courier uploads** — a peer acknowledges only after verifying
       and durably accepting a message. A DM sender accepts receipts only from a
-      currently admitted DM device, skipping the relay copy after an ACK and
-      falling back after 1.5 seconds. Groups always retain the courier fallback.
+      currently admitted device owned by the remote identity, skipping the relay
+      copy after an ACK and falling back after 1.5 seconds. Groups always retain
+      the courier fallback.
 - [x] **Distributed relay duty** — primary channel meshes rotate two redundant
       relay workers with handoff overlap. Selection applies time-varying SHA-256
       priorities to consistent authenticated device ids and grants no protocol
@@ -742,7 +742,8 @@ choices where they conflict with the current-state sections above.
   and targets the first by `deviceId` (with `autoGainControl` + `noiseSuppression`),
   then force-enables tracks — fixing the silent-mic issue on Windows desktop where
   the native WebRTC layer picks a non-functional default device.
-- **2026-06-27** — **Relay tunnel for symmetric-NAT pairs.** When ICE fails 3
+- **2026-06-27** — **Relay tunnel for symmetric-NAT pairs (removed
+  2026-08-30).** When ICE fails 3
   times consecutively, the mesh opens a `RelayTunnel` — a `FrameChannel` that
   POST/polls opaque frame text through `/tunnel` on the relay. Same E2E
   guarantees (the relay sees ciphertext), just routed instead of direct. The
@@ -753,7 +754,8 @@ choices where they conflict with the current-state sections above.
   Resets on successful connection. Prevents a flapping peer from thrashing the
   announce/signal loop.
 - **2026-06-27** — **Security hardening: mandatory token auth on all relay
-  endpoints.** GET `/signal`, POST `/signal`, POST `/tunnel`, GET `/tunnel` all
+  endpoints.** At the time, GET `/signal`, POST `/signal`, POST `/tunnel`, and
+  GET `/tunnel` all
   now **require** the auth token from a signed announce (403 without). Tokens
   are short-lived (60s), issued only on Ed25519-verified announces, and bound to
   a pubkey — so an attacker can't read mailboxes, inject garbage signals, or
@@ -1040,8 +1042,8 @@ choices where they conflict with the current-state sections above.
   previously defined `SignalControl` is now used for outbound offers, answers,
   and ICE whenever any live same-channel link exists. Peer exchange teaches
   next hops in both directions; authenticated traffic teaches reverse routes;
-  bounded flooding covers missing routes; and relay delivery remains a
-  best-effort duplicate rather than a dependency. Every hop verifies the
+  bounded flooding covers missing routes; relay duplication was retained at
+  that point and removed by the 2026-08-30 direct-first policy. Every hop verifies the
   origin signature and group capability before forwarding. Six-hop TTLs,
   two-minute/4096-entry deduplication, 256 KiB signal limits, 64-peer fanout,
   and 512 routed signals per ingress peer per minute bound abuse. Cached peers
@@ -1054,10 +1056,12 @@ choices where they conflict with the current-state sections above.
 - **2026-08-25** — **DM courier uploads made on-demand.** Added a bounded ACK
   gossip frame that a peer sends only after validating and durably storing a
   message. Local publication registers its ACK waiter before gossiping to avoid
-  races. A DM accepts a receipt only from a currently admitted participant; if
-  one confirms custody within 1.5 seconds, the sender skips the relay copy and
-  relies on epidemic forwarding. Groups always retain their encrypted courier
-  copy because arbitrary group members are not trusted custody witnesses.
+  races. A DM accepts a receipt only from a currently admitted device owned by
+  the remote identity; if one confirms custody within 1.5 seconds, the sender
+  skips the relay copy and relies on epidemic forwarding. Another device owned
+  by the sender cannot suppress that fallback. Groups always retain their
+  encrypted courier copy because arbitrary group members are not trusted custody
+  witnesses.
   Invalid, disallowed, revoked-device, and capacity-rejected messages are never
   ACKed. Authenticated LAN discovery remains a deferred README item.
 - **2026-08-25** — **Routine relay work distributed across the live component.**
@@ -1066,7 +1070,7 @@ choices where they conflict with the current-state sections above.
   ids. A node compares itself with its direct neighbours, so the component-wide
   highest priority always self-selects even under partial topology views. The previous
   slot overlaps for 30 seconds, small components keep every peer active, and
-  peerless, handshaking, or tunnel-dependent nodes always perform their own
+  peerless or handshaking nodes always perform their own
   relay work. Standby peers pause announce and courier polling, drain
   identity-addressed signals for 50 seconds, then make staggered fail-safe
   rendezvous, signal, and courier probes at least every two minutes. They
@@ -1085,3 +1089,13 @@ choices where they conflict with the current-state sections above.
   peers retain the normal green status without the icon. Answer-only WebRTC peers
   now poll the signal mailbox immediately instead of repeatedly postponing the
   incoming offer behind the idle poll interval.
+- **2026-08-30** — **Direct-first voice signalling and discovery-only live
+  fallback.** Voice SDP/ICE can now travel over the established parent channel
+  mesh, including bounded same-channel forwarding, before its own relay
+  rendezvous starts. Current voice presence, direct channel peers, and eligible
+  cached channel identities seed those attempts. Successfully peer-routed
+  signals are no longer duplicated to the relay; relay signalling is selected
+  after repeated connection failures. The app-level `/tunnel` data transport
+  and server route were removed, so neither live chat data nor voice can be
+  reported as relay-connected. Persistent caches retain authenticated peer
+  identities, not stale ICE addresses or ephemeral UDP ports.

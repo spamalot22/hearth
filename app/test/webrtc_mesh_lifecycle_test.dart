@@ -20,6 +20,50 @@ Future<void> _waitUntil(bool Function() condition) async {
 }
 
 void main() {
+  test(
+    'child mesh delays relay rendezvous during its P2P grace period',
+    () async {
+      final identity = await Identity.generate();
+      var announces = 0;
+      final client = MockClient((request) async {
+        if (request.method == 'POST' && request.url.path == '/announce') {
+          announces++;
+          return http.Response(
+            jsonEncode({
+              'peers': <String>[],
+              'token': 'token',
+              'relayEpoch': 'epoch',
+            }),
+            200,
+          );
+        }
+        return http.Response(
+          jsonEncode({'signals': <Object>[], 'seq': 0, 'relayEpoch': 'epoch'}),
+          200,
+        );
+      });
+      final mesh = WebRtcMesh(
+        baseUrl: Uri.parse('https://relay.example'),
+        channel: 'voice:channel',
+        identity: identity,
+        client: client,
+        relayFallbackDelay: const Duration(milliseconds: 80),
+        announceInterval: const Duration(hours: 1),
+        idleAnnounceInterval: const Duration(hours: 1),
+        signalPollInterval: const Duration(hours: 1),
+        idleSignalInterval: const Duration(hours: 1),
+      );
+      final subscription = mesh.peerConnected.listen((_) {});
+
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+      expect(announces, 0);
+      await _waitUntil(() => announces == 1);
+
+      await subscription.cancel();
+      await mesh.close();
+    },
+  );
+
   test('forceAnnounce preserves recurring presence announcements', () async {
     final identity = await Identity.generate();
     var announces = 0;
@@ -173,6 +217,11 @@ void main() {
     final signature = hex.encode(
       await peer.sign(presenceSigningBytes('channel', peer.publicKeyHex, ts)),
     );
+    final voiceSignature = hex.encode(
+      await peer.sign(
+        voicePresenceSigningBytes('channel', peer.publicKeyHex, ts),
+      ),
+    );
     var presenceChanges = 0;
     final client = MockClient((request) async {
       if (request.method == 'POST' && request.url.path == '/announce') {
@@ -180,7 +229,13 @@ void main() {
           jsonEncode({
             'peers': <String>[],
             'presence': [
-              {'pubkey': peer.publicKeyHex, 'ts': ts, 'sig': signature},
+              {
+                'pubkey': peer.publicKeyHex,
+                'ts': ts,
+                'sig': signature,
+                'voice': true,
+                'voiceSig': voiceSignature,
+              },
             ],
             'token': 'token',
             'relayEpoch': 'epoch',
@@ -209,7 +264,59 @@ void main() {
     await _waitUntil(() => mesh.relayVisiblePeers.contains(peer.publicKeyHex));
 
     expect(mesh.presentPeers, contains(peer.publicKeyHex));
+    expect(mesh.relayVoicePeers, contains(peer.publicKeyHex));
     expect(presenceChanges, 1);
+    await subscription.cancel();
+    await mesh.close();
+  });
+
+  test('voice heartbeat adds a separately signed announce assertion', () async {
+    final identity = await Identity.generate();
+    final payloads = <Map<String, Object?>>[];
+    final client = MockClient((request) async {
+      if (request.method == 'POST' && request.url.path == '/announce') {
+        payloads.add((jsonDecode(request.body) as Map).cast<String, Object?>());
+        return http.Response(
+          jsonEncode({
+            'peers': <String>[],
+            'token': 'token-${payloads.length}',
+            'relayEpoch': 'epoch',
+          }),
+          200,
+        );
+      }
+      return http.Response(
+        jsonEncode({'signals': <Object>[], 'seq': 0, 'relayEpoch': 'epoch'}),
+        200,
+      );
+    });
+    final mesh = WebRtcMesh(
+      baseUrl: Uri.parse('https://relay.example'),
+      channel: 'channel',
+      identity: identity,
+      client: client,
+      announceInterval: const Duration(hours: 1),
+      idleAnnounceInterval: const Duration(hours: 1),
+      signalPollInterval: const Duration(hours: 1),
+      idleSignalInterval: const Duration(hours: 1),
+    );
+    final subscription = mesh.peerConnected.listen((_) {});
+    await _waitUntil(() => payloads.isNotEmpty);
+
+    mesh.announceVoicePresence(true);
+    await _waitUntil(() => payloads.length >= 2);
+    final voicePayload = payloads.last;
+    expect(voicePayload['voice'], isTrue);
+    expect(
+      await verifyRelayVoicePresenceClaim(
+        channel: 'channel',
+        pubkey: identity.publicKeyHex,
+        timestampMs: voicePayload['ts']! as int,
+        signatureHex: voicePayload['voiceSig']! as String,
+      ),
+      isTrue,
+    );
+
     await subscription.cancel();
     await mesh.close();
   });

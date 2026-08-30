@@ -27,7 +27,7 @@ import { hexToBytes, verifySignature } from './message';
 
 const PRESENCE_TTL_MS = 15_000;
 const SIGNAL_TTL_MS = 30_000;
-const TOKEN_TTL_MS = 60_000; // 60 seconds (signal/search/tunnel only)
+const TOKEN_TTL_MS = 60_000; // 60 seconds (signal/search only)
 const HEX_PUBKEY = /^[0-9a-f]{64}$/i;
 const HEX_SIGNATURE = /^[0-9a-f]{128}$/i;
 const HEX_CAPABILITY = /^[0-9a-f]{64}$/i;
@@ -61,6 +61,8 @@ export interface RelayPresence {
   ts: number;
   sig: string;
   cap?: string;
+  voice?: true;
+  voiceSig?: string;
 }
 
 interface StoredPresence {
@@ -246,6 +248,8 @@ export function addSignalingRoutes(
       ts?: number;
       sig?: string;
       cap?: string;
+      voice?: boolean;
+      voiceSig?: string;
     };
     try {
       body = (await c.req.json()) as typeof body;
@@ -273,6 +277,9 @@ export function addSignalingRoutes(
       ) {
         return c.json({ error: 'invalid presence capability' }, 400);
       }
+      if (body.voice !== undefined && typeof body.voice !== 'boolean') {
+        return c.json({ error: 'invalid voice presence' }, 400);
+      }
       const msg = new TextEncoder().encode(
         `announce|${body.channel}|${body.pubkey}|${ts}`,
       );
@@ -287,6 +294,30 @@ export function addSignalingRoutes(
         valid = false;
       }
       if (!valid) return c.json({ error: 'invalid signature' }, 403);
+      if (body.voice === true) {
+        if (
+          typeof body.voiceSig !== 'string' ||
+          !HEX_SIGNATURE.test(body.voiceSig)
+        ) {
+          return c.json({ error: 'invalid voice presence signature' }, 403);
+        }
+        try {
+          valid = await verifySignature(
+            new TextEncoder().encode(
+              `voice-presence|${body.channel}|${body.pubkey}|${ts}|1`,
+            ),
+            hexToBytes(body.voiceSig),
+            hexToBytes(body.pubkey),
+          );
+        } catch {
+          valid = false;
+        }
+        if (!valid) {
+          return c.json({ error: 'invalid voice presence signature' }, 403);
+        }
+      } else if (body.voiceSig !== undefined) {
+        return c.json({ error: 'unexpected voice presence signature' }, 400);
+      }
       // Use one clock reading for freshness and all state written by this
       // announce, which also keeps injected test clocks deterministic.
       const currentMs = now();
@@ -298,6 +329,9 @@ export function addSignalingRoutes(
         ts,
         sig: body.sig,
         ...(body.cap ? { cap: body.cap } : {}),
+        ...(body.voice === true
+          ? { voice: true as const, voiceSig: body.voiceSig! }
+          : {}),
       };
       const peers = hub.announce(body.channel, body.pubkey, currentMs, claim);
       const presence = hub.peerPresence(body.channel, body.pubkey, currentMs);

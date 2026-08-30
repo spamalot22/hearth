@@ -37,6 +37,7 @@ sealed class MeshControl {
           from: json['from'] as String? ?? '',
           kind: json['kind'] as String? ?? '',
           data: ((json['data'] as Map?) ?? const {}).cast<String, Object?>(),
+          namespace: json['ns'] as String?,
           hopsRemaining:
               (json['hops'] as num?)?.toInt() ?? kDefaultSignalRouteHops,
         ),
@@ -109,6 +110,7 @@ class SignalControl extends MeshControl {
     required this.from,
     required this.kind,
     required this.data,
+    this.namespace,
     this.hopsRemaining = kDefaultSignalRouteHops,
   });
 
@@ -116,6 +118,9 @@ class SignalControl extends MeshControl {
   final String from; // origin pubkey hex
   final String kind; // 'offer' | 'answer' | 'ice'
   final Map<String, Object?> data; // signed signal payload
+  /// Optional target mesh when signalling is carried by a parent channel mesh.
+  /// Currently only `voice:<parent channel>` is accepted by the transport.
+  final String? namespace;
   final int hopsRemaining;
 
   SignalControl forwarded() => SignalControl(
@@ -123,6 +128,7 @@ class SignalControl extends MeshControl {
     from: from,
     kind: kind,
     data: data,
+    namespace: namespace,
     hopsRemaining: hopsRemaining - 1,
   );
 
@@ -133,6 +139,7 @@ class SignalControl extends MeshControl {
     'from': from,
     'kind': kind,
     'data': data,
+    if (namespace != null) 'ns': namespace,
     'hops': hopsRemaining,
   };
 }

@@ -106,6 +106,72 @@ describe('relay', () => {
     expect(publicPoll.messages).toHaveLength(0);
   });
 
+  it('accepts mailbox capabilities in headers without putting them in URLs', async () => {
+    const app = createRelay();
+    const wire = await makeWire('private', 'logical-channel');
+    const mailbox = 'b'.repeat(64);
+    const sent = await app.request('/v2/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-hearth-mailbox': mailbox,
+      },
+      body: JSON.stringify(wire),
+    });
+    expect(sent.status).toBe(200);
+
+    const response = await app.request('/v2/poll?since=0', {
+      headers: { 'x-hearth-mailbox': mailbox },
+    });
+    const body = (await response.json()) as { messages: WireMessage[] };
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]!.id).toBe(wire.id);
+  });
+
+  it('allows the mailbox header in browser CORS preflights', async () => {
+    const app = createRelay();
+    const response = await app.request('/v2/poll', {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'https://app.example',
+        'access-control-request-method': 'GET',
+        'access-control-request-headers': 'x-hearth-mailbox',
+      },
+    });
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get('access-control-allow-headers')).toContain(
+      'x-hearth-mailbox',
+    );
+  });
+
+  it('requires capability headers on versioned courier endpoints', async () => {
+    const app = createRelay();
+    const wire = await makeWire('missing capability');
+    const sent = await app.request('/v2/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(wire),
+    });
+
+    expect(sent.status).toBe(400);
+    expect((await app.request('/v2/poll?channel=general')).status).toBe(400);
+  });
+
+  it('stores retry duplicates only once', async () => {
+    const app = createRelay();
+    const wire = await makeWire('retry');
+
+    const first = (await (await post(app, wire)).json()) as { seq: number };
+    const second = (await (await post(app, wire)).json()) as { seq: number };
+    expect(second.seq).toBe(first.seq);
+
+    const body = (await (
+      await app.request('/poll?channel=general&since=0')
+    ).json()) as { messages: WireMessage[] };
+    expect(body.messages).toHaveLength(1);
+  });
+
   it('rejects a tampered message', async () => {
     const app = createRelay();
     const wire = await makeWire('hello');
@@ -139,6 +205,25 @@ describe('relay', () => {
     expect((await app.request(`/poll?channel=${channel}`)).status).toBe(400);
   });
 
+  it('rejects oversized mailbox headers', async () => {
+    const app = createRelay();
+    const wire = await makeWire('oversized mailbox');
+    const sent = await app.request('/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-hearth-mailbox': 'x'.repeat(257),
+      },
+      body: JSON.stringify(wire),
+    });
+    expect(sent.status).toBe(400);
+    expect(
+      (await app.request('/poll', {
+        headers: { 'x-hearth-mailbox': 'x'.repeat(257) },
+      })).status,
+    ).toBe(400);
+  });
+
   it('returns only messages newer than `since`', async () => {
     const app = createRelay();
     await post(app, await makeWire('m1'));
@@ -155,7 +240,7 @@ describe('relay', () => {
   });
 
   it('reports one relay epoch across health and courier polling', async () => {
-    const app = createRelay(undefined, undefined, undefined, 'test-epoch');
+    const app = createRelay(undefined, undefined, 'test-epoch');
     const health = (await (await app.request('/health')).json()) as {
       relayEpoch: string;
     };
@@ -169,8 +254,9 @@ describe('relay', () => {
 
   it('paginates large backlogs and exposes the channel head', async () => {
     const store = new RelayStore();
-    const wire = await makeWire('message');
-    for (let i = 0; i < 105; i++) store.append(wire);
+    for (let i = 0; i < 105; i++) {
+      store.append(await makeWire(`message ${i}`));
+    }
     const app = createRelay(store);
 
     const first = (await (await app.request(

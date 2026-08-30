@@ -11,10 +11,10 @@ import 'package:http/http.dart' as http;
 
 import 'bounded_download.dart';
 import 'candidate_cache.dart';
+import 'diagnostics.dart';
 import 'mesh_control.dart';
 import 'peer_connection_health.dart';
 import 'peer_signal_router.dart';
-import 'relay_tunnel.dart';
 import 'signal_auth.dart';
 import 'update_checker.dart';
 import 'webrtc_signal_order.dart';
@@ -49,6 +49,10 @@ class WebRtcMesh {
     this.channelAuthKey,
     this.forceInitiator,
     this.candidateCache,
+    this.initialPeers = const <String>{},
+    this.externalSignalSender,
+    this.externalRouteAvailable,
+    this.relayFallbackDelay = Duration.zero,
     this.coordinateRelayDuty = false,
     this.onRelayDutyChanged,
     this.onRelayStandbyProbe,
@@ -136,6 +140,22 @@ class WebRtcMesh {
   /// through a live mesh route, or through relay rendezvous after a cold start.
   final CandidateCache? candidateCache;
 
+  /// Peers already known to be relevant to this short-lived mesh. Voice uses
+  /// current channel occupancy rather than dialling every channel member.
+  final Set<String> initialPeers;
+
+  /// Carries this mesh's authenticated signalling over an already-open parent
+  /// data mesh. The callback returns true only when at least one P2P next hop
+  /// accepted the signal.
+  final Future<bool> Function(SignalControl signal)? externalSignalSender;
+
+  /// Whether the parent mesh currently has a direct or peer-assisted route.
+  final bool Function(String peerHex)? externalRouteAvailable;
+
+  /// Grace period reserved for direct and peer-assisted discovery before relay
+  /// rendezvous is enabled. Ordinary chat meshes use zero for cold starts.
+  final Duration relayFallbackDelay;
+
   /// When true, authenticated direct peers rotate redundant relay-watch duty.
   /// Media/star meshes leave this disabled because their topology differs.
   final bool coordinateRelayDuty;
@@ -181,9 +201,11 @@ class WebRtcMesh {
   // this time, so a flapping peer doesn't thrash the announce loop.
   final Map<String, DateTime> _backoffUntil = {};
   final Map<String, int> _backoffFailures = {}; // consecutive failure count
-  final Map<String, RelayTunnel> _tunnels = {}; // peerHex -> active tunnel
+  final Map<String, String> _signalTransport = {};
+  final Map<String, DateTime> _relayReplyUntil = {};
   final Map<String, List<Map<String, Object?>>> _earlyRemoteIce = {};
   final Map<String, DateTime> _relayPresenceUntil = {};
+  final Map<String, DateTime> _relayVoicePresenceUntil = {};
   late final PeerSignalRouter _peerSignalRouter = PeerSignalRouter(
     selfPeer: selfPubkeyHex,
     channel: channel,
@@ -195,11 +217,14 @@ class WebRtcMesh {
 
   late final StreamController<FrameChannel> _peerConnected =
       StreamController<FrameChannel>.broadcast(onListen: _start);
+  final StreamController<SignalControl> _externalSignals =
+      StreamController<SignalControl>.broadcast();
   Timer? _announceTimer;
   Timer? _signalTimer;
   Timer? _relayDutyTimer;
   Timer? _standbyProbeTimer;
   Timer? _relayPresenceTimer;
+  Timer? _relayFallbackTimer;
   int _signalSince = 0;
   bool _announcing = false;
   bool _pollingSignals = false;
@@ -209,6 +234,8 @@ class WebRtcMesh {
   final Set<String> _intentionalDisconnects = {};
   bool _hasRelayDuty = true;
   bool _standbyProbing = false;
+  bool _localVoicePresent = false;
+  bool _relayFallbackEnabled = false;
   DateTime? _signalDrainUntil;
   static const RelayDutySchedule _relayDutySchedule = RelayDutySchedule();
   static const Duration _signalHandoffDrain = Duration(seconds: 50);
@@ -219,6 +246,9 @@ class WebRtcMesh {
   /// Emits a [FrameChannel] each time a peer's data channel opens; the app wires
   /// a [SyncEngine] session onto each.
   Stream<FrameChannel> get peerConnected => _peerConnected.stream;
+
+  /// Authenticated signalling addressed to a child voice mesh.
+  Stream<SignalControl> get externalSignals => _externalSignals.stream;
 
   /// Peers we currently hold a connection (or attempt) for.
   Iterable<String> get peers => _links.keys;
@@ -241,12 +271,12 @@ class WebRtcMesh {
   Future<void> disconnectPeer(String peerHex) async {
     final link = _links[peerHex];
     if (link != null) {
-      debugPrint('[hearth][$diagnosticLabel] intentional peer disconnect');
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] intentional peer disconnect',
+      );
       _intentionalDisconnects.add(peerHex);
       await link.dispose();
     }
-    final tunnel = _tunnels.remove(peerHex);
-    if (tunnel != null) await tunnel.close();
   }
 
   /// Attempts to connect to a peer learned through an existing mesh link.
@@ -255,6 +285,43 @@ class WebRtcMesh {
       _peerSignalRouter.learnRoute(peerHex, viaPeerHex);
     }
     _maybeInitiate(peerHex);
+  }
+
+  /// Whether this mesh can carry an authenticated child-mesh signal toward
+  /// [peerHex] without contacting the relay.
+  bool canRouteSignalTo(String peerHex) =>
+      _peerSignalRouter.hasPath(peerHex, _openPeerIds);
+
+  /// Routes a signal for this channel's voice child over existing P2P links.
+  /// The envelope is authenticated before forwarding, even on the originating
+  /// device, so malformed child data cannot enter the shared mesh.
+  Future<bool> routeExternalSignal(SignalControl control) async {
+    if (_closed || control.from != selfPubkeyHex) return false;
+    if (!await _peerSignalRouter.authenticate(
+      control,
+      channelAuthKey: channelAuthKey,
+    )) {
+      return false;
+    }
+    if (!_peerSignalRouter.remember(control)) {
+      return canRouteSignalTo(control.to);
+    }
+    return _routeSignal(control);
+  }
+
+  /// Delivers a parent-routed signal into this child mesh. Signature and channel
+  /// capability verification still happen in [_handleSignal].
+  Future<void> receiveExternalSignal(SignalControl control) async {
+    if (_closed ||
+        control.namespace != channel ||
+        control.to != selfPubkeyHex) {
+      return;
+    }
+    await _handleSignal({
+      'from': control.from,
+      'kind': control.kind,
+      'data': control.data,
+    }, routedVia: control.from);
   }
 
   /// Connected peers' underlying connections (peerHex → pc) — for reading voice
@@ -268,17 +335,6 @@ class WebRtcMesh {
   /// Peers with an open direct WebRTC data channel.
   Iterable<String> get connectedPeers => connections.keys;
 
-  /// Peers reachable through a validated encrypted relay tunnel.
-  Iterable<String> get relayConnectedPeers => _tunnels.entries
-      .where((entry) => entry.value.isReady)
-      .map((entry) => entry.key);
-
-  /// Every peer with a currently usable direct or relay-backed data path.
-  Iterable<String> get reachablePeers => {
-    ...connectedPeers,
-    ...relayConnectedPeers,
-  };
-
   /// Peers with a fresh signed relay announcement, whether or not WebRTC opened.
   Iterable<String> get relayVisiblePeers {
     final now = DateTime.now();
@@ -287,21 +343,44 @@ class WebRtcMesh {
         .map((entry) => entry.key);
   }
 
+  /// Peers whose fresh ordinary-channel announcement includes an independently
+  /// verified voice-presence assertion. This is UI occupancy only; it never
+  /// carries voice media or grants access to the separate voice mesh.
+  Iterable<String> get relayVoicePeers {
+    final now = DateTime.now();
+    return _relayVoicePresenceUntil.entries
+        .where((entry) => entry.value.isAfter(now))
+        .map((entry) => entry.key);
+  }
+
   /// Peers known online through either a data path or authenticated presence.
   Iterable<String> get presentPeers => {
-    ...reachablePeers,
+    ...connectedPeers,
     ...relayVisiblePeers,
   };
+
+  /// Updates the optional voice assertion carried by the next ordinary-channel
+  /// relay announcement. Heartbeats deliberately force an announce even when
+  /// the value is unchanged so a standby peer remains visible during a call.
+  void announceVoicePresence(bool active) {
+    _localVoicePresent = active;
+    forceAnnounce();
+  }
 
   void _start() {
     if (_started) return;
     _started = true;
-    // Signalling requires the short-lived token returned by /announce. Dialling
-    // cached peers before this completes makes the first offer fail with 403
-    // and needlessly puts that peer into reconnect backoff.
-    unawaited(_bootstrap());
-    _scheduleAnnounce();
-    _scheduleSignalPoll();
+    // A child media mesh can signal over its established parent without touching
+    // the relay. Only enable rendezvous after that bounded grace period expires.
+    _tryCachedPeers();
+    if (relayFallbackDelay <= Duration.zero) {
+      unawaited(_enableRelayFallback());
+    } else {
+      _relayFallbackTimer = Timer(
+        relayFallbackDelay,
+        () => unawaited(_enableRelayFallback()),
+      );
+    }
     if (coordinateRelayDuty) {
       _relayDutyTimer = Timer.periodic(
         const Duration(seconds: 5),
@@ -310,9 +389,19 @@ class WebRtcMesh {
     }
   }
 
-  Future<void> _bootstrap() async {
+  Future<void> _enableRelayFallback() async {
+    if (_closed || _relayFallbackEnabled) return;
+    _relayFallbackEnabled = true;
+    if (relayFallbackDelay > Duration.zero) {
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] enabling relay rendezvous fallback',
+      );
+    }
     await _announce();
     _tryCachedPeers();
+    if (_closed) return;
+    _scheduleAnnounce();
+    _scheduleSignalPoll();
   }
 
   Iterable<String> get _openPeerIds => _links.entries
@@ -320,8 +409,13 @@ class WebRtcMesh {
       .map((entry) => entry.key);
 
   void _tryCachedPeers() {
-    final cached = candidateCache?.peersToTry(channel) ?? [];
+    final cached = <({String peer, Duration delay})>[
+      for (final peer in initialPeers) (peer: peer, delay: Duration.zero),
+      ...?candidateCache?.peersToTry(channel),
+    ];
+    final attempted = <String>{};
     for (final (:peer, :delay) in cached) {
+      if (!attempted.add(peer)) continue;
       if (delay == Duration.zero) {
         _maybeInitiate(peer);
       } else {
@@ -332,7 +426,7 @@ class WebRtcMesh {
 
   // Announce often while connecting or peerless, rarely once settled.
   void _scheduleAnnounce() {
-    if (_closed) return;
+    if (_closed || !_relayFallbackEnabled) return;
     final delay = (_handshaking || !_connected)
         ? announceInterval
         : idleAnnounceInterval;
@@ -344,7 +438,7 @@ class WebRtcMesh {
 
   // Drain the signal mailbox fast only while a handshake is in flight.
   void _scheduleSignalPoll() {
-    if (_closed) return;
+    if (_closed || !_relayFallbackEnabled) return;
     final delay = _handshaking ? signalPollInterval : idleSignalInterval;
     _signalTimer = Timer(delay, () {
       if (_shouldPollRelaySignals) {
@@ -358,7 +452,7 @@ class WebRtcMesh {
 
   // A handshake just started — reschedule the next poll soon for its replies.
   void _bumpSignalPoll() {
-    if (_closed || _signalTimer == null) return;
+    if (_closed || !_relayFallbackEnabled || _signalTimer == null) return;
     _signalTimer!.cancel();
     _scheduleSignalPoll();
   }
@@ -388,7 +482,6 @@ class WebRtcMesh {
     final active =
         !_connected ||
         _handshaking ||
-        _tunnels.isNotEmpty ||
         _relayDutySchedule.isWorker(
           self: selfPubkeyHex,
           members: directPeers,
@@ -479,7 +572,7 @@ class WebRtcMesh {
 
   /// Forces an immediate re-announce (e.g. after relay recovery).
   void forceAnnounce() {
-    if (_closed) return;
+    if (_closed || !_relayFallbackEnabled) return;
     if (!_hasRelayDuty) _extendSignalDrain();
     _announceTimer?.cancel();
     unawaited(_announce());
@@ -504,7 +597,7 @@ class WebRtcMesh {
       final unhealthyLinks = _links.values
           .where((link) => !link.healthy)
           .toList();
-      debugPrint(
+      HearthDiagnostics.log(
         '[hearth][$diagnosticLabel] lifecycle recovery: '
         'preserving ${_links.length - unhealthyLinks.length} healthy link(s), '
         'replacing ${unhealthyLinks.length}',
@@ -512,22 +605,20 @@ class WebRtcMesh {
       for (final link in unhealthyLinks) {
         await link.dispose();
       }
-      for (final tunnel in _tunnels.values.toList()) {
-        await tunnel.close();
-      }
-      _tunnels.clear();
     } finally {
       _recovering = false;
     }
 
     if (_closed) return;
-    if (_started) {
+    if (_started && _relayFallbackEnabled) {
       _scheduleAnnounce();
       _scheduleSignalPoll();
     }
-    await _announce();
     _tryCachedPeers();
-    await _pollSignals();
+    if (_relayFallbackEnabled) {
+      await _announce();
+      await _pollSignals();
+    }
   }
 
   /// Closes links that no longer satisfy a dynamic admission policy (for
@@ -536,12 +627,6 @@ class WebRtcMesh {
     for (final entry in _links.entries.toList()) {
       if (peerAllowed?.call(entry.key) ?? true) continue;
       await entry.value.dispose();
-    }
-    for (final entry in _tunnels.entries.toList()) {
-      if (peerAllowed?.call(entry.key) ?? true) continue;
-      _tunnels.remove(entry.key);
-      await entry.value.close();
-      onPeerLeft?.call(entry.key);
     }
   }
 
@@ -556,12 +641,21 @@ class WebRtcMesh {
         presenceSigningBytes(channel, selfPubkeyHex, ts),
       );
       final sig = hex.encode(sigBytes);
+      final voiceSig = _localVoicePresent
+          ? hex.encode(
+              await identity.sign(
+                voicePresenceSigningBytes(channel, selfPubkeyHex, ts),
+              ),
+            )
+          : null;
       final authKey = channelAuthKey;
       final payload = jsonEncode({
         'channel': channel,
         'pubkey': selfPubkeyHex,
         'ts': ts,
         'sig': sig,
+        if (voiceSig != null) 'voice': true,
+        'voiceSig': ?voiceSig,
         if (authKey != null)
           'cap': createPresenceCapabilityProof(
             authKey,
@@ -654,20 +748,43 @@ class WebRtcMesh {
           channelKey: channelAuthKey,
           capability: value['cap'],
         );
-        return verified ? pubkey : null;
+        if (!verified) return null;
+        final voiceSignature = value['voiceSig'];
+        final voice =
+            value['voice'] == true &&
+            voiceSignature is String &&
+            await verifyRelayVoicePresenceClaim(
+              channel: channel,
+              pubkey: pubkey,
+              timestampMs: ts,
+              signatureHex: voiceSignature,
+            );
+        return (pubkey: pubkey, voice: voice);
       }),
     );
     if (_closed) return;
 
     final before = relayVisiblePeers.toSet();
+    final voiceBefore = relayVoicePeers.toSet();
     final expires = DateTime.now().add(const Duration(seconds: 20));
     _relayPresenceUntil
       ..clear()
       ..addEntries(
-        valid.whereType<String>().map((peer) => MapEntry(peer, expires)),
+        valid.whereType<({String pubkey, bool voice})>().map(
+          (claim) => MapEntry(claim.pubkey, expires),
+        ),
+      );
+    _relayVoicePresenceUntil
+      ..clear()
+      ..addEntries(
+        valid
+            .whereType<({String pubkey, bool voice})>()
+            .where((claim) => claim.voice)
+            .map((claim) => MapEntry(claim.pubkey, expires)),
       );
     _scheduleRelayPresenceExpiry();
-    if (!setEquals(before, relayVisiblePeers.toSet())) {
+    if (!setEquals(before, relayVisiblePeers.toSet()) ||
+        !setEquals(voiceBefore, relayVoicePeers.toSet())) {
       onRelayPresenceChanged?.call();
     }
   }
@@ -689,10 +806,13 @@ class WebRtcMesh {
   void _expireRelayPresence() {
     if (_closed) return;
     final before = _relayPresenceUntil.keys.toSet();
+    final voiceBefore = _relayVoicePresenceUntil.keys.toSet();
     final now = DateTime.now();
     _relayPresenceUntil.removeWhere((_, expires) => !expires.isAfter(now));
+    _relayVoicePresenceUntil.removeWhere((_, expires) => !expires.isAfter(now));
     _scheduleRelayPresenceExpiry();
-    if (!setEquals(before, relayVisiblePeers.toSet())) {
+    if (!setEquals(before, relayVisiblePeers.toSet()) ||
+        !setEquals(voiceBefore, relayVoicePeers.toSet())) {
       onRelayPresenceChanged?.call();
     }
   }
@@ -735,7 +855,10 @@ class WebRtcMesh {
         for (final raw in signals.take(256)) {
           try {
             if (raw is Map) {
-              await _handleSignal(raw.cast<String, Object?>());
+              await _handleSignal(
+                raw.cast<String, Object?>(),
+                deliveredByRelay: true,
+              );
             }
           } catch (_) {
             // One malformed entry must not hide later signals in the batch.
@@ -771,10 +894,12 @@ class WebRtcMesh {
         _links.length >= _kMaxPeerConnections) {
       return;
     }
-    // A relay token or one existing data-channel route can carry the SDP/ICE.
-    // With neither, this is a true cold start and there is no rendezvous path.
+    // A relay token, an internal route, or a parent data-mesh route can carry
+    // fresh SDP/ICE. With none, wait for peer-assisted discovery or the bounded
+    // relay fallback rather than creating a doomed PeerConnection.
     if (_authToken == null &&
-        !_peerSignalRouter.hasPath(peerHex, _openPeerIds)) {
+        !_peerSignalRouter.hasPath(peerHex, _openPeerIds) &&
+        !(externalRouteAvailable?.call(peerHex) ?? false)) {
       return;
     }
     // Default policy: the greater key offers (one offerer per pair). A forced
@@ -782,11 +907,12 @@ class WebRtcMesh {
     final shouldOffer =
         forceInitiator ?? (selfPubkeyHex.compareTo(peerHex) > 0);
     if (!shouldOffer) {
-      // The answer-only side must drain the offerer's mailbox now. Do not call
+      // The answer-only side waits on either its parent route or relay mailbox.
+      // Do not call
       // _bumpSignalPoll here: while there is no link yet, it selects the idle
       // interval. Repeated five-second announces then keep cancelling and
       // postponing that 15-second timer forever, so the offer is never read.
-      unawaited(_pollSignals());
+      if (_relayFallbackEnabled) unawaited(_pollSignals());
       return;
     }
     final until = _backoffUntil[peerHex];
@@ -795,7 +921,10 @@ class WebRtcMesh {
     unawaited(() async {
       try {
         await link.start();
-      } catch (_) {
+      } catch (error) {
+        HearthDiagnostics.log(
+          '[hearth][$diagnosticLabel] offer failed: ${error.runtimeType}',
+        );
         await link.dispose();
       }
     }());
@@ -805,6 +934,7 @@ class WebRtcMesh {
     Map<String, Object?> signal, {
     String? routedVia,
     bool authenticated = false,
+    bool deliveredByRelay = false,
   }) async {
     final fromValue = signal['from'];
     final kindValue = signal['kind'];
@@ -831,6 +961,9 @@ class WebRtcMesh {
       return;
     }
     if (!_peerSignalRouter.remember(control)) return;
+    if (deliveredByRelay) {
+      _relayReplyUntil[from] = DateTime.now().add(const Duration(seconds: 30));
+    }
     if (routedVia != null) {
       _peerSignalRouter.learnRoute(from, routedVia);
     }
@@ -859,7 +992,11 @@ class WebRtcMesh {
             _bufferEarlyRemoteIce(from, payload);
           }
       }
-    } catch (_) {
+    } catch (error) {
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] $kind handling failed: '
+        '${error.runtimeType}',
+      );
       // One malformed signed SDP/candidate must not abort the mailbox batch or
       // leave a permanently handshaking link behind.
       await _links[from]?.dispose();
@@ -899,6 +1036,8 @@ class WebRtcMesh {
         _links.remove(peerHex);
         _peerSignalRouter.removeNextHop(peerHex);
         _routedSignalRates.remove(peerHex);
+        _signalTransport.remove(peerHex);
+        _relayReplyUntil.remove(peerHex);
         _refreshRelayDuty();
         if (_closed) return;
         if (_recovering) {
@@ -922,13 +1061,6 @@ class WebRtcMesh {
         _backoffUntil[peerHex] = DateTime.now().add(
           Duration(seconds: delaySec),
         );
-        // After 3 consecutive failures, try the relay tunnel (symmetric NAT).
-        if (failures == 3 &&
-            !_closed &&
-            localStream == null &&
-            onRemoteStream == null) {
-          _openTunnel(peerHex);
-        }
         onPeerLeft?.call(peerHex);
       },
     );
@@ -945,10 +1077,8 @@ class WebRtcMesh {
     }
     _backoffUntil.remove(link.peerHex); // connected — reset its backoff
     _backoffFailures.remove(link.peerHex);
+    _relayReplyUntil.remove(link.peerHex);
     _peerSignalRouter.removeNextHop(link.peerHex);
-    // Close any relay tunnel for this peer — direct connection wins.
-    final tunnel = _tunnels.remove(link.peerHex);
-    if (tunnel != null) unawaited(tunnel.close());
     if (!_closed && !_peerConnected.isClosed) _peerConnected.add(link);
     onPeerConnectedHex?.call(link.peerHex);
     // Persist this peer so next startup can try them immediately.
@@ -1028,6 +1158,12 @@ class WebRtcMesh {
     }
 
     if (control.to == selfPubkeyHex) {
+      if (control.namespace != null && control.namespace != channel) {
+        if (!_peerSignalRouter.remember(control)) return;
+        _peerSignalRouter.learnRoute(control.from, fromLinkHex);
+        if (!_externalSignals.isClosed) _externalSignals.add(control);
+        return;
+      }
       await _handleSignal(
         {'from': control.from, 'kind': control.kind, 'data': control.data},
         routedVia: fromLinkHex,
@@ -1068,36 +1204,10 @@ class WebRtcMesh {
     return nextHops.isNotEmpty;
   }
 
-  /// Opens a relay tunnel as a fallback when ICE fails — symmetric NAT on both
-  /// sides can't go direct, so the relay forwards opaque ciphertext.
-  void _openTunnel(String peerHex) {
-    if (!_peerIdPattern.hasMatch(peerHex) ||
-        !(peerAllowed?.call(peerHex) ?? true) ||
-        _tunnels.containsKey(peerHex) ||
-        _tunnels.length >= _kMaxPeerConnections) {
-      return;
-    }
-    late final RelayTunnel tunnel;
-    tunnel = RelayTunnel(
-      baseUrl: _activeUrl,
-      baseUrlProvider: () => _activeUrl,
-      identity: identity,
-      peerPubkeyHex: peerHex,
-      authToken: _authToken,
-      authTokenProvider: () => _authToken,
-      channelAuthKey: channelAuthKey,
-      onReady: () {
-        if (_closed || _tunnels[peerHex] != tunnel) return;
-        onPeerConnectedHex?.call(peerHex);
-        unawaited(candidateCache?.touch(channel, peerHex) ?? Future.value());
-      },
-    );
-    _tunnels[peerHex] = tunnel;
-    _refreshRelayDuty();
-    tunnel.start();
-    if (!_closed && !_peerConnected.isClosed) {
-      _peerConnected.add(tunnel);
-    }
+  void _logSignalTransport(String peerHex, String transport) {
+    if (_signalTransport[peerHex] == transport) return;
+    _signalTransport[peerHex] = transport;
+    HearthDiagnostics.log('[hearth][$diagnosticLabel] signal using $transport');
   }
 
   Future<void> _sendSignal(String to, String kind, Object? data) async {
@@ -1125,18 +1235,29 @@ class WebRtcMesh {
       from: selfPubkeyHex,
       kind: kind,
       data: signed,
+      namespace: externalSignalSender == null ? null : channel,
     );
     if (!_peerSignalRouter.remember(control)) return;
 
-    final routed = _routeSignal(control);
-    if (routed) {
-      // Dual-deliver when a relay token exists. The P2P route is immediate; the
-      // relay copy is best-effort resilience and is deduplicated at receipt.
-      if (_authToken != null) {
-        unawaited(_sendSignalToRelay(control).catchError((Object _) {}));
+    // Try the child mesh, then its established parent mesh. Do not duplicate a
+    // successfully peer-routed handshake to the relay: relay signalling is the
+    // final rendezvous fallback, not a parallel transport.
+    final peerFailures = _backoffFailures[to] ?? 0;
+    final relayReplyUntil = _relayReplyUntil[to];
+    final replyViaRelay =
+        relayReplyUntil != null && DateTime.now().isBefore(relayReplyUntil);
+    if (peerFailures < 3 && !replyViaRelay) {
+      if (_routeSignal(control)) {
+        _logSignalTransport(to, 'child mesh');
+        return;
       }
-      return;
+      final sendExternal = externalSignalSender;
+      if (sendExternal != null && await sendExternal(control)) {
+        _logSignalTransport(to, 'parent mesh');
+        return;
+      }
     }
+    _logSignalTransport(to, 'relay rendezvous');
     await _sendSignalToRelay(control);
   }
 
@@ -1177,19 +1298,20 @@ class WebRtcMesh {
     _relayDutyTimer?.cancel();
     _standbyProbeTimer?.cancel();
     _relayPresenceTimer?.cancel();
+    _relayFallbackTimer?.cancel();
     for (final link in _links.values.toList()) {
       await link.dispose();
     }
     _links.clear();
     _earlyRemoteIce.clear();
     _routedSignalRates.clear();
+    _signalTransport.clear();
+    _relayReplyUntil.clear();
     _relayPresenceUntil.clear();
-    for (final tunnel in _tunnels.values) {
-      await tunnel.close();
-    }
-    _tunnels.clear();
+    _relayVoicePresenceUntil.clear();
     _client.close();
     if (!_peerConnected.isClosed) await _peerConnected.close();
+    if (!_externalSignals.isClosed) await _externalSignals.close();
   }
 }
 
@@ -1321,7 +1443,7 @@ class _PeerLink implements FrameChannel {
     final existing = _pc;
     if (existing != null) return existing;
     final pc = await createPeerConnection({'iceServers': _iceServers});
-    debugPrint(
+    HearthDiagnostics.log(
       '[hearth][$diagnosticLabel] peer connection created '
       'role=${initiator ? 'offerer' : 'answerer'}',
     );
@@ -1336,15 +1458,17 @@ class _PeerLink implements FrameChannel {
     };
     pc.onDataChannel = _wireChannel;
     pc.onConnectionState = (state) {
-      debugPrint('[hearth][$diagnosticLabel] connection state=$state');
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] connection state=$state',
+      );
       _health.handlePeerState(state);
     };
     pc.onIceConnectionState = (state) {
-      debugPrint('[hearth][$diagnosticLabel] ICE state=$state');
+      HearthDiagnostics.log('[hearth][$diagnosticLabel] ICE state=$state');
       _health.handleIceState(state);
     };
     pc.onIceGatheringState = (state) {
-      debugPrint('[hearth][$diagnosticLabel] ICE gathering=$state');
+      HearthDiagnostics.log('[hearth][$diagnosticLabel] ICE gathering=$state');
     };
     // Voice/screen: attach our local media before the offer/answer so it rides
     // in the initial SDP (no renegotiation). Sharers/voice have a localStream;
@@ -1364,7 +1488,7 @@ class _PeerLink implements FrameChannel {
 
   Future<void> _handleRemoteTrack(RTCTrackEvent event) async {
     if (_disposed) return;
-    debugPrint(
+    HearthDiagnostics.log(
       '[hearth][$diagnosticLabel] remote ${event.track.kind} track '
       'streams=${event.streams.length}',
     );
@@ -1391,7 +1515,7 @@ class _PeerLink implements FrameChannel {
       onRemoteStream?.call(peerHex, created);
     } catch (error) {
       await synthetic?.dispose();
-      debugPrint(
+      HearthDiagnostics.log(
         '[hearth][$diagnosticLabel] could not attach streamless '
         '${event.track.kind} track: ${error.runtimeType}',
       );
@@ -1493,7 +1617,9 @@ class _PeerLink implements FrameChannel {
       }
     };
     channel.onDataChannelState = (state) {
-      debugPrint('[hearth][$diagnosticLabel] data channel state=$state');
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] data channel state=$state',
+      );
       if (state == RTCDataChannelState.RTCDataChannelOpen && !_opened) {
         _opened = true;
         _handshakeTimer?.cancel();

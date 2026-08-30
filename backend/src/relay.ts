@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { Hono, type MiddlewareHandler } from 'hono';
+import { Hono, type Handler, type MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { randomBytes } from 'node:crypto';
@@ -19,18 +19,17 @@ import {
   RateLimiter,
   SEARCH_RATE_LIMIT,
   SEARCH_RATE_WINDOW_MS,
-  TUNNEL_IP_RATE_LIMIT,
-  TUNNEL_IP_RATE_WINDOW_MS,
 } from './limits';
 import { type WireMessage, verifyWire } from './message';
 import { SignalHub, addSignalingRoutes } from './signal';
 import { addSoundRoutes } from './sound';
-import { TunnelHub, addTunnelRoutes } from './tunnel';
 
 interface StoredMessage {
   seq: number;
   message: WireMessage;
 }
+
+const RELAY_MAILBOX_HEADER = 'x-hearth-mailbox';
 
 /**
  * In-memory capability-mailbox store for the offline-courier endpoints.
@@ -44,6 +43,14 @@ export class RelayStore {
   append(message: WireMessage, mailbox = message.channel): number {
     const list = this.byChannel.get(mailbox) ?? [];
     this.byChannel.delete(mailbox);
+    const duplicate = list.find((stored) => stored.message.id === message.id);
+    if (duplicate) {
+      // Retries are expected after ambiguous network failures. Touch the
+      // mailbox for LRU purposes, but do not let one envelope consume capacity
+      // repeatedly or advance cursors indefinitely.
+      this.byChannel.set(mailbox, list);
+      return duplicate.seq;
+    }
     const stored: StoredMessage = { seq: ++this.seq, message };
     list.push(stored);
     this.messageCount++;
@@ -106,7 +113,6 @@ function bearerToken(c: { req: { header(name: string): string | undefined } }): 
 export function createRelay(
   store: RelayStore = new RelayStore(),
   signalHub: SignalHub = new SignalHub(),
-  tunnelHub: TunnelHub = new TunnelHub(),
   relayEpoch = randomBytes(16).toString('hex'),
 ): Hono {
   const app = new Hono();
@@ -152,23 +158,10 @@ export function createRelay(
   app.use('/signal', limitIp);
   app.use('/messages', limitIp);
   app.use('/poll', limitIp);
+  app.use('/v2/messages', limitIp);
+  app.use('/v2/poll', limitIp);
   app.use('/gif/*', limitIp);
   app.use('/sound/*', limitIp);
-
-  // Blob fragmentation legitimately uses hundreds of small authenticated
-  // requests, so tunnel traffic has a separate per-IP budget. The tunnel also
-  // enforces token ownership, per-pair rate limits, and global byte quotas.
-  const tunnelIpLimiter = new RateLimiter(
-    TUNNEL_IP_RATE_LIMIT,
-    TUNNEL_IP_RATE_WINDOW_MS,
-  );
-  const limitTunnelIp: MiddlewareHandler = async (c, next) => {
-    if (!tunnelIpLimiter.allow(clientIp(c), Date.now())) {
-      return c.json({ error: 'rate limited' }, 429);
-    }
-    await next();
-  };
-  app.use('/tunnel', limitTunnelIp);
 
   // WebRTC signalling + presence (POST /announce, GET /peers, POST/GET /signal).
   addSignalingRoutes(app, signalHub, relayEpoch);
@@ -196,18 +189,27 @@ export function createRelay(
   // Sound search proxy (Freesound token stays on the relay; CC0-filtered).
   addSoundRoutes(app);
 
-  // Relay tunnel for symmetric-NAT fallback (opaque ciphertext forwarding).
-  addTunnelRoutes(app, tunnelHub, (token, nowMs) =>
-    signalHub.verifyToken(token, nowMs),
-  );
-
   // Accept a signed message: verify it, then store it.
   const messageLimiter = new RateLimiter(MESSAGE_RATE_LIMIT, MESSAGE_RATE_WINDOW_MS);
-  app.post('/messages', async (c) => {
-    const requestedMailbox = c.req.query('mailbox');
-    if (requestedMailbox && !/^[0-9a-f]{32,64}$/.test(requestedMailbox)) {
+  const acceptMessage: Handler = async (c) => {
+    const headerMailbox = c.req.header(RELAY_MAILBOX_HEADER);
+    const versioned = c.req.path === '/v2/messages';
+    const legacyMailbox = versioned ? undefined : c.req.query('mailbox');
+    if (
+      (versioned && headerMailbox === undefined) ||
+      (headerMailbox !== undefined &&
+        (!headerMailbox || headerMailbox.length > MAX_CHANNEL_LENGTH))
+    ) {
       return c.json({ error: 'valid mailbox capability required' }, 400);
     }
+    // Older clients only put private (hex) mailbox overrides in the query.
+    if (
+      legacyMailbox !== undefined &&
+      !/^[0-9a-f]{32,64}$/.test(legacyMailbox)
+    ) {
+      return c.json({ error: 'valid mailbox capability required' }, 400);
+    }
+    const requestedMailbox = headerMailbox ?? legacyMailbox;
     let body: WireMessage;
     try {
       body = (await c.req.json()) as WireMessage;
@@ -230,12 +232,17 @@ export function createRelay(
       ok: true,
       seq: store.append(body, requestedMailbox ?? body.channel),
     });
-  });
+  };
+  app.post('/messages', acceptMessage);
+  app.post('/v2/messages', acceptMessage);
 
   // Short-poll: messages in a channel with seq greater than `since`.
   // The mailbox ID (a random capability) is the auth — no token needed.
-  app.get('/poll', (c) => {
-    const channel = c.req.query('channel');
+  const pollMessages: Handler = (c) => {
+    const versioned = c.req.path === '/v2/poll';
+    const channel =
+      c.req.header(RELAY_MAILBOX_HEADER) ??
+      (versioned ? undefined : c.req.query('channel'));
     if (!channel || channel.length > MAX_CHANNEL_LENGTH) {
       return c.json({ error: 'valid channel required' }, 400);
     }
@@ -255,7 +262,9 @@ export function createRelay(
       more: seq < latestSeq,
       relayEpoch,
     });
-  });
+  };
+  app.get('/poll', pollMessages);
+  app.get('/v2/poll', pollMessages);
 
   return app;
 }

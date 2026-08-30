@@ -20,6 +20,7 @@ void main() {
         from: 'y',
         kind: 'offer',
         data: {'sdp': '...', 'sig': 'deadbeef'},
+        namespace: 'voice:channel',
       ).encode();
 
       final back = MeshControl.decodeBody(splitFrame(wire).body);
@@ -27,8 +28,10 @@ void main() {
       final s = back! as SignalControl;
       expect([s.to, s.from, s.kind], ['x', 'y', 'offer']);
       expect(s.data['sig'], 'deadbeef');
+      expect(s.namespace, 'voice:channel');
       expect(s.hopsRemaining, kDefaultSignalRouteHops);
       expect(s.forwarded().hopsRemaining, kDefaultSignalRouteHops - 1);
+      expect(s.forwarded().namespace, 'voice:channel');
     });
 
     test('legacy SignalControl defaults to the bounded hop limit', () {
@@ -38,7 +41,9 @@ void main() {
       );
 
       expect(back, isA<SignalControl>());
-      expect((back! as SignalControl).hopsRemaining, kDefaultSignalRouteHops);
+      final signal = back! as SignalControl;
+      expect(signal.hopsRemaining, kDefaultSignalRouteHops);
+      expect(signal.namespace, isNull);
     });
 
     test('ScreenShareControl round-trips sharer + active flag', () {

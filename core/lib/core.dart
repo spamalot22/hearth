@@ -32,4 +32,5 @@ export 'src/repository.dart'
     show MessageRepository, RepositoryCapacityException;
 export 'src/storage.dart' show InMemoryMessageStorage, MessageStorage;
 export 'src/sync.dart' show SyncEngine, SyncSession;
-export 'src/transport.dart' show RelayTransport, Transport, TransportException;
+export 'src/transport.dart'
+    show RelayTransport, Transport, TransportException, relayMailboxHeader;

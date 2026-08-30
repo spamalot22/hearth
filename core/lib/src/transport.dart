@@ -7,6 +7,10 @@ import 'package:http/http.dart' as http;
 
 import 'message.dart';
 
+/// Carries the relay storage capability outside the request URL so routine
+/// reverse-proxy access logs do not disclose private mailbox identifiers.
+const relayMailboxHeader = 'x-hearth-mailbox';
+
 /// A bidirectional channel for [Message]s.
 ///
 /// Implementations: [RelayTransport] (HTTP short-poll, here in `core`) and the
@@ -46,12 +50,14 @@ class RelayTransport implements Transport {
     this.baseUrlProvider,
     http.Client? client,
     this.pollInterval = const Duration(seconds: 1),
+    this.requestTimeout = const Duration(seconds: 10),
   }) : _client = client ?? http.Client();
 
   final Uri baseUrl;
   final String channel;
   final String? mailbox;
   final Duration pollInterval;
+  final Duration requestTimeout;
   final http.Client _client;
 
   /// Returns the active relay URL (follows failover). Falls back to [baseUrl].
@@ -69,7 +75,6 @@ class RelayTransport implements Transport {
   String? _relayEpoch;
   Uri? _cursorUrl;
   bool _epochObserved = false;
-  static const _requestTimeout = Duration(seconds: 10);
   static const _maxPollResponseBytes = 8 * 1024 * 1024;
   static const _maxSendResponseBytes = 64 * 1024;
 
@@ -124,18 +129,29 @@ class RelayTransport implements Transport {
 
   @override
   Future<void> send(Message message) async {
-    final request =
-        http.Request(
-            'POST',
-            _url.replace(
-              path: '/messages',
-              queryParameters: mailbox == null ? null : {'mailbox': mailbox!},
-            ),
-          )
-          ..headers['content-type'] = 'application/json'
-          ..body = jsonEncode(message.toJson());
-    final res = await _client.send(request).timeout(_requestTimeout);
-    final responseBody = await _readBounded(res, _maxSendResponseBytes);
+    final url = _url;
+    var request = http.Request('POST', url.replace(path: '/v2/messages'))
+      ..headers['content-type'] = 'application/json'
+      ..headers[relayMailboxHeader] = relayMailbox
+      ..body = jsonEncode(message.toJson());
+    var result = await _perform(request, _maxSendResponseBytes);
+    if (result.$1.statusCode == 404 || result.$1.statusCode == 405) {
+      // Staggered deployment compatibility: old relays do not understand the
+      // versioned/header protocol. Leak the capability into the URL only while
+      // talking to one of those relays so delivery remains available.
+      request =
+          http.Request(
+              'POST',
+              url.replace(
+                path: '/messages',
+                queryParameters: mailbox == null ? null : {'mailbox': mailbox!},
+              ),
+            )
+            ..headers['content-type'] = 'application/json'
+            ..body = jsonEncode(message.toJson());
+      result = await _perform(request, _maxSendResponseBytes);
+    }
+    final (res, responseBody) = result;
     if (res.statusCode != 200) {
       throw TransportException(
         'send failed: HTTP ${res.statusCode} ${utf8.decode(responseBody)}',
@@ -157,19 +173,26 @@ class RelayTransport implements Transport {
       _epochObserved = false;
     }
     _cursorUrl = url;
-    final params = <String, String>{
-      'channel': relayMailbox,
-      'since': '$_since',
-    };
-    final request = http.Request(
+    final params = <String, String>{'since': '$_since'};
+    var request = http.Request(
       'GET',
-      url.replace(path: '/poll', queryParameters: params),
-    );
-    final res = await _client.send(request).timeout(_requestTimeout);
+      url.replace(path: '/v2/poll', queryParameters: params),
+    )..headers[relayMailboxHeader] = relayMailbox;
+    var result = await _perform(request, _maxPollResponseBytes);
+    if (result.$1.statusCode == 404 || result.$1.statusCode == 405) {
+      request = http.Request(
+        'GET',
+        url.replace(
+          path: '/poll',
+          queryParameters: {'channel': relayMailbox, ...params},
+        ),
+      );
+      result = await _perform(request, _maxPollResponseBytes);
+    }
+    final (res, bodyBytes) = result;
     if (res.statusCode != 200) {
       throw TransportException('poll failed: HTTP ${res.statusCode}');
     }
-    final bodyBytes = await _readBounded(res, _maxPollResponseBytes);
     final body = jsonDecode(utf8.decode(bodyBytes)) as Map<String, dynamic>;
     final responseEpoch = body['relayEpoch'];
     if (responseEpoch is String && responseEpoch.isNotEmpty) {
@@ -213,9 +236,19 @@ class RelayTransport implements Transport {
     await _incoming.close();
   }
 
+  Future<(http.StreamedResponse, Uint8List)> _perform(
+    http.Request request,
+    int maxResponseBytes,
+  ) async {
+    final response = await _client.send(request).timeout(requestTimeout);
+    final body = await _readBounded(response, maxResponseBytes, requestTimeout);
+    return (response, body);
+  }
+
   static Future<Uint8List> _readBounded(
     http.StreamedResponse response,
     int maxBytes,
+    Duration timeout,
   ) async {
     final expected = response.contentLength;
     if (expected != null && expected > maxBytes) {
@@ -223,7 +256,7 @@ class RelayTransport implements Transport {
     }
     final bytes = BytesBuilder(copy: false);
     var length = 0;
-    await for (final chunk in response.stream) {
+    await for (final chunk in response.stream.timeout(timeout)) {
       length += chunk.length;
       if (length > maxBytes) {
         throw TransportException('relay response exceeds $maxBytes bytes');

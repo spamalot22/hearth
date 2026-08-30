@@ -95,6 +95,40 @@ void main() {
           isFalse,
         );
       });
+
+      test(
+        'voice presence is independently signed and channel-bound',
+        () async {
+          final now = DateTime.now().toUtc();
+          final ts = now.millisecondsSinceEpoch;
+          final signature = hex.encode(
+            await alice.sign(
+              voicePresenceSigningBytes('room', alice.publicKeyHex, ts),
+            ),
+          );
+
+          expect(
+            await verifyRelayVoicePresenceClaim(
+              channel: 'room',
+              pubkey: alice.publicKeyHex,
+              timestampMs: ts,
+              signatureHex: signature,
+              now: now,
+            ),
+            isTrue,
+          );
+          expect(
+            await verifyRelayVoicePresenceClaim(
+              channel: 'other-room',
+              pubkey: alice.publicKeyHex,
+              timestampMs: ts,
+              signatureHex: signature,
+              now: now,
+            ),
+            isFalse,
+          );
+        },
+      );
     });
 
     test('a correctly signed offer verifies', () async {

@@ -14,6 +14,7 @@ Future<SignalControl> _signedSignal({
   String kind = 'offer',
   Map<String, Object?> data = const {'sdp': 'v=0', 'type': 'offer'},
   Uint8List? channelKey,
+  String? namespace,
   int hops = kDefaultSignalRouteHops,
 }) async {
   final signed = <String, Object?>{
@@ -35,6 +36,7 @@ Future<SignalControl> _signedSignal({
     from: from.publicKeyHex,
     kind: kind,
     data: signed,
+    namespace: namespace,
     hopsRemaining: hops,
   );
 }
@@ -123,6 +125,33 @@ void main() {
       data: {...signal.data, 'sdp': 'substituted'},
     );
     expect(await router.authenticate(forged, channelAuthKey: key), isFalse);
+  });
+
+  test('allows only the parent channel voice namespace', () async {
+    final sender = await Identity.generate();
+    final recipient = await Identity.generate();
+    final key = Uint8List.fromList(List<int>.generate(32, (index) => index));
+    final router = PeerSignalRouter(
+      selfPeer: recipient.publicKeyHex,
+      channel: 'group',
+    );
+    final voice = await _signedSignal(
+      from: sender,
+      to: recipient.publicKeyHex,
+      channel: 'voice:group',
+      channelKey: key,
+      namespace: 'voice:group',
+    );
+    final unrelated = await _signedSignal(
+      from: sender,
+      to: recipient.publicKeyHex,
+      channel: 'voice:other-group',
+      channelKey: key,
+      namespace: 'voice:other-group',
+    );
+
+    expect(await router.authenticate(voice, channelAuthKey: key), isTrue);
+    expect(await router.authenticate(unrelated, channelAuthKey: key), isFalse);
   });
 
   test('rejects malformed, oversized, and over-hopped signals', () async {

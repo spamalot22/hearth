@@ -57,14 +57,6 @@ export const MESSAGE_RATE_WINDOW_MS = 10_000;
 export const IP_RATE_LIMIT = 300;
 export const IP_RATE_WINDOW_MS = 60_000;
 
-/** Per-pair tunnel fragments per window (a 10 MB blob needs about 350). */
-export const TUNNEL_RATE_LIMIT = 600;
-export const TUNNEL_RATE_WINDOW_MS = 60_000;
-
-/** Per-IP tunnel requests per window; separate from lightweight relay routes. */
-export const TUNNEL_IP_RATE_LIMIT = 1200;
-export const TUNNEL_IP_RATE_WINDOW_MS = 60_000;
-
 /**
  * A simple sliding-window rate limiter. Keyed (e.g. by pubkey, or a constant for a
  * relay-wide cap). `now` is passed in so it's deterministic to test. In-memory, so

@@ -84,7 +84,11 @@ describe('signalling routes', () => {
     });
   }
 
-  async function signedAnnounce(channel: string, cap?: string) {
+  async function signedAnnounce(
+    channel: string,
+    cap?: string,
+    voice = false,
+  ) {
     const seed = ed.utils.randomPrivateKey();
     const pubkey = Buffer.from(await ed.getPublicKeyAsync(seed)).toString('hex');
     const ts = Date.now();
@@ -94,7 +98,24 @@ describe('signalling routes', () => {
         seed,
       ),
     ).toString('hex');
-    return { channel, pubkey, ts, sig, ...(cap ? { cap } : {}) };
+    const voiceSig = voice
+      ? Buffer.from(
+        await ed.signAsync(
+          new TextEncoder().encode(
+            `voice-presence|${channel}|${pubkey}|${ts}|1`,
+          ),
+          seed,
+        ),
+      ).toString('hex')
+      : undefined;
+    return {
+      channel,
+      pubkey,
+      ts,
+      sig,
+      ...(cap ? { cap } : {}),
+      ...(voiceSig ? { voice: true, voiceSig } : {}),
+    };
   }
 
   it('returns verifiable relay-presence evidence unchanged', async () => {
@@ -132,6 +153,29 @@ describe('signalling routes', () => {
     });
 
     expect(response.status).toBe(400);
+  });
+
+  it('relays only correctly signed voice presence assertions', async () => {
+    const app = createRelay();
+    const channel = 'voice-status-room';
+    const alice = await signedAnnounce(channel, undefined, true);
+    const bob = await signedAnnounce(channel);
+
+    expect((await postJson(app, '/announce', alice)).status).toBe(200);
+    const response = await postJson(app, '/announce', bob);
+    const body = (await response.json()) as {
+      presence: Array<{ voice?: boolean; voiceSig?: string }>;
+    };
+    expect(body.presence[0]?.voice).toBe(true);
+    expect(body.presence[0]?.voiceSig).toBe(alice.voiceSig);
+
+    const forged = await signedAnnounce('forged-voice-room');
+    const rejected = await postJson(app, '/announce', {
+      ...forged,
+      voice: true,
+      voiceSig: '0'.repeat(128),
+    });
+    expect(rejected.status).toBe(403);
   });
 
   it('announce -> signal round-trips', async () => {

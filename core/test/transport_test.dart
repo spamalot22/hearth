@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -9,6 +10,17 @@ import 'package:test/test.dart';
 
 Uint8List _b(String s) => Uint8List.fromList(utf8.encode(s));
 
+class _StreamingClient extends http.BaseClient {
+  _StreamingClient(this.handler);
+
+  final Future<http.StreamedResponse> Function(http.BaseRequest request)
+  handler;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+      handler(request);
+}
+
 void main() {
   group('RelayTransport', () {
     late Identity author;
@@ -17,7 +29,7 @@ void main() {
       author = await Identity.generate();
     });
 
-    test('send POSTs the message envelope to /messages', () async {
+    test('send POSTs the message envelope to /v2/messages', () async {
       http.Request? captured;
       final client = MockClient((req) async {
         captured = req;
@@ -37,16 +49,16 @@ void main() {
       await transport.send(m);
 
       expect(captured!.method, 'POST');
-      expect(captured!.url.path, '/messages');
+      expect(captured!.url.path, '/v2/messages');
       final body = jsonDecode(captured!.body) as Map<String, dynamic>;
       expect(body['id'], m.toJson()['id']);
     });
 
     test('uses a private mailbox without changing signed channel', () async {
       final mailbox = 'a' * 64;
-      final seen = <Uri>[];
+      final seen = <http.Request>[];
       final client = MockClient((request) async {
-        seen.add(request.url);
+        seen.add(request);
         if (request.method == 'POST') {
           return http.Response('{"ok":true}', 200);
         }
@@ -67,9 +79,49 @@ void main() {
       await transport.send(message);
       await transport.poll();
 
-      expect(seen[0].queryParameters['mailbox'], mailbox);
-      expect(seen[1].queryParameters['channel'], mailbox);
+      expect(seen[0].headers[relayMailboxHeader], mailbox);
+      expect(seen[1].headers[relayMailboxHeader], mailbox);
+      expect(seen[0].url.queryParameters['mailbox'], isNull);
+      expect(seen[1].url.queryParameters['channel'], isNull);
       expect(message.channel, 'logical-channel');
+    });
+
+    test('falls back to legacy mailbox URLs for an older relay', () async {
+      final mailbox = 'c' * 64;
+      final seen = <http.Request>[];
+      final client = MockClient((request) async {
+        seen.add(request);
+        if (request.url.path.startsWith('/v2/')) {
+          return http.Response('not found', 404);
+        }
+        if (request.method == 'POST') {
+          return http.Response('{"ok":true}', 200);
+        }
+        return http.Response('{"messages":[],"seq":0}', 200);
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'logical-channel',
+        mailbox: mailbox,
+        client: client,
+      );
+      final message = await Message.create(
+        author: author,
+        channel: 'logical-channel',
+        payload: _b('legacy'),
+      );
+
+      await transport.send(message);
+      await transport.poll();
+
+      expect(seen.map((request) => request.url.path), [
+        '/v2/messages',
+        '/messages',
+        '/v2/poll',
+        '/poll',
+      ]);
+      expect(seen[1].url.queryParameters['mailbox'], mailbox);
+      expect(seen[3].url.queryParameters['channel'], mailbox);
     });
 
     test('send throws on a non-200 response', () async {
@@ -383,6 +435,20 @@ void main() {
       expect(called, isTrue);
     });
 
+    test('times out when the relay stalls while streaming a body', () async {
+      final client = _StreamingClient((request) async {
+        return http.StreamedResponse(StreamController<List<int>>().stream, 200);
+      });
+      final transport = RelayTransport(
+        baseUrl: Uri.parse('http://relay.test'),
+        channel: 'general',
+        client: client,
+        requestTimeout: const Duration(milliseconds: 10),
+      );
+
+      await expectLater(transport.poll(), throwsA(isA<TimeoutException>()));
+    });
+
     test('baseUrlProvider overrides baseUrl for poll and send', () async {
       final captured = <Uri>[];
       final client = MockClient((req) async {
@@ -412,9 +478,9 @@ void main() {
       await transport.send(m);
 
       expect(captured[0].host, 'fallback.test');
-      expect(captured[0].path, '/poll');
+      expect(captured[0].path, '/v2/poll');
       expect(captured[1].host, 'fallback.test');
-      expect(captured[1].path, '/messages');
+      expect(captured[1].path, '/v2/messages');
     });
 
     test(

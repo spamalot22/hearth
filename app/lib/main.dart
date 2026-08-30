@@ -40,6 +40,7 @@ import 'contacts.dart';
 import 'content.dart';
 import 'device_keys.dart';
 import 'device_store.dart';
+import 'diagnostics.dart';
 import 'emoji_picker.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
@@ -1319,6 +1320,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, Set<String>> _voicePresence = {}; // channelId -> peerHexes
   final Map<String, DateTime> _voicePresenceTs = {}; // peerHex -> last seen
   Timer? _voicePresenceTimer;
+  Timer? _voicePresenceExpiryTimer;
+  static const Duration _voicePresenceTtl = Duration(seconds: 45);
   Timer? _updateCheckTimer;
   // Read receipts: per-peer watermark (channelId -> (peerHex -> messageIdHex))
   final Map<String, Map<String, String>> _readWatermarks = {};
@@ -1949,13 +1952,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             }
           }
         }
-        // Prune stale entries (>30s without refresh).
-        final cutoff = DateTime.now().subtract(const Duration(seconds: 30));
-        _voicePresenceTs.removeWhere((_, ts) => ts.isBefore(cutoff));
-        for (final set in _voicePresence.values) {
-          set.removeWhere((h) => !_voicePresenceTs.containsKey(h));
-        }
+        _pruneVoicePresenceEntries();
       });
+      if (control.channelId.isNotEmpty && _voice?.channelId == channelId) {
+        _voice?.connectTo(fromHex);
+      }
+      _scheduleVoicePresenceExpiry();
       return;
     }
     if (control is ReadWatermarkControl &&
@@ -2844,7 +2846,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     for (final s in _channels?.sessions ?? <ChannelSession>[]) {
       final mesh = s.mesh;
       if (mesh == null) continue;
-      result.addAll(mesh.relayConnectedPeers.map(_rootHexForPeer));
       // Presence is status evidence, not membership evidence. Unknown device
       // keys remain hidden until a root-signed message or bundle maps them to a
       // locally known identity, avoiding duplicate/phantom group members.
@@ -2879,7 +2880,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final self = widget.identity.publicKeyHex;
     final msgCount = session.repository.length;
     final connectedRoots = <String>{
-      for (final peer in session.mesh?.reachablePeers ?? const <String>[])
+      for (final peer in session.mesh?.connectedPeers ?? const <String>[])
         _rootHexForPeer(peer),
     }..remove(self);
     final knownRoots = <String>{
@@ -3136,16 +3137,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final all = <String>{};
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
       final mesh = session.mesh;
-      if (mesh != null) all.addAll(mesh.reachablePeers);
+      if (mesh != null) all.addAll(mesh.connectedPeers);
     }
     return all.length;
   }
 
   int _totalRelayPeerCount() {
     final all = <String>{};
+    final direct = <String>{};
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
-      all.addAll(session.mesh?.relayConnectedPeers ?? const <String>[]);
+      final mesh = session.mesh;
+      if (mesh == null) continue;
+      all.addAll(mesh.relayVisiblePeers);
+      direct.addAll(mesh.connectedPeers);
     }
+    all.removeAll(direct);
     return all.length;
   }
 
@@ -3154,18 +3160,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final relayPeers = _totalRelayPeerCount();
     final Color color;
     final String label;
-    if (_relayUp == true && peers > relayPeers) {
+    if (peers > 0 && _relayUp == true) {
       color = Colors.green;
       label = 'Connected';
-    } else if (_relayUp == true && relayPeers > 0) {
-      color = Colors.green;
-      label = 'Relay connected';
-    } else if (_relayUp == true) {
-      color = Colors.green;
-      label = 'Relay only';
     } else if (peers > 0) {
       color = Colors.amber;
       label = 'Peers only';
+    } else if (_relayUp == true && relayPeers > 0) {
+      color = Colors.green;
+      label = 'Relay discovery';
+    } else if (_relayUp == true) {
+      color = Colors.green;
+      label = 'Relay only';
     } else {
       color = Colors.red;
       label = 'Offline';
@@ -4059,6 +4065,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             },
             onRefresh: () => unawaited(_checkRelay()),
           ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(
+                ClipboardData(text: HearthDiagnostics.snapshot()),
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Diagnostics copied')),
+                );
+              }
+            },
+            icon: const Icon(Icons.copy_all_outlined),
+            label: const Text('Copy diagnostics'),
+          ),
         ],
       ),
     );
@@ -4428,6 +4449,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _linkSub?.cancel();
     _voicePresenceTimer?.cancel();
+    _voicePresenceExpiryTimer?.cancel();
     _updateCheckTimer?.cancel();
     unawaited(_channels?.close());
     unawaited(_broadcast?.stop());
@@ -5383,6 +5405,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     try {
+      final channelSession = _channels?.sessions
+          .where((session) => session.channelId == channelId)
+          .firstOrNull;
+      final initialVoicePeers = <String>{
+        ...?_voicePresence[channelId],
+        ...?channelSession?.relayVoicePeers,
+        ...?channelSession?.mesh?.connectedPeers,
+        for (final candidate
+            in _channels?.candidateCache?.peersToTry(channelId) ??
+                const <({String peer, Duration delay})>[])
+          candidate.peer,
+      }..remove(widget.deviceKeys.publicKeyHex);
       _voice = await VoiceSession.join(
         channelId: channelId,
         identity: widget.identity,
@@ -5394,6 +5428,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         audioInputId: _settings?.audioInputDevice,
         audioOutputId: _settings?.audioOutputDevice,
         candidateCache: _channels?.candidateCache,
+        signalingMesh: channelSession?.mesh,
+        initialPeers: initialVoicePeers,
         channelAuthKey: _groups[channelId]?.key,
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
@@ -5450,16 +5486,51 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (actualChannel == null) return;
     for (final session in _channels?.sessions ?? const <ChannelSession>[]) {
       if (session.channelId == actualChannel) {
+        session.announceVoicePresence(channelId.isNotEmpty);
         session.broadcast(VoicePresenceControl(channelId: channelId));
         return;
       }
     }
   }
 
-  Set<String> _voiceMembersFor(String channelId) => {
-    for (final peer in _voicePresence[channelId] ?? const <String>{})
-      _rootHexForPeer(peer),
-  }..remove(widget.identity.publicKeyHex);
+  void _pruneVoicePresenceEntries() {
+    final cutoff = DateTime.now().subtract(_voicePresenceTtl);
+    _voicePresenceTs.removeWhere((_, ts) => !ts.isAfter(cutoff));
+    for (final set in _voicePresence.values) {
+      set.removeWhere((peer) => !_voicePresenceTs.containsKey(peer));
+    }
+  }
+
+  void _scheduleVoicePresenceExpiry() {
+    _voicePresenceExpiryTimer?.cancel();
+    _voicePresenceExpiryTimer = null;
+    if (_voicePresenceTs.isEmpty || !mounted) return;
+    final earliest = _voicePresenceTs.values.reduce(
+      (a, b) => a.isBefore(b) ? a : b,
+    );
+    final expiresAt = earliest.add(_voicePresenceTtl);
+    final delay = expiresAt.difference(DateTime.now());
+    _voicePresenceExpiryTimer = Timer(
+      delay.isNegative ? Duration.zero : delay,
+      () {
+        if (!mounted) return;
+        setState(_pruneVoicePresenceEntries);
+        _scheduleVoicePresenceExpiry();
+      },
+    );
+  }
+
+  Set<String> _voiceMembersFor(String channelId) {
+    final session = _channels?.sessions
+        .where((candidate) => candidate.channelId == channelId)
+        .firstOrNull;
+    return {
+      for (final peer in _voicePresence[channelId] ?? const <String>{})
+        _rootHexForPeer(peer),
+      for (final peer in session?.relayVoicePeers ?? const <String>[])
+        _rootHexForPeer(peer),
+    }..remove(widget.identity.publicKeyHex);
+  }
 
   Future<void> _leaveVoice() async {
     try {

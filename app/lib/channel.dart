@@ -221,6 +221,10 @@ class ChannelSession {
   /// The underlying WebRTC mesh (for peer count / connectivity status).
   WebRtcMesh? get mesh => _mesh;
 
+  /// Authenticated relay-fallback voice occupancy observed for this channel.
+  Iterable<String> get relayVoicePeers =>
+      _mesh?.relayVoicePeers ?? const <String>[];
+
   /// The relay poll cursor (seq) the courier has caught up to, or null if this
   /// session has no live courier. Used to seed the background poller's baseline.
   int? get relaySince => _relayCourier?.since;
@@ -254,6 +258,7 @@ class ChannelSession {
     void Function(Map<String, Object?> manifest)? onVersionControl,
     void Function(String peerHex, bool typing)? onTyping,
     bool Function(String peerHex)? peerAllowed,
+    bool Function(String peerHex)? peerReceiptAllowed,
     void Function(String fromHex, String channelId, MeshControl control)?
     onInference,
   }) async {
@@ -268,7 +273,7 @@ class ChannelSession {
       blobStore: blobStore,
       isDeviceRevoked: isDeviceRevoked,
       messageAllowed: messageAllowed,
-      peerReceiptAllowed: peerAllowed,
+      peerReceiptAllowed: peerReceiptAllowed ?? peerAllowed,
     );
     final updatesSub = engine.updates.listen((_) => onUpdate());
     // A fetched blob arriving just triggers a refresh; refreshContent loads it
@@ -396,9 +401,17 @@ class ChannelSession {
     }
   }
 
-  /// Publishes over P2P first. A DM can skip its relay copy after an admitted
-  /// participant confirms durable receipt; groups always retain the courier
-  /// fallback because a group member is not a trusted custody witness.
+  /// Adds or clears our signed voice-occupancy assertion on the channel's next
+  /// relay announcement. This is only a fallback for UI presence; media never
+  /// traverses the relay.
+  void announceVoicePresence(bool active) {
+    _mesh?.announceVoicePresence(active);
+  }
+
+  /// Publishes over P2P first. A DM can skip its relay copy only after a device
+  /// owned by the remote identity confirms durable receipt; groups always
+  /// retain the courier fallback because a group member is not a trusted
+  /// custody witness.
   Future<void> publish(Message message) async {
     final peerStored = await engine.publish(
       message,
@@ -789,6 +802,15 @@ class ChannelManager {
         !(isDeviceRevoked?.call(rootHex, peerHex) ?? false);
   }
 
+  /// A storage ACK may suppress the DM's courier copy only when it came from a
+  /// device belonging to the remote identity. Another one of our own devices is
+  /// a valid mesh participant but does not prove the recipient has custody.
+  bool _dmPeerReceiptAllowed(String peerRootHex, String peerHex) {
+    final rootHex = _dmPeerRoot(peerRootHex, peerHex);
+    return rootHex == peerRootHex &&
+        !(isDeviceRevoked?.call(peerRootHex, peerHex) ?? false);
+  }
+
   String? _dmPeerRoot(String peerRootHex, String peerHex) {
     if (peerHex == identity.publicKeyHex) {
       return identity.publicKeyHex;
@@ -859,6 +881,8 @@ class ChannelManager {
           candidateCache: candidateCache,
           peerAllowed: (peerHex) =>
               _dmPeerAllowed(hex.encode(peerPubkey), peerHex),
+          peerReceiptAllowed: (peerHex) =>
+              _dmPeerReceiptAllowed(hex.encode(peerPubkey), peerHex),
           onPeerConnected: _broadcastContactsOnline,
           // For DMs we know the peer's root identity; fire with that (not the
           // connecting device's mesh key) so DM persistence resolves correctly.

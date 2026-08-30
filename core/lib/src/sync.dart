@@ -47,8 +47,8 @@ class SyncEngine {
   final bool Function(Message message)? messageAllowed;
 
   /// Optional dynamic policy for accepting storage receipts from a peer. DMs
-  /// use the same root/device admission policy as their mesh so a revoked or
-  /// unrelated device cannot suppress the courier fallback with an ACK.
+  /// admit both identities' devices to the mesh, but accept courier-suppressing
+  /// receipts only from an active device owned by the remote identity.
   final bool Function(String peerHex)? peerReceiptAllowed;
 
   final Set<SyncSession> _sessions = {};

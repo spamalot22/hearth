@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'candidate_cache.dart';
+import 'diagnostics.dart';
 import 'mesh_control.dart';
 import 'webrtc_mesh.dart';
 
@@ -43,6 +44,7 @@ class VoiceSession {
   // peerHex -> a renderer bound to their remote stream (drives web playback).
   final Map<String, RTCVideoRenderer> _remotes = {};
   StreamSubscription<void>? _sub;
+  StreamSubscription<SignalControl>? _externalSignalSub;
   Timer? _levelTimer;
   final Map<String, double> _levels = {}; // 'self' or peerHex -> 0..1 level
   final Map<String, MediaStream> _remoteStreams = {}; // peerHex -> their stream
@@ -82,6 +84,12 @@ class VoiceSession {
     if (!_closed) await _mesh.recoverConnections();
   }
 
+  /// Attempts a direct voice link to a participant discovered on the parent
+  /// channel mesh. Fresh ICE is routed over that mesh before relay rendezvous.
+  void connectTo(String peerHex) {
+    if (!_closed) _mesh.maybeInitiateVia(peerHex);
+  }
+
   /// Requests the mic and joins [channelId]'s voice mesh. Throws if mic access
   /// is denied.
   static Future<VoiceSession> join({
@@ -95,28 +103,45 @@ class VoiceSession {
     String? audioInputId,
     String? audioOutputId,
     CandidateCache? candidateCache,
+    WebRtcMesh? signalingMesh,
+    Set<String> initialPeers = const <String>{},
     bool Function(String peerHex)? peerAllowed,
     Uint8List? channelAuthKey,
   }) async {
-    // On Windows desktop, plain `audio: true` can pick a non-functional
-    // default. Enumerate devices and explicitly target the first audioinput so
-    // the native WebRTC layer opens the correct capture device.
-    // On mobile, the OS handles device routing — skip the probe.
+    // On desktop, select devices before opening the first real capture stream.
+    // Windows WebRTC can lock its audio module to whichever defaults the first
+    // getUserMedia call used, so a permission "probe" must not open and close a
+    // throwaway microphone before the configured devices are applied.
     Object audioConstraint = true;
     String? activeOutputId = audioOutputId;
     if (defaultTargetPlatform != TargetPlatform.android &&
         defaultTargetPlatform != TargetPlatform.iOS) {
       try {
-        // Trigger permission grant first (Windows needs this for labels).
-        final probe = await navigator.mediaDevices.getUserMedia({
-          'audio': true,
-          'video': false,
-        });
-        for (final t in probe.getTracks()) {
-          await t.stop();
+        if (kIsWeb) {
+          // Browsers may withhold labels until permission has been granted.
+          final probe = await navigator.mediaDevices.getUserMedia({
+            'audio': true,
+            'video': false,
+          });
+          for (final track in probe.getTracks()) {
+            await track.stop();
+          }
+          await probe.dispose();
         }
-        await probe.dispose();
-        final devices = await navigator.mediaDevices.enumerateDevices();
+
+        var devices = await navigator.mediaDevices.enumerateDevices();
+        if (!kIsWeb &&
+            devices.every((device) => device.kind != 'audioinput') &&
+            (defaultTargetPlatform == TargetPlatform.windows ||
+                defaultTargetPlatform == TargetPlatform.linux)) {
+          // The native desktop plugin may not enumerate until its factory has
+          // been initialized. A PeerConnection does that without opening the
+          // microphone or fixing the audio module to a default device.
+          final pc = await createPeerConnection({});
+          await pc.close();
+          await pc.dispose();
+          devices = await navigator.mediaDevices.enumerateDevices();
+        }
         final mic = preferredAudioDevice(devices, 'audioinput', audioInputId);
         final output = kIsWeb
             ? null
@@ -130,7 +155,31 @@ class VoiceSession {
             enhancedNoiseSuppression: enhancedNoiseSuppression,
           );
         }
-      } catch (_) {
+        if (!kIsWeb) {
+          var inputSelected = mic == null;
+          var outputSelected = output == null;
+          if (mic != null) {
+            try {
+              await Helper.selectAudioInput(mic.deviceId);
+              inputSelected = true;
+            } catch (_) {}
+          }
+          if (output != null) {
+            try {
+              await Helper.selectAudioOutput(output.deviceId);
+              outputSelected = true;
+            } catch (_) {}
+          }
+          HearthDiagnostics.log(
+            '[hearth][voice] desktop devices selected '
+            'input=$inputSelected output=$outputSelected',
+          );
+        }
+      } catch (error) {
+        HearthDiagnostics.log(
+          '[hearth][voice] desktop device initialization failed: '
+          '${error.runtimeType}',
+        );
         // Fall through with default constraint.
       }
     } else if (enhancedNoiseSuppression) {
@@ -147,7 +196,11 @@ class VoiceSession {
         'audio': audioConstraint,
         'video': false,
       });
-    } catch (_) {
+    } catch (error) {
+      HearthDiagnostics.log(
+        '[hearth][voice] constrained microphone open failed: '
+        '${error.runtimeType}; retrying default',
+      );
       stream = await navigator.mediaDevices.getUserMedia({
         'audio': true,
         'video': false,
@@ -157,56 +210,69 @@ class VoiceSession {
     for (final track in stream.getAudioTracks()) {
       track.enabled = true;
     }
-
-    // Retry through the public API before creating the peer connection. The
-    // constraint above is the reliable Windows path; this also covers other
-    // native desktop implementations and reports a useful diagnostic.
-    if (!kIsWeb &&
-        defaultTargetPlatform != TargetPlatform.android &&
-        defaultTargetPlatform != TargetPlatform.iOS &&
-        activeOutputId != null &&
-        activeOutputId.isNotEmpty) {
-      try {
-        await Helper.selectAudioOutput(activeOutputId);
-        debugPrint('[hearth][voice] desktop audio output selected');
-      } catch (error) {
-        debugPrint(
-          '[hearth][voice] desktop audio output selection failed: '
-          '${error.runtimeType}',
-        );
-        // Keep joining: a renderer can retry once the remote stream arrives.
+    HearthDiagnostics.log(
+      '[hearth][voice] local audio stream ready '
+      'tracks=${stream.getAudioTracks().length}',
+    );
+    VoiceSession? session;
+    WebRtcMesh? mesh;
+    try {
+      mesh = WebRtcMesh(
+        baseUrl: relayUrl,
+        fallbackUrls: fallbackUrls,
+        channel: 'voice:$channelId',
+        identity: meshIdentity ?? identity,
+        localStream: stream,
+        candidateCache: candidateCache,
+        initialPeers: initialPeers,
+        externalSignalSender: signalingMesh?.routeExternalSignal,
+        externalRouteAvailable: signalingMesh?.canRouteSignalTo,
+        relayFallbackDelay: signalingMesh == null
+            ? Duration.zero
+            : const Duration(seconds: 35),
+        peerAllowed: peerAllowed,
+        channelAuthKey: channelAuthKey,
+        diagnosticLabel: 'voice',
+        onRemoteStream: (peerHex, remote) =>
+            unawaited(session?._onRemote(peerHex, remote)),
+        onPeerLeft: (peerHex) => session?._onPeerLeft(peerHex),
+        onControl: (peer, control) => session?._onControl(peer, control),
+      );
+      session = VoiceSession._(
+        channelId,
+        mesh,
+        stream,
+        onChange,
+        activeOutputId,
+      );
+      session._externalSignalSub = signalingMesh?.externalSignals
+          .where((signal) => signal.namespace == 'voice:$channelId')
+          .listen((signal) => unawaited(mesh!.receiveExternalSignal(signal)));
+      // The mesh only starts announcing once peerConnected is listened to.
+      session._sub = mesh.peerConnected.listen((_) => session?._onChange());
+      // On mobile, route audio to speaker (not earpiece) by default.
+      if (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS) {
+        await Helper.setSpeakerphoneOn(true);
       }
+      session._levelTimer = Timer.periodic(
+        const Duration(milliseconds: 250),
+        (_) => unawaited(session?._pollLevels()),
+      );
+      unawaited(session._playCue(connect: true)); // you joined
+      return session;
+    } catch (_) {
+      if (session != null) {
+        await session.leave();
+      } else {
+        await mesh?.close();
+        for (final track in stream.getTracks()) {
+          await track.stop();
+        }
+        await stream.dispose();
+      }
+      rethrow;
     }
-    late final VoiceSession session;
-    final mesh = WebRtcMesh(
-      baseUrl: relayUrl,
-      fallbackUrls: fallbackUrls,
-      channel: 'voice:$channelId',
-      identity: meshIdentity ?? identity,
-      localStream: stream,
-      candidateCache: candidateCache,
-      peerAllowed: peerAllowed,
-      channelAuthKey: channelAuthKey,
-      diagnosticLabel: 'voice',
-      onRemoteStream: (peerHex, remote) =>
-          unawaited(session._onRemote(peerHex, remote)),
-      onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),
-      onControl: (peer, control) => session._onControl(peer, control),
-    );
-    session = VoiceSession._(channelId, mesh, stream, onChange, activeOutputId);
-    // The mesh only starts announcing once peerConnected is listened to.
-    session._sub = mesh.peerConnected.listen((_) => session._onChange());
-    // On mobile, route audio to speaker (not earpiece) by default.
-    if (defaultTargetPlatform == TargetPlatform.android ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
-      await Helper.setSpeakerphoneOn(true);
-    }
-    session._levelTimer = Timer.periodic(
-      const Duration(milliseconds: 250),
-      (_) => unawaited(session._pollLevels()),
-    );
-    unawaited(session._playCue(connect: true)); // you joined
-    return session;
   }
 
   /// Polls WebRTC stats for each connection's audio level — a remote's level
@@ -225,7 +291,7 @@ class VoiceSession {
               packetsReceived is num &&
               packetsReceived > 0) {
             _loggedInboundRtp = true;
-            debugPrint('[hearth][voice] inbound audio RTP received');
+            HearthDiagnostics.log('[hearth][voice] inbound audio RTP received');
           }
           final packetsSent = report.values['packetsSent'];
           if (!_loggedOutboundRtp &&
@@ -233,7 +299,7 @@ class VoiceSession {
               packetsSent is num &&
               packetsSent > 0) {
             _loggedOutboundRtp = true;
-            debugPrint('[hearth][voice] outbound audio RTP sent');
+            HearthDiagnostics.log('[hearth][voice] outbound audio RTP sent');
           }
           final level = report.values['audioLevel'];
           if (level is! num) continue;
@@ -278,12 +344,19 @@ class VoiceSession {
     }
     renderer.srcObject = remote;
     final outputId = _audioOutputId;
-    if (outputId != null && outputId.isNotEmpty) {
-      final selected = await renderer.audioOutput(outputId);
-      debugPrint(
-        '[hearth][voice] remote audio output '
-        '${selected ? 'attached' : 'attachment failed'}',
-      );
+    if (kIsWeb && outputId != null && outputId.isNotEmpty) {
+      try {
+        final selected = await renderer.audioOutput(outputId);
+        HearthDiagnostics.log(
+          '[hearth][voice] remote audio output '
+          '${selected ? 'attached' : 'attachment failed'}',
+        );
+      } catch (error) {
+        HearthDiagnostics.log(
+          '[hearth][voice] remote audio output attachment failed: '
+          '${error.runtimeType}',
+        );
+      }
     }
     _remoteStreams[peerHex] = remote;
     await _applyVolume(peerHex); // honour deafen / a prior volume for this peer
@@ -433,6 +506,7 @@ class VoiceSession {
       // Closing the data channel still tells peers eventually if a flush stalls.
     }
     await _sub?.cancel();
+    await _externalSignalSub?.cancel();
     _levelTimer?.cancel();
     await _mesh.close();
     for (final renderer in _remotes.values) {

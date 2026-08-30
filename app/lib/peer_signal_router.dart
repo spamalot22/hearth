@@ -108,15 +108,16 @@ class PeerSignalRouter {
   }
 
   String fingerprint(SignalControl signal) {
+    final signalChannel = signal.namespace ?? channel;
     final signedBytes = signalSigningBytes(
-      channel,
+      signalChannel,
       signal.kind,
       signal.to,
       signal.data,
     );
     return sha256.convert([
       ...utf8.encode(
-        '${signal.from}\n${signal.to}\n${signal.kind}\n'
+        '${signal.from}\n${signal.to}\n$signalChannel\n${signal.kind}\n'
         '${signal.data['sig']}\n${signal.data[signalCapabilityField]}\n',
       ),
       ...signedBytes,
@@ -129,6 +130,12 @@ class PeerSignalRouter {
     SignalControl signal, {
     Uint8List? channelAuthKey,
   }) async {
+    final signalChannel = signal.namespace ?? channel;
+    // A channel mesh may carry signalling only for its own voice sub-mesh. This
+    // keeps routed controls from becoming a cross-channel social-graph oracle.
+    if (signalChannel != channel && signalChannel != 'voice:$channel') {
+      return false;
+    }
     if (!_peerPattern.hasMatch(signal.from) ||
         !_peerPattern.hasMatch(signal.to) ||
         signal.from == signal.to ||
@@ -148,7 +155,7 @@ class PeerSignalRouter {
     if (!await verifySignal(
       signal.from,
       signal.to,
-      channel,
+      signalChannel,
       signal.kind,
       signal.data,
     )) {
@@ -159,7 +166,7 @@ class PeerSignalRouter {
           channelAuthKey,
           signal.from,
           signal.to,
-          channel,
+          signalChannel,
           signal.kind,
           signal.data,
         )) {
