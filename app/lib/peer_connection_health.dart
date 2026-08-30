@@ -3,6 +3,17 @@ import 'dart:async';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+/// Whether activity-resume recovery can retain this native connection.
+bool isPeerConnectionHealthy({
+  required bool dataChannelOpen,
+  required RTCPeerConnectionState? connectionState,
+  required RTCIceConnectionState? iceState,
+}) =>
+    dataChannelOpen &&
+    connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected &&
+    (iceState == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+        iceState == RTCIceConnectionState.RTCIceConnectionStateCompleted);
+
 /// Turns native WebRTC connection-state events into one stale-link callback.
 ///
 /// A disconnected link gets a short recovery window for ordinary network

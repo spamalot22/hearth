@@ -37,4 +37,32 @@ void main() {
       expect(preferredAudioDevice(devices, 'videoinput', null), isNull);
     },
   );
+
+  test('native desktop constraints initialize input and output together', () {
+    final constraint = desktopVoiceAudioConstraint(
+      input: _device('mic-1', 'audioinput'),
+      output: _device('speaker-2', 'audiooutput'),
+      web: false,
+      enhancedNoiseSuppression: true,
+    );
+
+    expect(constraint['deviceId'], 'speaker-2');
+    expect(constraint['optional'], [
+      {'sourceId': 'mic-1'},
+    ]);
+    expect(constraint['googNoiseSuppression'], isTrue);
+    expect(constraint['googHighpassFilter'], isTrue);
+  });
+
+  test('web constraints use the input device id', () {
+    final constraint = desktopVoiceAudioConstraint(
+      input: _device('mic-1', 'audioinput'),
+      output: null,
+      web: true,
+      enhancedNoiseSuppression: false,
+    );
+
+    expect(constraint['deviceId'], {'exact': 'mic-1'});
+    expect(constraint, isNot(contains('optional')));
+  });
 }

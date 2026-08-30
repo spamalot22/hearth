@@ -52,6 +52,7 @@ class WebRtcMesh {
     this.coordinateRelayDuty = false,
     this.onRelayDutyChanged,
     this.onRelayStandbyProbe,
+    this.diagnosticLabel = 'mesh',
     this.standbyProbeInterval = const Duration(minutes: 2),
     http.Client? client,
     this.announceInterval = const Duration(seconds: 5),
@@ -147,6 +148,10 @@ class WebRtcMesh {
   /// Performs one courier poll alongside a standby rendezvous probe.
   final Future<void> Function()? onRelayStandbyProbe;
 
+  /// Non-sensitive category included in native WebRTC diagnostics. This must
+  /// never contain a channel id, peer id, handle, or message content.
+  final String diagnosticLabel;
+
   /// Maximum steady-state interval between each standby's own relay probes.
   /// A deterministic per-device offset spreads requests within the interval.
   final Duration standbyProbeInterval;
@@ -201,6 +206,7 @@ class WebRtcMesh {
   bool _closed = false;
   bool _started = false;
   bool _recovering = false;
+  final Set<String> _intentionalDisconnects = {};
   bool _hasRelayDuty = true;
   bool _standbyProbing = false;
   DateTime? _signalDrainUntil;
@@ -221,6 +227,26 @@ class WebRtcMesh {
   void sendControlTo(String peerHex, MeshControl control) {
     final link = _links[peerHex];
     if (link != null && link.open) link.sendControl(control);
+  }
+
+  /// Waits for control frames already queued on open data channels. Voice uses
+  /// this before closing so its explicit leave cannot be discarded locally.
+  Future<void> flushPendingSends() async {
+    await Future.wait(
+      _links.values.where((link) => link.open).map((link) => link.flushSends()),
+    );
+  }
+
+  /// Closes one peer deliberately without treating it as a failed connection.
+  Future<void> disconnectPeer(String peerHex) async {
+    final link = _links[peerHex];
+    if (link != null) {
+      debugPrint('[hearth][$diagnosticLabel] intentional peer disconnect');
+      _intentionalDisconnects.add(peerHex);
+      await link.dispose();
+    }
+    final tunnel = _tunnels.remove(peerHex);
+    if (tunnel != null) await tunnel.close();
   }
 
   /// Attempts to connect to a peer learned through an existing mesh link.
@@ -460,11 +486,11 @@ class WebRtcMesh {
     if (_started) _scheduleAnnounce();
   }
 
-  /// Replaces peer connections that may have been frozen while a mobile app
-  /// was suspended, then immediately resumes rendezvous. Native WebRTC can
-  /// leave those links in `disconnected` (or even stale `connected`) state,
-  /// which otherwise suppresses a fresh offer because the peer remains in
-  /// [_links].
+  /// Replaces peer connections that are no longer healthy after mobile
+  /// suspension, then immediately resumes rendezvous. A foreground voice
+  /// service can keep a genuinely healthy native link alive while the Flutter
+  /// activity is hidden, so closing every link on resume causes avoidable
+  /// one-sided reconnect failures.
   Future<void> recoverConnections() async {
     if (_closed || _recovering) return;
     _recovering = true;
@@ -475,7 +501,15 @@ class WebRtcMesh {
       _backoffFailures.clear();
       _earlyRemoteIce.clear();
 
-      for (final link in _links.values.toList()) {
+      final unhealthyLinks = _links.values
+          .where((link) => !link.healthy)
+          .toList();
+      debugPrint(
+        '[hearth][$diagnosticLabel] lifecycle recovery: '
+        'preserving ${_links.length - unhealthyLinks.length} healthy link(s), '
+        'replacing ${unhealthyLinks.length}',
+      );
+      for (final link in unhealthyLinks) {
         await link.dispose();
       }
       for (final tunnel in _tunnels.values.toList()) {
@@ -851,6 +885,7 @@ class WebRtcMesh {
       iceServers: _iceServers,
       localStream: localStream,
       onRemoteStream: onRemoteStream,
+      diagnosticLabel: diagnosticLabel,
       onControl: (peer, control) {
         _handleControl(peer, control);
         onControl?.call(peer, control);
@@ -860,12 +895,17 @@ class WebRtcMesh {
       onClosed: () {
         // A delayed callback from an old link must never remove a replacement.
         if (!identical(_links[peerHex], link)) return;
+        final intentional = _intentionalDisconnects.remove(peerHex);
         _links.remove(peerHex);
         _peerSignalRouter.removeNextHop(peerHex);
         _routedSignalRates.remove(peerHex);
         _refreshRelayDuty();
         if (_closed) return;
         if (_recovering) {
+          onPeerLeft?.call(peerHex);
+          return;
+        }
+        if (intentional) {
           onPeerLeft?.call(peerHex);
           return;
         }
@@ -1174,6 +1214,7 @@ class _PeerLink implements FrameChannel {
     this.localStream,
     this.onRemoteStream,
     this.onControl,
+    required this.diagnosticLabel,
   }) {
     _handshakeTimer = Timer(const Duration(seconds: 30), () {
       if (!_opened) unawaited(dispose());
@@ -1190,6 +1231,7 @@ class _PeerLink implements FrameChannel {
   final void Function(_PeerLink link) onOpen;
   final void Function() onClosed;
   final void Function(String peerHex, MeshControl control)? onControl;
+  final String diagnosticLabel;
 
   final StreamController<SyncFrame> _frames = StreamController<SyncFrame>();
   RTCPeerConnection? _pc;
@@ -1203,6 +1245,7 @@ class _PeerLink implements FrameChannel {
   );
   Future<void> _sendTail = Future<void>.value();
   final List<RTCIceCandidate> _pendingCandidates = [];
+  final List<MediaStream> _syntheticRemoteStreams = [];
   final WebRtcSignalOrder _outgoingSignals = WebRtcSignalOrder();
   static const int _maxPendingCandidates = 256;
   static const int _maxDataChannelFrameBytes = 16 * 1024 * 1024;
@@ -1217,6 +1260,13 @@ class _PeerLink implements FrameChannel {
   /// Whether this link's data channel is open (handshake complete).
   bool get open => _opened;
 
+  /// Native state is still usable, so activity resume must not tear it down.
+  bool get healthy => isPeerConnectionHealthy(
+    dataChannelOpen: _opened,
+    connectionState: _pc?.connectionState,
+    iceState: _pc?.iceConnectionState,
+  );
+
   @override
   void send(SyncFrame frame) {
     _sendText(wrapGossip(frame.encode()));
@@ -1224,6 +1274,8 @@ class _PeerLink implements FrameChannel {
 
   /// Sends a mesh control message (peer-exchange / relayed signalling) to this peer.
   void sendControl(MeshControl control) => _sendText(control.encode());
+
+  Future<void> flushSends() => _sendTail;
 
   void _sendText(String text) {
     final channel = _channel;
@@ -1269,6 +1321,10 @@ class _PeerLink implements FrameChannel {
     final existing = _pc;
     if (existing != null) return existing;
     final pc = await createPeerConnection({'iceServers': _iceServers});
+    debugPrint(
+      '[hearth][$diagnosticLabel] peer connection created '
+      'role=${initiator ? 'offerer' : 'answerer'}',
+    );
     pc.onIceCandidate = (candidate) {
       if (candidate.candidate == null) return; // end-of-candidates marker
       final payload = <String, Object?>{
@@ -1279,8 +1335,17 @@ class _PeerLink implements FrameChannel {
       _outgoingSignals.addCandidate(payload, onSignal);
     };
     pc.onDataChannel = _wireChannel;
-    pc.onConnectionState = _health.handlePeerState;
-    pc.onIceConnectionState = _health.handleIceState;
+    pc.onConnectionState = (state) {
+      debugPrint('[hearth][$diagnosticLabel] connection state=$state');
+      _health.handlePeerState(state);
+    };
+    pc.onIceConnectionState = (state) {
+      debugPrint('[hearth][$diagnosticLabel] ICE state=$state');
+      _health.handleIceState(state);
+    };
+    pc.onIceGatheringState = (state) {
+      debugPrint('[hearth][$diagnosticLabel] ICE gathering=$state');
+    };
     // Voice/screen: attach our local media before the offer/answer so it rides
     // in the initial SDP (no renegotiation). Sharers/voice have a localStream;
     // receive-only viewers have none and just add nothing.
@@ -1292,13 +1357,45 @@ class _PeerLink implements FrameChannel {
     }
     // Surface the peer's remote media. Wired unconditionally — a receive-only
     // viewer (no localStream) still needs onTrack to get the sharer's video.
-    pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        onRemoteStream?.call(peerHex, event.streams.first);
-      }
-    };
+    pc.onTrack = (event) => unawaited(_handleRemoteTrack(event));
     _pc = pc;
     return pc;
+  }
+
+  Future<void> _handleRemoteTrack(RTCTrackEvent event) async {
+    if (_disposed) return;
+    debugPrint(
+      '[hearth][$diagnosticLabel] remote ${event.track.kind} track '
+      'streams=${event.streams.length}',
+    );
+    if (event.streams.isNotEmpty) {
+      onRemoteStream?.call(peerHex, event.streams.first);
+      return;
+    }
+
+    // Unified Plan permits a track without an associated MediaStream. The
+    // Windows native plugin can emit that shape, but renderers require a
+    // stream, so materialize one instead of silently dropping live audio.
+    MediaStream? synthetic;
+    try {
+      final created = await createLocalMediaStream(
+        'hearth-remote-${DateTime.now().microsecondsSinceEpoch}',
+      );
+      synthetic = created;
+      await created.addTrack(event.track);
+      if (_disposed) {
+        await created.dispose();
+        return;
+      }
+      _syntheticRemoteStreams.add(created);
+      onRemoteStream?.call(peerHex, created);
+    } catch (error) {
+      await synthetic?.dispose();
+      debugPrint(
+        '[hearth][$diagnosticLabel] could not attach streamless '
+        '${event.track.kind} track: ${error.runtimeType}',
+      );
+    }
   }
 
   /// Initiator path: open the data channel and send an offer.
@@ -1396,6 +1493,7 @@ class _PeerLink implements FrameChannel {
       }
     };
     channel.onDataChannelState = (state) {
+      debugPrint('[hearth][$diagnosticLabel] data channel state=$state');
       if (state == RTCDataChannelState.RTCDataChannelOpen && !_opened) {
         _opened = true;
         _handshakeTimer?.cancel();
@@ -1423,5 +1521,11 @@ class _PeerLink implements FrameChannel {
     } catch (_) {}
     if (!_frames.isClosed) await _frames.close();
     onClosed();
+    for (final stream in _syntheticRemoteStreams) {
+      try {
+        await stream.dispose();
+      } catch (_) {}
+    }
+    _syntheticRemoteStreams.clear();
   }
 }

@@ -50,6 +50,8 @@ class VoiceSession {
   bool _muted = false;
   bool _deafened = false;
   bool _closed = false;
+  bool _loggedInboundRtp = false;
+  bool _loggedOutboundRtp = false;
 
   bool get isMuted => _muted || _deafened;
   bool get isDeafened => _deafened;
@@ -59,11 +61,11 @@ class VoiceSession {
   /// A peer's playback volume (0..1) — defaults to full.
   double volumeOf(String peerHex) => _volumes[peerHex] ?? 1.0;
 
-  /// How many peers we're hearing.
-  int get peerCount => _remotes.length;
+  /// How many peers have an open voice-mesh connection.
+  int get peerCount => _mesh.connections.length;
 
   /// Connected peers, by id, for the participants list.
-  List<String> get peerHexes => _remotes.keys.toList();
+  List<String> get peerHexes => _mesh.connections.keys.toList();
 
   /// Latest mic level (0..1) for a participant — 'self' for you, else a peerHex.
   double levelOf(String key) => _levels[key] ?? 0;
@@ -101,6 +103,7 @@ class VoiceSession {
     // the native WebRTC layer opens the correct capture device.
     // On mobile, the OS handles device routing — skip the probe.
     Object audioConstraint = true;
+    String? activeOutputId = audioOutputId;
     if (defaultTargetPlatform != TargetPlatform.android &&
         defaultTargetPlatform != TargetPlatform.iOS) {
       try {
@@ -115,30 +118,17 @@ class VoiceSession {
         await probe.dispose();
         final devices = await navigator.mediaDevices.enumerateDevices();
         final mic = preferredAudioDevice(devices, 'audioinput', audioInputId);
-        if (mic != null && mic.deviceId.isNotEmpty) {
-          audioConstraint = {
-            if (kIsWeb)
-              'deviceId': {'exact': mic.deviceId}
-            else
-              // flutter_webrtc's desktop native layer reads sourceId from the
-              // legacy optional constraint when choosing a recording device.
-              'optional': [
-                {'sourceId': mic.deviceId},
-              ],
-            'autoGainControl': true,
-            'noiseSuppression': true,
-            'echoCancellation': true,
-            if (enhancedNoiseSuppression) 'googNoiseSuppression': true,
-            if (enhancedNoiseSuppression) 'googHighpassFilter': true,
-          };
-        } else if (enhancedNoiseSuppression) {
-          audioConstraint = {
-            'autoGainControl': true,
-            'noiseSuppression': true,
-            'echoCancellation': true,
-            'googNoiseSuppression': true,
-            'googHighpassFilter': true,
-          };
+        final output = kIsWeb
+            ? null
+            : preferredAudioDevice(devices, 'audiooutput', audioOutputId);
+        if (output != null) activeOutputId = output.deviceId;
+        if (mic != null || output != null || enhancedNoiseSuppression) {
+          audioConstraint = desktopVoiceAudioConstraint(
+            input: mic,
+            output: output,
+            web: kIsWeb,
+            enhancedNoiseSuppression: enhancedNoiseSuppression,
+          );
         }
       } catch (_) {
         // Fall through with default constraint.
@@ -168,25 +158,22 @@ class VoiceSession {
       track.enabled = true;
     }
 
-    // flutter_webrtc does not choose a Windows playout device as a side effect
-    // of opening the microphone. Without this explicit call inbound RTP can be
-    // decoded (and report audio levels) while producing no sound.
-    String? activeOutputId = audioOutputId;
+    // Retry through the public API before creating the peer connection. The
+    // constraint above is the reliable Windows path; this also covers other
+    // native desktop implementations and reports a useful diagnostic.
     if (!kIsWeb &&
         defaultTargetPlatform != TargetPlatform.android &&
-        defaultTargetPlatform != TargetPlatform.iOS) {
+        defaultTargetPlatform != TargetPlatform.iOS &&
+        activeOutputId != null &&
+        activeOutputId.isNotEmpty) {
       try {
-        final devices = await navigator.mediaDevices.enumerateDevices();
-        final output = preferredAudioDevice(
-          devices,
-          'audiooutput',
-          audioOutputId,
+        await Helper.selectAudioOutput(activeOutputId);
+        debugPrint('[hearth][voice] desktop audio output selected');
+      } catch (error) {
+        debugPrint(
+          '[hearth][voice] desktop audio output selection failed: '
+          '${error.runtimeType}',
         );
-        if (output != null && output.deviceId.isNotEmpty) {
-          activeOutputId = output.deviceId;
-          await Helper.selectAudioOutput(output.deviceId);
-        }
-      } catch (_) {
         // Keep joining: a renderer can retry once the remote stream arrives.
       }
     }
@@ -200,6 +187,7 @@ class VoiceSession {
       candidateCache: candidateCache,
       peerAllowed: peerAllowed,
       channelAuthKey: channelAuthKey,
+      diagnosticLabel: 'voice',
       onRemoteStream: (peerHex, remote) =>
           unawaited(session._onRemote(peerHex, remote)),
       onPeerLeft: (peerHex) => session._onPeerLeft(peerHex),
@@ -207,7 +195,7 @@ class VoiceSession {
     );
     session = VoiceSession._(channelId, mesh, stream, onChange, activeOutputId);
     // The mesh only starts announcing once peerConnected is listened to.
-    session._sub = mesh.peerConnected.listen((_) {});
+    session._sub = mesh.peerConnected.listen((_) => session._onChange());
     // On mobile, route audio to speaker (not earpiece) by default.
     if (defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS) {
@@ -231,6 +219,22 @@ class VoiceSession {
     for (final entry in _mesh.connections.entries) {
       try {
         for (final report in await entry.value.getStats()) {
+          final packetsReceived = report.values['packetsReceived'];
+          if (!_loggedInboundRtp &&
+              report.type == 'inbound-rtp' &&
+              packetsReceived is num &&
+              packetsReceived > 0) {
+            _loggedInboundRtp = true;
+            debugPrint('[hearth][voice] inbound audio RTP received');
+          }
+          final packetsSent = report.values['packetsSent'];
+          if (!_loggedOutboundRtp &&
+              report.type == 'outbound-rtp' &&
+              packetsSent is num &&
+              packetsSent > 0) {
+            _loggedOutboundRtp = true;
+            debugPrint('[hearth][voice] outbound audio RTP sent');
+          }
           final level = report.values['audioLevel'];
           if (level is! num) continue;
           if (report.type == 'inbound-rtp') {
@@ -275,7 +279,11 @@ class VoiceSession {
     renderer.srcObject = remote;
     final outputId = _audioOutputId;
     if (outputId != null && outputId.isNotEmpty) {
-      await renderer.audioOutput(outputId);
+      final selected = await renderer.audioOutput(outputId);
+      debugPrint(
+        '[hearth][voice] remote audio output '
+        '${selected ? 'attached' : 'attachment failed'}',
+      );
     }
     _remoteStreams[peerHex] = remote;
     await _applyVolume(peerHex); // honour deafen / a prior volume for this peer
@@ -289,12 +297,13 @@ class VoiceSession {
 
   void _onPeerLeft(String peerHex) {
     final renderer = _remotes.remove(peerHex);
-    if (renderer == null) return; // a failed attempt, not an active participant
     _remoteStreams.remove(peerHex);
     _volumes.remove(peerHex);
-    renderer.srcObject = null;
-    unawaited(renderer.dispose());
-    unawaited(_playCue(connect: false));
+    if (renderer != null) {
+      renderer.srcObject = null;
+      unawaited(renderer.dispose());
+      unawaited(_playCue(connect: false));
+    }
     _onChange();
   }
 
@@ -405,7 +414,9 @@ class VoiceSession {
     } else if (control is YoutubeControl) {
       onYoutube?.call(peerHex, control);
     } else if (control is VoiceLeaveControl) {
-      _onPeerLeft(peerHex);
+      // Remove the actual mesh link, not only its renderer. Otherwise an
+      // immediate rejoin with the same identity is blocked by the stale link.
+      unawaited(_mesh.disconnectPeer(peerHex));
     }
   }
 
@@ -414,6 +425,13 @@ class VoiceSession {
     _closed = true;
     // Notify peers immediately so they don't wait for ICE timeout.
     sendControl(VoiceLeaveControl());
+    try {
+      await _mesh.flushPendingSends().timeout(
+        const Duration(milliseconds: 750),
+      );
+    } catch (_) {
+      // Closing the data channel still tells peers eventually if a flush stalls.
+    }
     await _sub?.cancel();
     _levelTimer?.cancel();
     await _mesh.close();
@@ -490,3 +508,27 @@ MediaDeviceInfo? preferredAudioDevice(
   }
   return first;
 }
+
+/// Builds flutter_webrtc's desktop audio constraint shape. On native desktop,
+/// the plugin intentionally uses `deviceId` for playout and legacy `sourceId`
+/// for capture; setting the output here selects it before playout initializes.
+Map<String, Object> desktopVoiceAudioConstraint({
+  required MediaDeviceInfo? input,
+  required MediaDeviceInfo? output,
+  required bool web,
+  required bool enhancedNoiseSuppression,
+}) => {
+  if (web && input != null)
+    'deviceId': {'exact': input.deviceId}
+  else if (!web && output != null)
+    'deviceId': output.deviceId,
+  if (!web && input != null)
+    'optional': [
+      {'sourceId': input.deviceId},
+    ],
+  'autoGainControl': true,
+  'noiseSuppression': true,
+  'echoCancellation': true,
+  if (enhancedNoiseSuppression) 'googNoiseSuppression': true,
+  if (enhancedNoiseSuppression) 'googHighpassFilter': true,
+};

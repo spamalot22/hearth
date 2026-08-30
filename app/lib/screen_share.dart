@@ -85,6 +85,7 @@ class ScreenBroadcast {
       identity: identity,
       localStream: stream,
       forceInitiator: true, // the sharer offers to every viewer
+      diagnosticLabel: 'screen',
       peerAllowed: peerAllowed,
       channelAuthKey: channelAuthKey,
     );
@@ -157,6 +158,7 @@ class ScreenView {
       channel: screenMeshChannel(channelId, sharerHex),
       identity: identity,
       forceInitiator: false, // answer-only; the sharer offers
+      diagnosticLabel: 'screen',
       peerAllowed: peerAllowed,
       channelAuthKey: channelAuthKey,
       onRemoteStream: (peer, stream) {

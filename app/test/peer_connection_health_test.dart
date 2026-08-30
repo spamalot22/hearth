@@ -4,6 +4,42 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hearth/peer_connection_health.dart';
 
 void main() {
+  test('resume preserves only open, fully connected peer links', () {
+    expect(
+      isPeerConnectionHealthy(
+        dataChannelOpen: true,
+        connectionState: RTCPeerConnectionState.RTCPeerConnectionStateConnected,
+        iceState: RTCIceConnectionState.RTCIceConnectionStateConnected,
+      ),
+      isTrue,
+    );
+    expect(
+      isPeerConnectionHealthy(
+        dataChannelOpen: true,
+        connectionState: RTCPeerConnectionState.RTCPeerConnectionStateConnected,
+        iceState: RTCIceConnectionState.RTCIceConnectionStateCompleted,
+      ),
+      isTrue,
+    );
+    expect(
+      isPeerConnectionHealthy(
+        dataChannelOpen: true,
+        connectionState:
+            RTCPeerConnectionState.RTCPeerConnectionStateDisconnected,
+        iceState: RTCIceConnectionState.RTCIceConnectionStateDisconnected,
+      ),
+      isFalse,
+    );
+    expect(
+      isPeerConnectionHealthy(
+        dataChannelOpen: false,
+        connectionState: RTCPeerConnectionState.RTCPeerConnectionStateConnected,
+        iceState: RTCIceConnectionState.RTCIceConnectionStateConnected,
+      ),
+      isFalse,
+    );
+  });
+
   test('persistent disconnect becomes stale after the grace period', () async {
     var staleCalls = 0;
     final monitor = PeerConnectionHealthMonitor(
