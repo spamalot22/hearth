@@ -30,6 +30,11 @@ export const MAX_POLL_MESSAGES = 100;
 /** Global courier-message count across all channels. */
 export const MAX_TOTAL_MESSAGES = 20_000;
 
+/** Conservative serialized-string budgets, in addition to entry-count caps. */
+export const MAX_TOTAL_MESSAGE_BYTES = 64 * 1024 * 1024;
+export const MAX_TOTAL_SIGNAL_BYTES = 16 * 1024 * 1024;
+export const MAX_TOTAL_PRESENCE = 10_000;
+
 /** Maximum unique channels before LRU eviction kicks in. */
 export const MAX_CHANNELS = 10_000;
 

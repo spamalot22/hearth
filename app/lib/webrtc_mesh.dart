@@ -654,6 +654,11 @@ class WebRtcMesh {
         'pubkey': selfPubkeyHex,
         'ts': ts,
         'sig': sig,
+        'authSig': hex.encode(
+          await identity.sign(
+            announceAuthSigningBytes(channel, selfPubkeyHex, ts),
+          ),
+        ),
         if (voiceSig != null) 'voice': true,
         'voiceSig': ?voiceSig,
         if (authKey != null)
@@ -936,6 +941,7 @@ class WebRtcMesh {
     bool authenticated = false,
     bool deliveredByRelay = false,
   }) async {
+    if (_closed) return;
     final fromValue = signal['from'];
     final kindValue = signal['kind'];
     final data = signal['data'];
@@ -960,7 +966,7 @@ class WebRtcMesh {
         )) {
       return;
     }
-    if (!_peerSignalRouter.remember(control)) return;
+    if (_closed || !_peerSignalRouter.remember(control)) return;
     if (deliveredByRelay) {
       _relayReplyUntil[from] = DateTime.now().add(const Duration(seconds: 30));
     }
@@ -1057,7 +1063,7 @@ class WebRtcMesh {
         final failures = (_backoffFailures[peerHex] ?? 0) + 1;
         _backoffFailures[peerHex] = failures;
         // Exponential: 10s, 20s, 40s, 80s, 160s, capped at 300s (5min).
-        final delaySec = min(10 * (1 << (failures - 1)), 300);
+        final delaySec = min(10 * (1 << min(failures - 1, 5)), 300);
         _backoffUntil[peerHex] = DateTime.now().add(
           Duration(seconds: delaySec),
         );
@@ -1357,6 +1363,7 @@ class _PeerLink implements FrameChannel {
 
   final StreamController<SyncFrame> _frames = StreamController<SyncFrame>();
   RTCPeerConnection? _pc;
+  Future<RTCPeerConnection>? _creatingPc;
   RTCDataChannel? _channel;
   bool _remoteSet = false;
   bool _opened = false;
@@ -1366,12 +1373,16 @@ class _PeerLink implements FrameChannel {
     onStale: () => unawaited(dispose()),
   );
   Future<void> _sendTail = Future<void>.value();
+  int _queuedSendBytes = 0;
+  int _queuedSends = 0;
   final List<RTCIceCandidate> _pendingCandidates = [];
   final List<MediaStream> _syntheticRemoteStreams = [];
   final WebRtcSignalOrder _outgoingSignals = WebRtcSignalOrder();
   static const int _maxPendingCandidates = 256;
   static const int _maxDataChannelFrameBytes = 16 * 1024 * 1024;
   static const int _maxBufferedSendBytes = 512 * 1024;
+  static const int _maxQueuedSendBytes = 32 * 1024 * 1024;
+  static const int _maxQueuedSends = 4096;
 
   @override
   Stream<SyncFrame> get frames => _frames.stream;
@@ -1399,10 +1410,25 @@ class _PeerLink implements FrameChannel {
 
   Future<void> flushSends() => _sendTail;
 
+  @override
+  Future<void> flush() => flushSends();
+
+  @override
+  Future<void> close() => dispose();
+
   void _sendText(String text) {
+    if (_disposed) return;
     final channel = _channel;
     if (channel != null &&
         channel.state == RTCDataChannelState.RTCDataChannelOpen) {
+      final bytes = text.length * 2;
+      if (_queuedSends >= _maxQueuedSends ||
+          _queuedSendBytes + bytes > _maxQueuedSendBytes) {
+        unawaited(dispose());
+        return;
+      }
+      _queuedSendBytes += bytes;
+      _queuedSends++;
       _sendTail = _sendTail
           .then((_) async {
             if (_disposed ||
@@ -1435,14 +1461,30 @@ class _PeerLink implements FrameChannel {
           })
           .catchError((Object _) {
             if (!_disposed) unawaited(dispose());
+          })
+          .whenComplete(() {
+            _queuedSendBytes -= bytes;
+            _queuedSends--;
           });
     }
   }
 
-  Future<RTCPeerConnection> _ensurePc() async {
+  Future<RTCPeerConnection> _ensurePc() => _creatingPc ??= _createPc();
+
+  Future<RTCPeerConnection> _createPc() async {
+    if (_disposed) throw StateError('peer link closed');
     final existing = _pc;
     if (existing != null) return existing;
     final pc = await createPeerConnection({'iceServers': _iceServers});
+    if (_disposed) {
+      try {
+        await pc.close();
+      } finally {
+        await pc.dispose();
+      }
+      throw StateError('peer link closed during creation');
+    }
+    _pc = pc;
     HearthDiagnostics.log(
       '[hearth][$diagnosticLabel] peer connection created '
       'role=${initiator ? 'offerer' : 'answerer'}',
@@ -1477,6 +1519,7 @@ class _PeerLink implements FrameChannel {
     if (stream != null) {
       for (final track in stream.getTracks()) {
         await pc.addTrack(track, stream);
+        if (_disposed) throw StateError('peer link closed during setup');
       }
     }
     // Surface the peer's remote media. Wired unconditionally — a receive-only
@@ -1584,8 +1627,13 @@ class _PeerLink implements FrameChannel {
   }
 
   void _wireChannel(RTCDataChannel channel) {
+    if (_disposed) {
+      unawaited(channel.close());
+      return;
+    }
     _channel = channel;
     channel.onMessage = (message) {
+      if (_disposed) return;
       final wireLength = message.isBinary
           ? message.binary.length
           : message.text.length;
@@ -1607,6 +1655,9 @@ class _PeerLink implements FrameChannel {
         if (control != null) onControl?.call(peerHex, control);
         return;
       }
+      // Media meshes consume controls, not chat history. They have no gossip
+      // listener, so buffering arbitrary gossip here would grow without bound.
+      if (localStream != null || onRemoteStream != null) return;
       final frame = SyncFrame.decode(split.body);
       if (frame != null && !_frames.isClosed) _frames.add(frame);
       if (frame == null && message.isBinary) {
@@ -1617,6 +1668,7 @@ class _PeerLink implements FrameChannel {
       }
     };
     channel.onDataChannelState = (state) {
+      if (_disposed) return;
       HearthDiagnostics.log(
         '[hearth][$diagnosticLabel] data channel state=$state',
       );
@@ -1645,7 +1697,16 @@ class _PeerLink implements FrameChannel {
     try {
       await _pc?.close();
     } catch (_) {}
-    if (!_frames.isClosed) await _frames.close();
+    try {
+      await _pc?.dispose();
+    } catch (_) {}
+    // Handshakes and media-only links may never subscribe to gossip frames.
+    // Closing a single-subscription stream waits forever without a listener.
+    if (!_frames.isClosed) {
+      final listening = _frames.hasListener;
+      final closed = _frames.close();
+      if (listening) await closed;
+    }
     onClosed();
     for (final stream in _syntheticRemoteStreams) {
       try {

@@ -1,9 +1,10 @@
 # Deploying the Hearth relay
 
 The relay is the optional **cold-start bootstrap** — a pubkey-addressed signalling
-mailbox plus the media-search proxies. It holds no plaintext and is only needed to
-broker the *first* handshake; once peers connect, sync is pure P2P. You self-host it
-and point the app's **Relay** setting at it.
+mailbox, bounded encrypted offline courier, and media-search proxies. It holds no
+plaintext. Connected peers exchange chat and media directly and can route fresh
+signalling through the mesh; a cold start with no surviving peer route needs relay
+discovery again. You self-host it and point the app's **Relay** setting at it.
 
 This covers the **Tailscale Funnel** path (public HTTPS, no domain, no port-forward)
 deployed as a **Portainer** stack — what's running in production. Alternatives are at
@@ -17,14 +18,39 @@ the end.
 5. `curl https://<host>.<tailnet>.ts.net/health` → `{"ok":true}`, point the app there.
 
 ## 1 · Publish the image
-The relay runs from a prebuilt image, published by `.github/workflows/deploy.yml` on a
-version tag (bare `0.1.0` or `v0.1.0` both trigger it):
+The relay runs from a prebuilt image, published by `.github/workflows/release-app.yml`
+on a version tag (bare `0.1.0` or `v0.1.0` both trigger it). Follow `RELEASE.md` and
+wait for CI before tagging. `.github/workflows/deploy.yml` is the manually dispatched
+relay-only repair path, not the normal tag workflow:
 ```
 git tag 0.1.0 && git push origin 0.1.0
 ```
 Then make the GHCR package **Public** (GitHub → Packages → `hearth-relay` → settings →
 visibility) so Portainer can pull it — or keep it private and add a `ghcr.io` registry
 credential in Portainer (a **classic PAT with `read:packages`**).
+
+### Signalling authentication rollout
+
+The current `/announce` protocol requires two separate Ed25519 signatures:
+
+- `sig` signs `announce|<channel>|<pubkey>|<ts>` and is public presence evidence.
+- `authSig` signs `announce-auth|<channel>|<pubkey>|<ts>` and is used only to issue
+  the short-lived signalling token. It is never included in peer listings.
+
+Deploy the corresponding app and relay changes together. Older apps without
+`authSig` receive HTTP 403 from the updated relay and must upgrade. A new app can
+send this extra field to an older relay, but the older relay remains vulnerable to
+presence-signature replay until replaced. App updates still come directly from
+GitHub and do not depend on relay authentication.
+
+### Memory budgets
+
+Courier envelopes have a 64 MiB aggregate serialized-string budget, signalling a
+16 MiB budget, and presence a global 10,000-entry cap in addition to per-channel
+limits. These are application accounting limits, not total process RSS limits;
+Node, HTTP requests, object overhead, and temporary buffers need additional RAM.
+Old relay-held data is evicted under pressure. The courier remains best effort;
+devices retain the authoritative history and reconcile it over P2P.
 
 ## 2 · Tailscale prerequisites
 - **Auth key** — admin console → Settings → Keys → a **reusable, non-ephemeral** key.

@@ -25,6 +25,7 @@ class MessageRepository {
   final int maxStoredBytes;
   final MessageStore _index = MessageStore();
   int _storedBytes = 0;
+  Future<void> _writeTail = Future<void>.value();
 
   static int _sizeOf(Message message) => message.payload.length + 512;
 
@@ -42,7 +43,17 @@ class MessageRepository {
   /// Persists and indexes [message]. Returns false (writing nothing) if a
   /// message with the same content id is already present. Persists before
   /// indexing, so the in-memory view never runs ahead of what's on disk.
-  Future<bool> add(Message message) async {
+  Future<bool> add(Message message) {
+    // All peer sessions share this repository; serialize across sessions too.
+    final result = _writeTail.then((_) => _append(message));
+    _writeTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<bool> _append(Message message) async {
     if (_index.contains(message.id)) return false;
     if (_index.length >= maxMessages ||
         _storedBytes + _sizeOf(message) > maxStoredBytes) {

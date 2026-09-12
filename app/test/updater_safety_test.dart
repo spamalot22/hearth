@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,10 +8,85 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/screen_share.dart';
 import 'package:hearth/updater_io.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:open_filex/open_filex.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('cleanup recognises only Hearth update package basenames', () {
+    expect(isUpdatePackageName('hearth-android.apk'), isTrue);
+    expect(isUpdatePackageName('hearth-windows-setup.exe'), isTrue);
+    expect(isUpdatePackageName('unrelated.exe'), isFalse);
+    expect(isUpdatePackageName('not-hearth.exe'), isFalse);
+    expect(isUpdatePackageName('hearth-web.zip'), isFalse);
+  });
+
+  group('streamed update download', () {
+    late Directory dir;
+    late File file;
+    final uri = Uri.parse('https://example.test/update.exe');
+    final bytes = utf8.encode('verified installer');
+    final hash = sha256.convert(bytes).toString();
+
+    setUp(() async {
+      dir = await Directory.systemTemp.createTemp('hearth-download-test-');
+      file = File('${dir.path}/update.exe');
+    });
+    tearDown(() => dir.delete(recursive: true));
+
+    test('writes and verifies streamed bytes', () async {
+      final client = MockClient.streaming(
+        (_, _) async => http.StreamedResponse(
+          Stream.value(bytes),
+          200,
+          contentLength: bytes.length,
+        ),
+      );
+      addTearDown(client.close);
+      await downloadVerifiedUpdate(uri, file, hash, client: client);
+      expect(await file.readAsBytes(), bytes);
+    });
+
+    test('stalled stream times out and removes partial installer', () async {
+      final stream = StreamController<List<int>>();
+      final client = MockClient.streaming(
+        (_, _) async => http.StreamedResponse(stream.stream, 200),
+      );
+      addTearDown(client.close);
+      addTearDown(stream.close);
+      stream.add(bytes.take(4).toList());
+      await expectLater(
+        downloadVerifiedUpdate(
+          uri,
+          file,
+          hash,
+          client: client,
+          idleTimeout: const Duration(milliseconds: 20),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(await file.exists(), isFalse);
+    });
+
+    test('corruption and oversized streams are removed', () async {
+      final client = MockClient.streaming(
+        (_, _) async => http.StreamedResponse(Stream.value(bytes), 200),
+      );
+      addTearDown(client.close);
+      await expectLater(
+        downloadVerifiedUpdate(uri, file, '0' * 64, client: client),
+        throwsStateError,
+      );
+      expect(await file.exists(), isFalse);
+      await expectLater(
+        downloadVerifiedUpdate(uri, file, hash, client: client, maxBytes: 4),
+        throwsStateError,
+      );
+      expect(await file.exists(), isFalse);
+    });
+  });
 
   test('Windows installer runs silently with recovery logging', () {
     final args = windowsInstallerArguments(r'C:\logs\update.log');

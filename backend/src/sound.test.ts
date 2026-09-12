@@ -10,10 +10,13 @@ async function getToken(app: ReturnType<typeof createRelay>): Promise<string> {
   const ts = Date.now();
   const msg = new TextEncoder().encode(`announce|ch|${pub}|${ts}`);
   const sig = Buffer.from(await ed.signAsync(msg, seed)).toString('hex');
+  const authSig = Buffer.from(await ed.signAsync(
+    new TextEncoder().encode(`announce-auth|ch|${pub}|${ts}`), seed,
+  )).toString('hex');
   const res = await app.request('/announce', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ channel: 'ch', pubkey: pub, ts, sig }),
+    body: JSON.stringify({ channel: 'ch', pubkey: pub, ts, sig, authSig }),
   });
   return ((await res.json()) as { token: string }).token;
 }

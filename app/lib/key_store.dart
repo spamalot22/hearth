@@ -92,12 +92,8 @@ class SyncedKeyStore implements KeyStore {
       try {
         // Include a fingerprint in the label so multiple credentials (from
         // reinstalls) are distinguishable in the Google Password Manager picker.
-        final fingerprint = seed.length >= 4
-            ? seed
-                  .sublist(0, 4)
-                  .map((b) => b.toRadixString(16).padLeft(2, '0'))
-                  .join()
-            : '';
+        final identity = await Identity.fromSeed(seed);
+        final fingerprint = identity.publicKeyHex.substring(0, 8);
         await _channel.invokeMethod('write', {
           'seed': base64Encode(seed),
           'label': 'Hearth #$fingerprint',

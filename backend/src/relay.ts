@@ -14,6 +14,7 @@ import {
   MAX_CHANNELS,
   MAX_POLL_MESSAGES,
   MAX_TOTAL_MESSAGES,
+  MAX_TOTAL_MESSAGE_BYTES,
   MESSAGE_RATE_LIMIT,
   MESSAGE_RATE_WINDOW_MS,
   RateLimiter,
@@ -27,6 +28,7 @@ import { addSoundRoutes } from './sound';
 interface StoredMessage {
   seq: number;
   message: WireMessage;
+  bytes: number;
 }
 
 const RELAY_MAILBOX_HEADER = 'x-hearth-mailbox';
@@ -39,6 +41,9 @@ export class RelayStore {
   private readonly byChannel = new Map<string, StoredMessage[]>();
   private seq = 0;
   private messageCount = 0;
+  private storedBytes = 0;
+
+  constructor(private readonly maxStoredBytes = MAX_TOTAL_MESSAGE_BYTES) {}
 
   append(message: WireMessage, mailbox = message.channel): number {
     const list = this.byChannel.get(mailbox) ?? [];
@@ -51,23 +56,35 @@ export class RelayStore {
       this.byChannel.set(mailbox, list);
       return duplicate.seq;
     }
-    const stored: StoredMessage = { seq: ++this.seq, message };
+    const stored: StoredMessage = {
+      seq: ++this.seq, message, bytes: JSON.stringify(message).length * 2 + 256,
+    };
     list.push(stored);
     this.messageCount++;
+    this.storedBytes += stored.bytes;
     if (list.length > MAX_CHANNEL_MESSAGES) {
       const removed = list.length - MAX_CHANNEL_MESSAGES;
-      list.splice(0, removed);
+      for (const entry of list.splice(0, removed)) this.storedBytes -= entry.bytes;
       this.messageCount -= removed;
     }
     this.byChannel.set(mailbox, list);
     // LRU eviction: if over the cap, drop the oldest-accessed channel.
     while (
       this.byChannel.size > MAX_CHANNELS ||
-      this.messageCount > MAX_TOTAL_MESSAGES
+      this.messageCount > MAX_TOTAL_MESSAGES ||
+      this.storedBytes > this.maxStoredBytes
     ) {
       const oldest = this.byChannel.keys().next().value!;
-      this.messageCount -= this.byChannel.get(oldest)?.length ?? 0;
-      this.byChannel.delete(oldest);
+      const entries = this.byChannel.get(oldest)!;
+      // Keep the newest envelopes even when one mailbox alone fills the budget.
+      if (this.byChannel.size === 1 && entries.length > 1) {
+        this.storedBytes -= entries.shift()!.bytes;
+        this.messageCount--;
+      } else {
+        this.messageCount -= entries.length;
+        for (const entry of entries) this.storedBytes -= entry.bytes;
+        this.byChannel.delete(oldest);
+      }
     }
     return stored.seq;
   }

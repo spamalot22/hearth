@@ -67,6 +67,40 @@ void main() {
   });
 
   test(
+    'revocation before discovery survives reload and blocks late bundles',
+    () async {
+      final root = await Identity.generate();
+      final otherRoot = await Identity.generate();
+      final device = await Identity.generate();
+      var store = await DeviceStore.open();
+      final revocation = await DeviceRevocation.issue(
+        root: root,
+        deviceKey: device.publicKey,
+      );
+      expect(await store.addRevocation(revocation), isTrue);
+      expect(await store.addRevocation(revocation), isFalse);
+      await Hive.close();
+      Hive.init(temp.path);
+      store = await DeviceStore.open();
+      await store.setBundle(
+        await DeviceBundle.publish(root: root, devices: [device.publicKey]),
+      );
+      expect(store.authorizedDeviceKeys(root.publicKeyHex), isEmpty);
+      expect(
+        store.isRevoked(otherRoot.publicKeyHex, device.publicKeyHex),
+        isFalse,
+      );
+      await store.setBundle(
+        await DeviceBundle.publish(
+          root: otherRoot,
+          devices: [device.publicKey],
+        ),
+      );
+      expect(store.authorizedDeviceKeys(otherRoot.publicKeyHex), hasLength(1));
+    },
+  );
+
+  test(
     'stale bundles add authorised devices without replacing latest',
     () async {
       final root = await Identity.generate();

@@ -7,6 +7,8 @@ import {
   MAX_CHANNELS,
   MAX_MAILBOX_SIGNALS,
   MAX_TOTAL_SIGNALS,
+  MAX_TOTAL_SIGNAL_BYTES,
+  MAX_TOTAL_PRESENCE,
   RateLimiter,
   SIGNAL_RATE_LIMIT,
   SIGNAL_RATE_WINDOW_MS,
@@ -78,7 +80,12 @@ export class SignalHub {
   // Auth tokens: token -> { pubkey, expiresMs }
   private readonly tokens = new Map<string, { pubkey: string; expiresMs: number }>();
   private signalCount = 0;
+  private signalBytes = 0;
+  private presenceCount = 0;
+  private readonly signalSizes = new WeakMap<StoredSignal, number>();
   private seq = 0;
+
+  constructor(private readonly maxSignalBytes = MAX_TOTAL_SIGNAL_BYTES) {}
 
   /** Marks [pubkey] present in [channel] and returns the other live peers. */
   announce(
@@ -93,6 +100,7 @@ export class SignalHub {
       // LRU eviction: cap unique channels in the presence map.
       if (this.presence.size >= MAX_CHANNELS) {
         const oldest = this.presence.keys().next().value!;
+        this.presenceCount -= this.presence.get(oldest)!.size;
         this.presence.delete(oldest);
       }
     } else {
@@ -100,12 +108,18 @@ export class SignalHub {
       this.presence.delete(channel);
     }
     this.presence.set(channel, chan);
-    chan.delete(pubkey);
+    if (!chan.delete(pubkey)) this.presenceCount++;
     chan.set(pubkey, { seenMs: nowMs, claim });
     while (chan.size > MAX_PRESENCE_PER_CHANNEL) {
       const oldest = chan.keys().next().value;
       if (oldest === undefined) break;
       chan.delete(oldest);
+      this.presenceCount--;
+    }
+    while (this.presenceCount > MAX_TOTAL_PRESENCE) {
+      const oldest = this.presence.keys().next().value!;
+      this.presenceCount -= this.presence.get(oldest)!.size;
+      this.presence.delete(oldest);
     }
     return this.peers(channel, pubkey, nowMs);
   }
@@ -146,6 +160,7 @@ export class SignalHub {
     for (const [pubkey, entry] of chan) {
       if (nowMs - entry.seenMs > PRESENCE_TTL_MS) {
         chan.delete(pubkey);
+        this.presenceCount--;
       } else if (pubkey !== exclude) {
         live.push(pubkey);
       }
@@ -192,19 +207,27 @@ export class SignalHub {
     };
     box.push(stored);
     this.signalCount++;
+    const bytes = JSON.stringify(data ?? null).length * 2 + 512;
+    this.signalSizes.set(stored, bytes);
+    this.signalBytes += bytes;
     if (box.length > MAX_MAILBOX_SIGNALS) {
       const removed = box.length - MAX_MAILBOX_SIGNALS;
-      box.splice(0, removed);
+      for (const entry of box.splice(0, removed)) {
+        this.signalBytes -= this.signalSizes.get(entry)!;
+      }
       this.signalCount -= removed;
     }
     this.mailboxes.set(key, box);
     while (
       this.mailboxes.size > MAX_SIGNAL_MAILBOXES ||
-      this.signalCount > MAX_TOTAL_SIGNALS
+      this.signalCount > MAX_TOTAL_SIGNALS ||
+      this.signalBytes > this.maxSignalBytes
     ) {
       const oldest = this.mailboxes.keys().next().value;
       if (oldest === undefined) break;
-      this.signalCount -= this.mailboxes.get(oldest)?.length ?? 0;
+      const entries = this.mailboxes.get(oldest)!;
+      this.signalCount -= entries.length;
+      for (const entry of entries) this.signalBytes -= this.signalSizes.get(entry)!;
       this.mailboxes.delete(oldest);
     }
     return stored.seq;
@@ -221,7 +244,11 @@ export class SignalHub {
     const key = this.mailboxKey(channel, to);
     const box = this.mailboxes.get(key);
     if (!box) return [];
-    const fresh = box.filter((s) => nowMs - s.ts <= SIGNAL_TTL_MS);
+    const fresh = box.filter((s) => {
+      if (nowMs - s.ts <= SIGNAL_TTL_MS) return true;
+      this.signalBytes -= this.signalSizes.get(s)!;
+      return false;
+    });
     this.signalCount -= box.length - fresh.length;
     if (fresh.length === 0) {
       this.mailboxes.delete(key);
@@ -247,6 +274,7 @@ export function addSignalingRoutes(
       pubkey?: string;
       ts?: number;
       sig?: string;
+      authSig?: string;
       cap?: string;
       voice?: boolean;
       voiceSig?: string;
@@ -256,7 +284,8 @@ export function addSignalingRoutes(
     } catch {
       return c.json({ error: 'invalid json' }, 400);
     }
-    if (!validChannel(body.channel) || typeof body.pubkey !== 'string') {
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        !validChannel(body.channel) || typeof body.pubkey !== 'string') {
       return c.json({ error: 'channel and pubkey required' }, 400);
     }
     if (!HEX_PUBKEY.test(body.pubkey)) {
@@ -294,6 +323,23 @@ export function addSignalingRoutes(
         valid = false;
       }
       if (!valid) return c.json({ error: 'invalid signature' }, 403);
+      // Presence signatures are public evidence returned to other peers. They
+      // must never suffice to issue a mailbox token for that identity.
+      if (typeof body.authSig !== 'string' || !HEX_SIGNATURE.test(body.authSig)) {
+        return c.json({ error: 'authentication signature required' }, 403);
+      }
+      try {
+        valid = await verifySignature(
+          new TextEncoder().encode(
+            `announce-auth|${body.channel}|${body.pubkey}|${ts}`,
+          ),
+          hexToBytes(body.authSig),
+          hexToBytes(body.pubkey),
+        );
+      } catch {
+        valid = false;
+      }
+      if (!valid) return c.json({ error: 'invalid authentication signature' }, 403);
       if (body.voice === true) {
         if (
           typeof body.voiceSig !== 'string' ||
@@ -358,6 +404,7 @@ export function addSignalingRoutes(
       return c.json({ error: 'invalid json' }, 400);
     }
     if (
+      !body || typeof body !== 'object' || Array.isArray(body) ||
       !validChannel(body.channel) || typeof body.to !== 'string' ||
       typeof body.from !== 'string' || typeof body.kind !== 'string'
     ) {

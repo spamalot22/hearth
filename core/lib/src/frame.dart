@@ -17,6 +17,12 @@ abstract interface class FrameChannel {
   /// Sends [frame] to the peer.
   void send(SyncFrame frame);
 
+  /// Waits for queued outgoing frames to drain before producing more.
+  Future<void> flush();
+
+  /// Disconnects an overloaded or unusable link so reconciliation can retry.
+  Future<void> close();
+
   /// Frames arriving from the peer.
   Stream<SyncFrame> get frames;
 }

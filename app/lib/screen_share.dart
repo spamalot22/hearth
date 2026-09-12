@@ -105,12 +105,18 @@ class ScreenBroadcast {
   Future<void> stop() async {
     if (_closed) return;
     _closed = true;
-    await _sub?.cancel();
-    await _mesh.close();
     for (final track in _stream.getTracks()) {
-      await track.stop();
+      try {
+        track.enabled = false;
+        await track.stop();
+      } catch (_) {}
     }
-    await _stream.dispose();
+    try {
+      await _sub?.cancel();
+      await _mesh.close();
+    } finally {
+      await _stream.dispose();
+    }
   }
 
   Future<void> enforcePeerPolicy() => _mesh.enforcePeerPolicy();
@@ -183,10 +189,13 @@ class ScreenView {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
-    await _sub?.cancel();
-    await _mesh.close();
-    renderer.srcObject = null;
-    await renderer.dispose();
+    try {
+      await _sub?.cancel();
+      await _mesh.close();
+    } finally {
+      renderer.srcObject = null;
+      await renderer.dispose();
+    }
   }
 
   Future<void> enforcePeerPolicy() => _mesh.enforcePeerPolicy();

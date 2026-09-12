@@ -43,6 +43,7 @@ class VoiceSession {
 
   // peerHex -> a renderer bound to their remote stream (drives web playback).
   final Map<String, RTCVideoRenderer> _remotes = {};
+  final Map<String, Object> _remoteUpdates = {};
   StreamSubscription<void>? _sub;
   StreamSubscription<SignalControl>? _externalSignalSub;
   Timer? _levelTimer;
@@ -52,6 +53,7 @@ class VoiceSession {
   bool _muted = false;
   bool _deafened = false;
   bool _closed = false;
+  bool _pollingLevels = false;
   bool _loggedInboundRtp = false;
   bool _loggedOutboundRtp = false;
 
@@ -279,12 +281,24 @@ class VoiceSession {
   /// from its inbound-rtp report, ours from the media-source report — so the UI
   /// can show who's speaking.
   Future<void> _pollLevels() async {
-    if (_closed) return;
+    if (_closed || _pollingLevels) return;
+    _pollingLevels = true;
+    try {
+      await _readLevels();
+    } finally {
+      _pollingLevels = false;
+    }
+  }
+
+  Future<void> _readLevels() async {
     final next = <String, double>{};
     var self = 0.0;
-    for (final entry in _mesh.connections.entries) {
+    for (final entry in _mesh.connections.entries.toList()) {
       try {
-        for (final report in await entry.value.getStats()) {
+        final reports = await entry.value.getStats();
+        if (_closed) return;
+        if (!identical(_mesh.connections[entry.key], entry.value)) continue;
+        for (final report in reports) {
           final packetsReceived = report.values['packetsReceived'];
           if (!_loggedInboundRtp &&
               report.type == 'inbound-rtp' &&
@@ -316,6 +330,7 @@ class VoiceSession {
         // A transient stats failure just skips this tick.
       }
     }
+    if (_closed) return;
     // Fallback: if no stats gave us a self level, check if the track is live.
     if (self == 0.0) {
       final tracks = _localStream.getAudioTracks();
@@ -336,10 +351,27 @@ class VoiceSession {
 
   Future<void> _onRemote(String peerHex, MediaStream remote) async {
     if (_closed) return;
+    final update = Object();
+    _remoteUpdates[peerHex] = update;
+    bool current() => !_closed && identical(_remoteUpdates[peerHex], update);
     final isNew = !_remotes.containsKey(peerHex);
     final renderer = _remotes[peerHex] ?? RTCVideoRenderer();
     if (isNew) {
-      await renderer.initialize();
+      try {
+        await renderer.initialize();
+      } catch (error) {
+        HearthDiagnostics.log(
+          '[hearth][voice] remote renderer initialization failed: ${error.runtimeType}',
+        );
+        try {
+          await renderer.dispose();
+        } catch (_) {}
+        return;
+      }
+      if (!current()) {
+        await renderer.dispose();
+        return;
+      }
       _remotes[peerHex] = renderer;
     }
     renderer.srcObject = remote;
@@ -358,8 +390,10 @@ class VoiceSession {
         );
       }
     }
+    if (!current()) return;
     _remoteStreams[peerHex] = remote;
     await _applyVolume(peerHex); // honour deafen / a prior volume for this peer
+    if (!current()) return;
     // Cue a join only for peers arriving after the initial mesh-connect burst,
     // so joining a busy call doesn't fire one blip per person already there.
     if (isNew && DateTime.now().difference(_joinedAt).inMilliseconds > 1500) {
@@ -369,6 +403,8 @@ class VoiceSession {
   }
 
   void _onPeerLeft(String peerHex) {
+    _remoteUpdates.remove(peerHex);
+    _levels.remove(peerHex);
     final renderer = _remotes.remove(peerHex);
     _remoteStreams.remove(peerHex);
     _volumes.remove(peerHex);
@@ -377,7 +413,7 @@ class VoiceSession {
       unawaited(renderer.dispose());
       unawaited(_playCue(connect: false));
     }
-    _onChange();
+    if (!_closed) _onChange();
   }
 
   Future<void> _playCue({required bool connect}) async {
@@ -426,7 +462,7 @@ class VoiceSession {
     try {
       if (kIsWeb) {
         var selected = true;
-        for (final renderer in _remotes.values) {
+        for (final renderer in _remotes.values.toList()) {
           selected = await renderer.audioOutput(deviceId) && selected;
         }
         if (!selected) return false;
@@ -496,6 +532,15 @@ class VoiceSession {
   Future<void> leave() async {
     if (_closed) return;
     _closed = true;
+    _remoteUpdates.clear();
+    _levelTimer?.cancel();
+    // Release capture first, even if signalling or renderer cleanup fails.
+    for (final track in _localStream.getTracks()) {
+      try {
+        track.enabled = false;
+        await track.stop();
+      } catch (_) {}
+    }
     // Notify peers immediately so they don't wait for ICE timeout.
     sendControl(VoiceLeaveControl());
     try {
@@ -508,17 +553,23 @@ class VoiceSession {
     await _sub?.cancel();
     await _externalSignalSub?.cancel();
     _levelTimer?.cancel();
-    await _mesh.close();
-    for (final renderer in _remotes.values) {
-      renderer.srcObject = null;
-      await renderer.dispose();
+    try {
+      await _mesh.close();
+    } catch (_) {}
+    for (final renderer in _remotes.values.toList()) {
+      try {
+        renderer.srcObject = null;
+        await renderer.dispose();
+      } catch (_) {}
     }
     _remotes.clear();
-    for (final track in _localStream.getTracks()) {
-      await track.stop();
+    _remoteStreams.clear();
+    _levels.clear();
+    try {
+      await _localStream.dispose();
+    } finally {
+      await _cuePlayer.dispose();
     }
-    await _localStream.dispose();
-    await _cuePlayer.dispose();
     _onChange();
   }
 

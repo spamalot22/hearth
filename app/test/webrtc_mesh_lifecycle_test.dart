@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hearth/signal_auth.dart';
 import 'package:hearth/webrtc_mesh.dart';
@@ -20,6 +22,114 @@ Future<void> _waitUntil(bool Function() condition) async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'failed handshake retires even without a frame stream listener',
+    () async {
+      const native = MethodChannel('FlutterWebRTC.Method');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(native, (call) async {
+        if (call.method == 'createPeerConnection') {
+          throw PlatformException(code: 'test-failure');
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(native, null));
+      final peer = (await Identity.generate()).publicKeyHex;
+      final left = <String>[];
+      final mesh = WebRtcMesh(
+        baseUrl: Uri.parse('https://relay.example'),
+        channel: 'voice:channel',
+        identity: await Identity.generate(),
+        forceInitiator: true,
+        externalRouteAvailable: (_) => true,
+        onPeerLeft: left.add,
+        client: MockClient((_) async => http.Response('{}', 200)),
+      );
+      addTearDown(mesh.close);
+      mesh.maybeInitiateVia(peer);
+      await _waitUntil(() => left.isNotEmpty);
+      expect(left, [peer]);
+    },
+  );
+
+  test(
+    'connection created after mesh shutdown is closed and disposed',
+    () async {
+      const native = MethodChannel('FlutterWebRTC.Method');
+      const events = MethodChannel('FlutterWebRTC/peerConnectionEventlate');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final created = Completer<Map<String, Object>>();
+      final calls = <String>[];
+      messenger.setMockMethodCallHandler(native, (call) async {
+        calls.add(call.method);
+        if (call.method == 'createPeerConnection') return created.future;
+        return null;
+      });
+      messenger.setMockMethodCallHandler(events, (_) async => null);
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(native, null);
+        messenger.setMockMethodCallHandler(events, null);
+      });
+      final mesh = WebRtcMesh(
+        baseUrl: Uri.parse('https://relay.example'),
+        channel: 'voice:channel',
+        identity: await Identity.generate(),
+        forceInitiator: true,
+        externalRouteAvailable: (_) => true,
+        client: MockClient((_) async => http.Response('{}', 200)),
+      );
+      addTearDown(mesh.close);
+      mesh.maybeInitiateVia((await Identity.generate()).publicKeyHex);
+      await _waitUntil(() => calls.contains('createPeerConnection'));
+      await mesh.close().timeout(const Duration(seconds: 1));
+      created.complete({'peerConnectionId': 'late'});
+      await _waitUntil(() => calls.contains('peerConnectionDispose'));
+      expect(calls, contains('peerConnectionClose'));
+      expect(calls, isNot(contains('createDataChannel')));
+    },
+  );
+
+  test('announce sends a separate private authentication proof', () async {
+    final identity = await Identity.generate();
+    Map<String, dynamic>? announced;
+    final mesh = WebRtcMesh(
+      baseUrl: Uri.parse('https://relay.example'),
+      channel: 'channel',
+      identity: identity,
+      client: MockClient((request) async {
+        if (request.url.path == '/announce') {
+          announced = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response('{"peers":[],"token":"token"}', 200);
+        }
+        return http.Response('{"signals":[],"seq":0}', 200);
+      }),
+    );
+    final subscription = mesh.peerConnected.listen((_) {});
+    addTearDown(() async {
+      await subscription.cancel();
+      await mesh.close();
+    });
+    await _waitUntil(() => announced != null);
+    final body = announced!;
+    expect(body['authSig'], isNot(body['sig']));
+    expect(
+      await Identity.verifySignature(
+        announceAuthSigningBytes(
+          'channel',
+          identity.publicKeyHex,
+          body['ts'] as int,
+        ),
+        signature: hex.decode(body['authSig'] as String),
+        publicKey: identity.publicKey,
+      ),
+      isTrue,
+    );
+  });
+
   test(
     'child mesh delays relay rendezvous during its P2P grace period',
     () async {

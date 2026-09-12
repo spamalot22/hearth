@@ -26,6 +26,8 @@ class SyncEngine {
     this.isDeviceRevoked,
     this.messageAllowed,
     this.peerReceiptAllowed,
+    this.blobRetryInterval = const Duration(seconds: 30),
+    this.reconcileInterval = const Duration(minutes: 1),
   });
 
   final MessageRepository repository;
@@ -36,6 +38,8 @@ class SyncEngine {
 
   /// Optional content-addressed store for media blobs fetched from peers.
   final BlobStore? blobStore;
+  final Duration blobRetryInterval;
+  final Duration reconcileInterval;
 
   /// Optional callback: returns true if [deviceKeyHex] was revoked by its
   /// authorising [rootKeyHex]. Revocations are root-scoped so one identity
@@ -76,6 +80,8 @@ class SyncEngine {
       link: link,
       onAdded: _onNewMessage,
       blobStore: blobStore,
+      blobRetryInterval: blobRetryInterval,
+      reconcileInterval: reconcileInterval,
       onBlob: _onBlob,
       isDeviceRevoked: isDeviceRevoked,
       messageAllowed: messageAllowed,
@@ -188,8 +194,17 @@ class SyncEngine {
   }
 
   void _onBlob(String hash) {
-    _pendingBlobs.remove(hash);
+    cancelBlobRequest(hash);
     if (!_blobArrived.isClosed) _blobArrived.add(hash);
+  }
+
+  /// Stops network retries when the shared local store acquired this blob by
+  /// another path (for example a different channel).
+  void cancelBlobRequest(String hash) {
+    _pendingBlobs.remove(hash);
+    for (final session in _sessions) {
+      session.forgetBlob(hash);
+    }
   }
 
   static const int _maxPendingBlobs = 1000;
@@ -233,11 +248,22 @@ class SyncSession {
     this.allowIngest,
     this.onPeerStored,
     this.onClosed,
+    this.blobRetryInterval = const Duration(seconds: 30),
+    this.reconcileInterval = const Duration(minutes: 1),
   }) {
+    if (blobRetryInterval <= Duration.zero) {
+      throw ArgumentError.value(blobRetryInterval, 'blobRetryInterval');
+    }
+    if (reconcileInterval <= Duration.zero) {
+      throw ArgumentError.value(reconcileInterval, 'reconcileInterval');
+    }
     _sub = _link.frames.listen(
       _enqueue,
       onError: (Object _, StackTrace _) {},
-      onDone: onClosed,
+      onDone: () {
+        _stop();
+        onClosed?.call();
+      },
     );
   }
 
@@ -251,6 +277,8 @@ class SyncSession {
   final bool Function()? allowIngest;
   final void Function(String idHex)? onPeerStored;
   final void Function()? onClosed;
+  final Duration blobRetryInterval;
+  final Duration reconcileInterval;
 
   /// Called after this session stores a *new* message, so the engine can spread
   /// it to other peers.
@@ -259,23 +287,104 @@ class SyncSession {
   late final StreamSubscription<SyncFrame> _sub;
   final Set<String> _wanted = <String>{};
   final Set<String> _requestedBlobs = <String>{};
+  final Map<String, DateTime> _activeBlobs = {};
+  Timer? _blobRetryTimer;
+  Timer? _reconcileTimer;
+  int _headOffset = 0;
+  bool _closed = false;
   final Map<String, _BlobAssembly> _blobAssemblies = {};
   int _blobAssemblyBytes = 0;
   Future<void> _tail = Future<void>.value();
+  int _queuedFrames = 0;
+  int _queuedFrameBytes = 0;
+  static const int _maxQueuedFrames = 2048;
+  static const int _maxQueuedFrameBytes = 32 * 1024 * 1024;
 
   /// Advertises our current heads to begin reconciliation.
-  void start() => _link.send(HaveFrame(_hex(repository.heads())));
+  void start() {
+    if (_closed || _reconcileTimer != null) return;
+    _advertiseHeads();
+    _reconcileTimer = Timer.periodic(reconcileInterval, (_) {
+      if (_closed) return;
+      _advertiseHeads();
+      final retry = _wanted.take(100).toList();
+      if (retry.isEmpty) return;
+      // Rotate unanswered wants so unavailable ids cannot starve later history.
+      _wanted.removeAll(retry);
+      _wanted.addAll(retry);
+      _link.send(WantFrame(retry));
+    });
+  }
+
+  void _advertiseHeads() {
+    final heads = _hex(repository.heads());
+    if (_headOffset >= heads.length) _headOffset = 0;
+    final batch = heads.skip(_headOffset).take(_maxHaveHeads).toList();
+    _headOffset += batch.length;
+    _link.send(HaveFrame(batch));
+  }
 
   /// Sends [message] to this peer (a live send or an epidemic forward).
   void gossip(Message message) => _link.send(GiveFrame(message));
 
   /// Asks this peer for the blob [hash].
   void requestBlob(String hash) {
-    if (!_blobPattern.hasMatch(hash) || !_requestedBlobs.add(hash)) return;
-    _link.send(WantBlobFrame(hash, chunked: true));
+    if (_closed ||
+        !_blobPattern.hasMatch(hash) ||
+        _requestedBlobs.length >= SyncEngine._maxPendingBlobs ||
+        !_requestedBlobs.add(hash)) {
+      return;
+    }
+    _pumpBlobRequests();
+  }
+
+  void forgetBlob(String hash) {
+    _requestedBlobs.remove(hash);
+    _activeBlobs.remove(hash);
+    _discardBlobAssembly(hash);
+    _pumpBlobRequests();
+  }
+
+  void _pumpBlobRequests() {
+    if (_closed) return;
+    if (_requestedBlobs.isEmpty) {
+      _blobRetryTimer?.cancel();
+      _blobRetryTimer = null;
+      return;
+    }
+    for (final hash in _requestedBlobs) {
+      if (_activeBlobs.length >= _maxBlobAssemblies) break;
+      if (_activeBlobs.containsKey(hash)) continue;
+      _activeBlobs[hash] = DateTime.now();
+      _link.send(WantBlobFrame(hash, chunked: true));
+    }
+    _blobRetryTimer ??= Timer.periodic(blobRetryInterval, (_) {
+      final now = DateTime.now();
+      for (final hash in _activeBlobs.keys.toList()) {
+        if (now.difference(_activeBlobs[hash]!) < blobRetryInterval) continue;
+        _activeBlobs.remove(hash);
+        _discardBlobAssembly(hash);
+        // Move unavailable blobs behind waiting ones so they cannot starve them.
+        _requestedBlobs.remove(hash);
+        _requestedBlobs.add(hash);
+      }
+      _pumpBlobRequests();
+    });
+  }
+
+  void _stop() {
+    _closed = true;
+    _blobRetryTimer?.cancel();
+    _reconcileTimer?.cancel();
+    _blobRetryTimer = null;
+    _requestedBlobs.clear();
+    _activeBlobs.clear();
+    _blobAssemblies.clear();
+    _blobAssemblyBytes = 0;
   }
 
   Future<void> close() async {
+    _stop();
     await _sub.cancel();
     await _tail;
   }
@@ -294,23 +403,51 @@ class SyncSession {
 
   // Serialise handling so concurrent gives don't race on _wanted or add().
   void _enqueue(SyncFrame frame) {
-    _tail = _tail.then((_) => _handle(frame)).catchError((Object _) {
-      // A malformed peer frame must not poison the serial queue and prevent
-      // every subsequent valid frame from being processed.
+    if (_closed) return;
+    final int bytes;
+    try {
+      bytes = frame.encode().length * 2;
+    } catch (_) {
+      return;
+    }
+    if (_queuedFrames >= _maxQueuedFrames ||
+        _queuedFrameBytes + bytes > _maxQueuedFrameBytes) {
+      _stop();
+      onClosed?.call();
+      unawaited(_link.close().catchError((Object _) {}));
+      return;
+    }
+    _queuedFrames++;
+    _queuedFrameBytes += bytes;
+    _tail = _tail.then((_) async {
+      try {
+        await _handle(frame);
+      } catch (_) {
+        // One malformed frame must not poison subsequent valid frames.
+      } finally {
+        _queuedFrames--;
+        _queuedFrameBytes -= bytes;
+      }
     });
   }
 
   Future<void> _handle(SyncFrame frame) async {
+    if (_closed) return;
     switch (frame) {
       case HaveFrame(:final heads):
         _requestMissing(heads.take(_maxHaveHeads));
       case WantFrame(:final ids):
         // Cap responses to prevent amplification.
+        var sent = 0;
         for (final idHex in ids.take(_maxHaveHeads)) {
+          if (_closed) return;
           final id = _idBytes(idHex);
           if (id == null) continue;
           final message = repository.get(id);
-          if (message != null) _link.send(GiveFrame(message));
+          if (message != null) {
+            _link.send(GiveFrame(message));
+            if (++sent % 16 == 0) await _link.flush();
+          }
         }
       case GiveFrame(:final message):
         await _receive(message);
@@ -319,6 +456,7 @@ class SyncSession {
       case WantBlobFrame(:final hash, :final chunked):
         if (!_blobPattern.hasMatch(hash)) return;
         final bytes = await blobStore?.get(hash);
+        if (_closed) return;
         if (bytes != null && bytes.length <= maxBlobBytes) {
           if (!chunked || bytes.length <= _blobChunkBytes) {
             _link.send(GiveBlobFrame(hash, bytes));
@@ -328,6 +466,7 @@ class SyncSession {
               offset < bytes.length;
               offset += _blobChunkBytes
             ) {
+              if (_closed) return;
               final end = min(offset + _blobChunkBytes, bytes.length);
               _link.send(
                 GiveBlobChunkFrame(
@@ -337,11 +476,14 @@ class SyncSession {
                   Uint8List.sublistView(bytes, offset, end),
                 ),
               );
+              if (end == bytes.length || end % (_blobChunkBytes * 8) == 0) {
+                await _link.flush();
+              }
             }
           }
         }
       case GiveBlobFrame(:final hash, :final bytes):
-        if (!_requestedBlobs.contains(hash)) return;
+        if (!_activeBlobs.containsKey(hash)) return;
         // Reject oversized blobs before spending CPU hashing them.
         if (bytes.length > maxBlobBytes) return;
         // Content-addressed: the bytes must hash to the requested id.
@@ -349,8 +491,7 @@ class SyncSession {
         final store = blobStore;
         if (store == null) return;
         await store.put(bytes);
-        _discardBlobAssembly(hash);
-        _requestedBlobs.remove(hash);
+        forgetBlob(hash);
         onBlob?.call(hash);
       case GiveBlobChunkFrame(
         :final hash,
@@ -368,7 +509,7 @@ class SyncSession {
     int totalBytes,
     Uint8List bytes,
   ) async {
-    if (!_requestedBlobs.contains(hash) ||
+    if (!_activeBlobs.containsKey(hash) ||
         !_blobPattern.hasMatch(hash) ||
         offset < 0 ||
         totalBytes <= 0 ||
@@ -396,6 +537,7 @@ class SyncSession {
     }
 
     assembly.add(bytes);
+    _activeBlobs[hash] = DateTime.now();
     if (assembly.length != totalBytes) return;
 
     _discardBlobAssembly(hash);
@@ -404,7 +546,7 @@ class SyncSession {
     final store = blobStore;
     if (store == null) return;
     await store.put(complete);
-    _requestedBlobs.remove(hash);
+    forgetBlob(hash);
     onBlob?.call(hash);
   }
 
@@ -427,9 +569,9 @@ class SyncSession {
         return;
       }
     }
-    _wanted.remove(message.idHex);
     try {
       final added = await repository.add(message);
+      _wanted.remove(message.idHex);
       // Acknowledge only after the verified message is durably present. This is
       // deliberately sent for duplicates too: already having the message is a
       // valid custody confirmation.

@@ -530,6 +530,7 @@ class ChannelSession {
     if (bytes != null) {
       _blobs[hash] = bytes;
       _requested.remove(hash);
+      engine.cancelBlobRequest(hash);
     } else if (!_requested.contains(hash) && engine.requestBlob(hash)) {
       _requested.add(hash);
     }
@@ -639,10 +640,27 @@ class ChannelManager {
   Map<String, Object?>? versionManifest;
 
   final Map<String, ChannelSession> _sessions = {};
-  // DM ids currently being opened — guards the await window in [openDm] so two
-  // concurrent opens for the same peer don't both build a session (leaking one).
-  final Set<String> _opening = {};
+  final Map<String, Future<void>> _operations = {};
+  bool _closed = false;
   String? _activeId;
+
+  Future<void> _runChannelOperation(String id, Future<void> Function() action) {
+    if (_closed) return Future<void>.value();
+    final operation = (_operations[id] ?? Future<void>.value()).then((_) async {
+      if (!_closed) await action();
+    });
+    final tail = operation.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    _operations[id] = tail;
+    unawaited(
+      tail.then((_) {
+        if (identical(_operations[id], tail)) _operations.remove(id);
+      }),
+    );
+    return operation;
+  }
 
   /// Peers currently typing, per channel: channelId -> set of peerHex.
   final Map<String, Set<String>> typingPeers = {};
@@ -750,6 +768,17 @@ class ChannelManager {
     int epoch = 0,
     Map<int, Uint8List>? keys,
     bool replace = false,
+  }) => _runChannelOperation(
+    id,
+    () => _openGroup(id, key, epoch: epoch, keys: keys, replace: replace),
+  );
+
+  Future<void> _openGroup(
+    String id,
+    Uint8List key, {
+    required int epoch,
+    Map<int, Uint8List>? keys,
+    required bool replace,
   }) async {
     if (replace) {
       await _sessions.remove(id)?.close();
@@ -776,6 +805,10 @@ class ChannelManager {
         onInference: onInference,
       );
       _sessions[id]!.mesh?.versionManifest = versionManifest;
+    }
+    if (_closed) {
+      await _sessions.remove(id)?.close();
+      return;
     }
     _activeId = id;
     onUpdate();
@@ -851,53 +884,64 @@ class ChannelManager {
   /// Opens (or focuses) the encrypted DM with [peerPubkey]. A blocked peer is
   /// refused, so no DM session — hence no ingestion — exists for them.
   Future<void> openDm(List<int> peerPubkey, {bool replace = false}) async {
+    if (_closed) return;
     if (isBlocked?.call(hex.encode(peerPubkey)) ?? false) return;
     final id = await dmChannelId(identity.publicKeyHex, hex.encode(peerPubkey));
+    await _runChannelOperation(
+      id,
+      () => _openDm(peerPubkey, id, replace: replace),
+    );
+  }
+
+  Future<void> _openDm(
+    List<int> peerPubkey,
+    String id, {
+    required bool replace,
+  }) async {
+    if (isBlocked?.call(hex.encode(peerPubkey)) ?? false) return;
     if (replace) {
       await _sessions.remove(id)?.close();
     }
-    // Reserve synchronously so a concurrent open for the same peer bails here
-    // rather than building a second (leaked) session across the await below.
-    if (!_sessions.containsKey(id) && _opening.add(id)) {
-      try {
-        _sessions[id] = await ChannelSession.open(
-          channelId: id,
-          identity: identity,
-          meshIdentity: meshIdentity,
-          relayUrl: relayUrl,
-          fallbackUrls: fallbackUrls,
-          live: live,
-          onUpdate: () => _onSessionUpdate(id),
-          cipher: _dmCipher(peerPubkey),
-          peerPubkey: peerPubkey,
-          relayMailbox: dmMailboxLookup?.call(hex.encode(peerPubkey)),
-          blobStore: blobStore,
-          isDeviceRevoked: isDeviceRevoked,
-          messageAllowed: (message) {
-            final authorHex = hex.encode(message.author);
-            return authorHex == identity.publicKeyHex ||
-                authorHex == hex.encode(peerPubkey);
-          },
-          candidateCache: candidateCache,
-          peerAllowed: (peerHex) =>
-              _dmPeerAllowed(hex.encode(peerPubkey), peerHex),
-          peerReceiptAllowed: (peerHex) =>
-              _dmPeerReceiptAllowed(hex.encode(peerPubkey), peerHex),
-          onPeerConnected: _broadcastContactsOnline,
-          // For DMs we know the peer's root identity; fire with that (not the
-          // connecting device's mesh key) so DM persistence resolves correctly.
-          onPeerConnectedHex: onDmConnected != null
-              ? (_) => onDmConnected!(hex.encode(peerPubkey))
-              : null,
-          onContactsOnline: _handleContactsOnline,
-          onVersionControl: _handleVersionControl,
-          onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
-          onInference: onInference,
-        );
-        _sessions[id]!.mesh?.versionManifest = versionManifest;
-      } finally {
-        _opening.remove(id);
-      }
+    if (!_sessions.containsKey(id)) {
+      _sessions[id] = await ChannelSession.open(
+        channelId: id,
+        identity: identity,
+        meshIdentity: meshIdentity,
+        relayUrl: relayUrl,
+        fallbackUrls: fallbackUrls,
+        live: live,
+        onUpdate: () => _onSessionUpdate(id),
+        cipher: _dmCipher(peerPubkey),
+        peerPubkey: peerPubkey,
+        relayMailbox: dmMailboxLookup?.call(hex.encode(peerPubkey)),
+        blobStore: blobStore,
+        isDeviceRevoked: isDeviceRevoked,
+        messageAllowed: (message) {
+          final authorHex = hex.encode(message.author);
+          return authorHex == identity.publicKeyHex ||
+              authorHex == hex.encode(peerPubkey);
+        },
+        candidateCache: candidateCache,
+        peerAllowed: (peerHex) =>
+            _dmPeerAllowed(hex.encode(peerPubkey), peerHex),
+        peerReceiptAllowed: (peerHex) =>
+            _dmPeerReceiptAllowed(hex.encode(peerPubkey), peerHex),
+        onPeerConnected: _broadcastContactsOnline,
+        // For DMs we know the peer's root identity; fire with that (not the
+        // connecting device's mesh key) so DM persistence resolves correctly.
+        onPeerConnectedHex: onDmConnected != null
+            ? (_) => onDmConnected!(hex.encode(peerPubkey))
+            : null,
+        onContactsOnline: _handleContactsOnline,
+        onVersionControl: _handleVersionControl,
+        onTyping: (peerHex, typing) => _handleTyping(id, peerHex, typing),
+        onInference: onInference,
+      );
+      _sessions[id]!.mesh?.versionManifest = versionManifest;
+    }
+    if (_closed) {
+      await _sessions.remove(id)?.close();
+      return;
     }
     _activeId = id;
     onUpdate();
@@ -918,6 +962,7 @@ class ChannelManager {
   }
 
   void _onSessionUpdate(String channelId) {
+    if (_closed) return;
     // Merge device→root mappings from this session's messages.
     final session = _sessions[channelId];
     if (session != null) deviceToRoot.addAll(session.deviceRoots);
@@ -929,21 +974,26 @@ class ChannelManager {
 
   /// Closes and forgets one channel, switching the active channel to another (or
   /// none). Callers also drop it from the registry.
-  Future<void> leave(String channelId) async {
-    final session = _sessions.remove(channelId);
-    if (session == null) return;
-    if (_activeId == channelId) {
-      _activeId = _sessions.keys.isEmpty ? null : _sessions.keys.first;
-    }
-    await session.close();
-    onUpdate();
-  }
+  Future<void> leave(String channelId) =>
+      _runChannelOperation(channelId, () async {
+        final session = _sessions.remove(channelId);
+        if (session == null) return;
+        if (_activeId == channelId) {
+          _activeId = _sessions.keys.isEmpty ? null : _sessions.keys.first;
+        }
+        await session.close();
+        onUpdate();
+      });
 
   Future<void> close() async {
+    _closed = true;
+    await Future.wait(_operations.values.toList());
     for (final session in _sessions.values.toList()) {
       await session.close();
     }
     _sessions.clear();
+    _activeId = null;
+    typingPeers.clear();
   }
 
   /// Kicks all sessions to re-announce to the relay (e.g. after relay recovers).

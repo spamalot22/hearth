@@ -1315,6 +1315,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   MediaLibrary? _library;
   AudioPlayer? _player;
   VoiceSession? _voice;
+  bool _joiningVoice = false;
+  int _voiceJoinEpoch = 0;
+  Future<void>? _leavingVoice;
   bool _speakerOn = true;
   // Voice presence: who's in voice per channel (learned via gossip mesh).
   final Map<String, Set<String>> _voicePresence = {}; // channelId -> peerHexes
@@ -1343,7 +1346,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   // Screen share (Windows): my outgoing broadcast (null = not sharing), the
   // incoming shares I'm watching by sharer pubkey, and which one the stage shows.
   ScreenBroadcast? _broadcast;
+  bool _startingScreenShare = false;
+  int _screenShareEpoch = 0;
   final Map<String, ScreenView> _screenViews = {};
+  final Map<String, Object> _pendingScreenViews = {};
   String? _selectedShareHex;
   Set<String> _sharedTo = {}; // voice peers already told about my active share
   // Shared YouTube "watch party" (Windows): host-driven, synced over the voice
@@ -4453,6 +4459,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _updateCheckTimer?.cancel();
     unawaited(_channels?.close());
     unawaited(_broadcast?.stop());
+    _pendingScreenViews.clear();
     for (final view in _screenViews.values) {
       unawaited(view.close());
     }
@@ -5384,12 +5391,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Joins (or switches to) voice in [channelId], requesting the mic.
   Future<void> _joinVoice(String channelId) async {
-    if (_voice != null) await _leaveVoice();
+    if (_joiningVoice || !mounted) return;
+    _joiningVoice = true;
+    final epoch = ++_voiceJoinEpoch;
+    try {
+      await _joinVoiceOnce(channelId, epoch);
+    } finally {
+      _joiningVoice = false;
+    }
+  }
+
+  Future<void> _joinVoiceOnce(String channelId, int epoch) async {
+    if (_voice != null || _leavingVoice != null) {
+      await _leaveVoice(cancelJoin: false);
+    }
+    if (!mounted || epoch != _voiceJoinEpoch) return;
     // Ensure mic permission on mobile before attempting getUserMedia.
     if (!kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS)) {
       final status = await Permission.microphone.request();
+      if (!mounted || epoch != _voiceJoinEpoch) return;
       if (!status.isGranted) {
         _setError('Microphone permission denied');
         return;
@@ -5402,6 +5424,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     } on MissingPluginException {
       _setError('Background voice service is unavailable');
+      return;
+    }
+    if (!mounted || epoch != _voiceJoinEpoch) {
+      await _stopAndroidVoiceService();
       return;
     }
     try {
@@ -5417,7 +5443,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 const <({String peer, Duration delay})>[])
           candidate.peer,
       }..remove(widget.deviceKeys.publicKeyHex);
-      _voice = await VoiceSession.join(
+      final voice = await VoiceSession.join(
         channelId: channelId,
         identity: widget.identity,
         meshIdentity: widget.deviceKeys.device,
@@ -5434,6 +5460,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         peerAllowed: (peerHex) =>
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
       );
+      if (!mounted || epoch != _voiceJoinEpoch) {
+        await voice.leave();
+        await _stopAndroidVoiceService();
+        return;
+      }
+      _voice = voice;
       _voice!.onSoundboard = (blob) {
         final session = _channels?.sessions
             .where((candidate) => candidate.channelId == channelId)
@@ -5464,6 +5496,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _voiceChanged() {
+    if (!mounted) return;
     // Auto-mute blocked users joining voice.
     final voice = _voice;
     if (voice != null) {
@@ -5532,7 +5565,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }..remove(widget.identity.publicKeyHex);
   }
 
-  Future<void> _leaveVoice() async {
+  Future<void> _leaveVoice({bool cancelJoin = true}) {
+    if (cancelJoin) _voiceJoinEpoch++;
+    return _leavingVoice ??= _leaveVoiceOnce().whenComplete(() {
+      _leavingVoice = null;
+    });
+  }
+
+  Future<void> _leaveVoiceOnce() async {
+    final voice = _voice;
+    _pendingScreenViews.clear();
     try {
       await _stopScreenShare(); // tells peers before we go; no-op if idle
       if (_ytIsHost && _ytVideoId != null) {
@@ -5553,7 +5595,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _voicePresenceTimer = null;
       // Broadcast leave (empty channelId).
       _broadcastVoicePresence('');
-      final voice = _voice;
       _voice = null;
       _voiceMuted.clear();
       _speakerOn = true;
@@ -5561,9 +5602,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       for (final view in views) {
         await view.close();
       }
-      await voice?.leave();
     } finally {
-      await _stopAndroidVoiceService();
+      _voicePresenceTimer?.cancel();
+      _voicePresenceTimer = null;
+      if (identical(_voice, voice)) {
+        _broadcastVoicePresence('');
+        _voice = null;
+      }
+      try {
+        await voice?.leave();
+      } finally {
+        await _stopAndroidVoiceService();
+      }
     }
   }
 
@@ -5577,10 +5627,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// Opens the picker and starts sharing the chosen window/screen, announcing it
   /// to the call so everyone joins my screen mesh.
   Future<void> _startScreenShare(ChannelSession session) async {
+    if (_startingScreenShare || _leavingVoice != null || !mounted) return;
+    _startingScreenShare = true;
+    try {
+      await _startScreenShareOnce(session);
+    } finally {
+      _startingScreenShare = false;
+    }
+  }
+
+  Future<void> _startScreenShareOnce(ChannelSession session) async {
     final voice = _voice;
     if (voice == null || _broadcast != null) return;
+    final epoch = ++_screenShareEpoch;
     final choice = await showScreenSharePicker(context);
-    if (choice == null || !mounted) return;
+    if (choice == null ||
+        !mounted ||
+        epoch != _screenShareEpoch ||
+        !identical(_voice, voice)) {
+      return;
+    }
     try {
       final broadcast = await ScreenBroadcast.start(
         channelId: session.channelId,
@@ -5595,7 +5661,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             false,
         onEnded: () => unawaited(_stopScreenShare()),
       );
-      if (!mounted) {
+      if (!mounted || epoch != _screenShareEpoch || !identical(_voice, voice)) {
         await broadcast.stop();
         return;
       }
@@ -5614,6 +5680,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _stopScreenShare() async {
+    _screenShareEpoch++;
     final broadcast = _broadcast;
     if (broadcast == null) return;
     _broadcast = null;
@@ -5628,7 +5695,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   /// Joins [sharerHex]'s screen mesh to watch their share.
   Future<void> _addScreenView(String channelId, String sharerHex) async {
-    if (_screenViews.containsKey(sharerHex)) return; // already watching
+    final voice = _voice;
+    if (voice == null ||
+        voice.channelId != channelId ||
+        _leavingVoice != null ||
+        _screenViews.containsKey(sharerHex) ||
+        _pendingScreenViews.containsKey(sharerHex)) {
+      return;
+    }
+    final request = Object();
+    _pendingScreenViews[sharerHex] = request;
     try {
       final view = await ScreenView.watch(
         channelId: channelId,
@@ -5641,7 +5717,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
         onChange: _voiceChanged,
       );
-      if (!mounted) {
+      if (!mounted ||
+          !identical(_voice, voice) ||
+          !identical(_pendingScreenViews[sharerHex], request)) {
         await view.close();
         return;
       }
@@ -5650,10 +5728,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       setState(() {});
     } catch (_) {
       // Couldn't open the view — ignore; a re-announce will retry.
+    } finally {
+      if (identical(_pendingScreenViews[sharerHex], request)) {
+        _pendingScreenViews.remove(sharerHex);
+      }
     }
   }
 
   Future<void> _removeScreenView(String sharerHex) async {
+    _pendingScreenViews.remove(sharerHex);
     final view = _screenViews.remove(sharerHex);
     if (view == null) return;
     if (_selectedShareHex == sharerHex) {
@@ -5671,6 +5754,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final voice = _voice;
     if (voice == null) return;
     final present = voice.peerHexes.toSet();
+    _pendingScreenViews.removeWhere((peer, _) => !present.contains(peer));
     for (final hex
         in _screenViews.keys.where((h) => !present.contains(h)).toList()) {
       unawaited(_removeScreenView(hex));

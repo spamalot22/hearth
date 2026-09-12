@@ -62,10 +62,13 @@ async function getToken(
     `announce|${channel}|${pubkeyHex}|${ts}`,
   );
   const sig = Buffer.from(await ed.signAsync(msg, seed)).toString('hex');
+  const authSig = Buffer.from(await ed.signAsync(
+    new TextEncoder().encode(`announce-auth|${channel}|${pubkeyHex}|${ts}`), seed,
+  )).toString('hex');
   const res = await app.request('/announce', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ channel, pubkey: pubkeyHex, ts, sig }),
+    body: JSON.stringify({ channel, pubkey: pubkeyHex, ts, sig, authSig }),
   });
   const body = (await res.json()) as { token: string };
   return body.token;
@@ -278,6 +281,23 @@ describe('relay', () => {
     expect(second.messages).toHaveLength(5);
     expect(second.seq).toBe(105);
     expect(second.more).toBe(false);
+  });
+
+  it('bounds courier bytes and retains newest envelopes in a full mailbox', async () => {
+    const messages = await Promise.all(['a', 'b', 'c'].map((text) => makeWire(text)));
+    const budget = 2 * (JSON.stringify(messages[0]).length * 2 + 256);
+    const store = new RelayStore(budget);
+    const firstSeq = store.append(messages[0]!);
+    expect(store.append(messages[0]!)).toBe(firstSeq);
+    store.append(messages[1]!);
+    expect(store.since('general', 0)).toHaveLength(2);
+    store.append(messages[2]!);
+    expect(store.since('general', 0).map((entry) => entry.message.id)).toEqual(
+      messages.slice(1).map((message) => message.id),
+    );
+    store.append(messages[0]!, 'other-mailbox');
+    expect(store.since('general', 0)).toHaveLength(0);
+    expect(store.since('other-mailbox', 0)).toHaveLength(1);
   });
 
   it('rejects an oversized body with 413', async () => {

@@ -27,6 +27,14 @@ List<int> presenceSigningBytes(
   int timestampMs,
 ) => utf8.encode('announce|$channel|$pubkey|$timestampMs');
 
+/// Private token-authentication proof. Never distribute this with presence:
+/// public presence evidence must not grant access to a signalling mailbox.
+List<int> announceAuthSigningBytes(
+  String channel,
+  String pubkey,
+  int timestampMs,
+) => utf8.encode('announce-auth|$channel|$pubkey|$timestampMs');
+
 /// Optional signed assertion attached to an ordinary channel announcement when
 /// this device is currently in that channel's voice call. It is separate from
 /// [presenceSigningBytes] so older relays can ignore it without rejecting the

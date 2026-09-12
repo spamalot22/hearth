@@ -9,6 +9,31 @@ const aliceHex = 'a'.repeat(64);
 const bobHex = 'b'.repeat(64);
 
 describe('SignalHub', () => {
+  it('bounds signal bytes across recipient mailboxes', () => {
+    const hub = new SignalHub(1500);
+    hub.postSignal('room', 'bob', 'alice', 'offer', { sdp: 'x'.repeat(250) }, 0);
+    hub.postSignal('room', 'carol', 'alice', 'offer', { sdp: 'x'.repeat(250) }, 0);
+    expect(hub.signalsSince('room', 'bob', 0, 0)).toHaveLength(0);
+    expect(hub.signalsSince('room', 'carol', 0, 0)).toHaveLength(1);
+    // Expiry releases the byte accounting as well as the signal count.
+    expect(hub.signalsSince('room', 'carol', 0, 40_000)).toHaveLength(0);
+    hub.postSignal('room', 'bob', 'alice', 'offer', { sdp: 'x' }, 40_000);
+    hub.postSignal('room', 'carol', 'alice', 'offer', { sdp: 'x' }, 40_000);
+    expect(hub.signalsSince('room', 'bob', 0, 40_000)).toHaveLength(1);
+    expect(hub.signalsSince('room', 'carol', 0, 40_000)).toHaveLength(1);
+  });
+
+  it('bounds aggregate presence across many channels', () => {
+    const hub = new SignalHub();
+    for (let channel = 0; channel < 41; channel++) {
+      for (let peer = 0; peer < 250; peer++) {
+        hub.announce(`room-${channel}`, `peer-${peer}`, 0);
+      }
+    }
+    expect(hub.peers('room-0', '', 0)).toHaveLength(0);
+    expect(hub.peers('room-40', '', 0)).toHaveLength(250);
+  });
+
   it('announce returns other live peers, excluding self', () => {
     const hub = new SignalHub();
     expect(hub.announce('general', 'alice', 1000)).toEqual([]);
@@ -108,11 +133,15 @@ describe('signalling routes', () => {
         ),
       ).toString('hex')
       : undefined;
+    const authSig = Buffer.from(await ed.signAsync(
+      new TextEncoder().encode(`announce-auth|${channel}|${pubkey}|${ts}`), seed,
+    )).toString('hex');
     return {
       channel,
       pubkey,
       ts,
       sig,
+      authSig,
       ...(cap ? { cap } : {}),
       ...(voiceSig ? { voice: true, voiceSig } : {}),
     };
@@ -153,6 +182,34 @@ describe('signalling routes', () => {
     });
 
     expect(response.status).toBe(400);
+  });
+
+  it('public presence evidence cannot mint a signalling token', async () => {
+    const app = createRelay();
+    const channel = 'replay-room';
+    const alice = await signedAnnounce(channel);
+    const bob = await signedAnnounce(channel);
+    expect((await postJson(app, '/announce', alice)).status).toBe(200);
+    const response = await postJson(app, '/announce', bob);
+    const { presence } = (await response.json()) as {
+      presence: Array<Record<string, unknown>>;
+    };
+    const claim = presence[0]!;
+    expect(claim.authSig).toBeUndefined();
+    for (const auth of [{}, { authSig: claim.sig }]) {
+      const replay = await postJson(app, '/announce', { channel, ...claim, ...auth });
+      expect(replay.status).toBe(403);
+      expect(await replay.json()).not.toHaveProperty('token');
+    }
+  });
+
+  it('rejects non-object JSON on signalling endpoints', async () => {
+    const app = createRelay();
+    for (const path of ['/announce', '/signal']) {
+      for (const body of [null, [], 42, 'text']) {
+        expect((await postJson(app, path, body)).status).toBe(400);
+      }
+    }
   });
 
   it('relays only correctly signed voice presence assertions', async () => {

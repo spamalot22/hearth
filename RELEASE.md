@@ -1,13 +1,19 @@
 # Cutting a release
 
-A release is one **version tag**. Pushing it runs two GitHub Actions workflows:
+A release is one **version tag**. Pushing it runs **`release-app`**, which:
 
-- **`deploy-relay`** → builds the relay image and publishes
-  `ghcr.io/spamalot22/hearth-relay:<tag>` (+ `latest`).
-- **`release-app`** → builds the client (Android APK, Windows zip, web zip) and
-  attaches them to a **GitHub Release**.
+- Builds the client (Android APK, Windows installer, web zip).
+- Builds and publishes `ghcr.io/spamalot22/hearth-relay:<tag>` (+ `latest`).
+- Signs the update manifest and publishes the complete **GitHub Release** only
+  after the app builds and relay image have succeeded.
+
+**`deploy-relay`** is a manually dispatched relay-only repair workflow.
 
 ## How
+
+Commit and push only with the user's explicit approval. Wait for all `ci` jobs
+on that commit to succeed before tagging it. Native builds and Flutter tests
+must run on GitHub Actions, not on this resource-constrained development host.
 
 ```sh
 git tag 0.1.6
@@ -23,13 +29,13 @@ must attach and sign the complete asset set first.
 - **Relay image** on GHCR. Deploy it on the host with `docker compose pull &&
   docker compose up -d` — see [backend/DEPLOY.md](backend/DEPLOY.md).
 - **Client builds** on the release page: `hearth-android.apk` (sideload),
-  `hearth-windows.zip`, `hearth-web.zip`, plus the signed `manifest.json` used by
+  `hearth-windows-setup.exe`, `hearth-web.zip`, plus the signed `manifest.json` used by
   auto-update clients.
 
 ## Auto-update signing
 
 Clients fetch `manifest.json` directly from the latest public GitHub Release and
-install in-app (Android one-tap; Windows self-replace + relaunch). They verify its
+install in-app (Android package installer; Windows per-user installer + relaunch). They verify its
 Ed25519 signature and each downloaded asset's SHA-256 hash before installation.
 The relay is not involved and can be offline during a release.
 
@@ -60,11 +66,10 @@ when it is missing; Android will reject an update signed by a different key.
 
 ## Notes
 
-- `release-app` publishes only after Android, Windows, and web all build.
-- Client builds pin **Flutter 3.44.2** (`FLUTTER_VERSION` in `release-app.yml`);
+- `release-app` publishes only after Android, Windows, web, and the relay image succeed.
+- Client builds pin **Flutter 3.44.7** (`FLUTTER_VERSION` in `release-app.yml`);
   change it there to move the toolchain.
-- **Android is CI-only on some dev machines** — a corporate TLS proxy breaks local
-  Gradle downloads, so let CI build/verify it. (The fixes for the modern Android
-  toolchain — compileSdk 36 across all plugin modules, etc. — are already committed.)
+- **Native builds and Flutter tests are CI-only on this development host** due to
+  its resource constraints. See `AGENTS.md` for the full limits.
 - Release builds derive their displayed version and Android version code from the
   git tag; `app/pubspec.yaml` is only the local-development fallback.

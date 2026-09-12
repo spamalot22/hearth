@@ -125,7 +125,14 @@ bool PlayAudioOutputTestTone(const std::string& device_id) {
   }
   if (SUCCEEDED(result)) result = client->GetMixFormat(&format);
   if (SUCCEEDED(result)) {
-    if (format == nullptr || (!IsFloatFormat(format) && !IsPcmFormat(format))) {
+    const bool supported_samples = format != nullptr &&
+        ((IsFloatFormat(format) && format->wBitsPerSample == 32) ||
+         (IsPcmFormat(format) && (format->wBitsPerSample == 16 ||
+                                 format->wBitsPerSample == 24 ||
+                                 format->wBitsPerSample == 32)));
+    if (!supported_samples || format->nChannels == 0 ||
+        format->nSamplesPerSec == 0 ||
+        format->nBlockAlign < format->nChannels * (format->wBitsPerSample / 8)) {
       result = E_FAIL;
     } else {
       result = client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0,
@@ -144,10 +151,20 @@ bool PlayAudioOutputTestTone(const std::string& device_id) {
     const UINT32 total_frames =
         static_cast<UINT32>(format->nSamplesPerSec * 7 / 10);
     UINT32 generated = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(3);
     while (generated < total_frames && SUCCEEDED(result)) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        result = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        break;
+      }
       UINT32 padding = 0;
       result = client->GetCurrentPadding(&padding);
       if (FAILED(result)) break;
+      if (padding > buffer_frames) {
+        result = E_FAIL;
+        break;
+      }
       const UINT32 available = buffer_frames - padding;
       if (available == 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -168,6 +185,11 @@ bool PlayAudioOutputTestTone(const std::string& device_id) {
   }
 
   if (format != nullptr) CoTaskMemFree(format);
+  // COM interfaces must be released before uninitializing their apartment.
+  renderer.Reset();
+  client.Reset();
+  device.Reset();
+  enumerator.Reset();
   if (uninitialize_com) CoUninitialize();
   return played;
 }

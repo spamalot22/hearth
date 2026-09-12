@@ -147,16 +147,9 @@ class DeviceStore {
     } catch (_) {
       return false;
     }
-    final knownForRoot =
-        _deviceHistory[rev.rootKeyHex]?.contains(rev.deviceKeyHex) ?? false;
-    final ownCert = _certsCache.any(
-      (cert) =>
-          cert.rootKeyHex == rev.rootKeyHex &&
-          cert.deviceKeyHex == rev.deviceKeyHex,
-    );
-    if (!knownForRoot && !ownCert) {
-      return false; // another root cannot revoke a device it never authorised
-    }
+    // Revocations can arrive before the certificate/bundle they invalidate.
+    // The verified root signature and root-scoped key prevent another identity
+    // from revoking this device on behalf of its legitimate owner.
     final key = _revocationKey(rev.rootKeyHex, rev.deviceKeyHex);
     if (_revokedCache.contains(key)) return false;
     _revocationsCache.add(rev);

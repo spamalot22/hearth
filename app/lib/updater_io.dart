@@ -28,11 +28,7 @@ Future<void> cleanupOldUpdates() async {
   try {
     final dir = await getTemporaryDirectory();
     for (final f in dir.listSync()) {
-      if (f is File &&
-          (f.path.endsWith('.apk') ||
-              f.path.endsWith('.zip') ||
-              f.path.endsWith('.exe')) &&
-          f.path.contains('hearth')) {
+      if (f is File && isUpdatePackageName(f.uri.pathSegments.last)) {
         f.deleteSync();
       }
     }
@@ -46,6 +42,13 @@ Future<void> cleanupOldUpdates() async {
     } catch (_) {}
   }
 }
+
+@visibleForTesting
+bool isUpdatePackageName(String name) => const {
+  'hearth-android.apk',
+  'hearth-windows.zip',
+  'hearth-windows-setup.exe',
+}.contains(name.toLowerCase());
 
 /// Downloads this platform's release asset directly from GitHub Releases,
 /// verifies its SHA-256 against the signed manifest, then launches the platform
@@ -91,9 +94,32 @@ Future<void> downloadAndInstall(
   final uri = Uri.parse(url);
   final dir = await getTemporaryDirectory();
   final outFile = File('${dir.path}${Platform.pathSeparator}$fileName');
-  final client = http.Client();
+  await downloadVerifiedUpdate(
+    uri,
+    outFile,
+    expectedHash,
+    onProgress: onProgress,
+  );
+  await _install(outFile.path);
+}
+
+/// Streams with backpressure, a size limit and an idle timeout. A failed or
+/// unverified download is never left behind as an installable package.
+@visibleForTesting
+Future<void> downloadVerifiedUpdate(
+  Uri uri,
+  File outFile,
+  String expectedHash, {
+  http.Client? client,
+  void Function(double progress)? onProgress,
+  Duration idleTimeout = const Duration(seconds: 30),
+  int maxBytes = _maxUpdateBytes,
+}) async {
+  final transport = client ?? http.Client();
   try {
-    final resp = await client.send(http.Request('GET', uri));
+    final resp = await transport
+        .send(http.Request('GET', uri))
+        .timeout(idleTimeout);
     if (resp.statusCode != 200) {
       throw http.ClientException(
         'download failed: HTTP ${resp.statusCode}',
@@ -101,7 +127,7 @@ Future<void> downloadAndInstall(
       );
     }
     final total = resp.contentLength ?? 0;
-    if (total > _maxUpdateBytes) {
+    if (total > maxBytes) {
       throw StateError('update download is larger than the safety limit');
     }
     // Hash while streaming to disk so the whole file never sits in memory.
@@ -110,15 +136,17 @@ Future<void> downloadAndInstall(
     final sink = outFile.openWrite();
     var received = 0;
     try {
-      await for (final chunk in resp.stream) {
-        received += chunk.length;
-        if (received > _maxUpdateBytes) {
-          throw StateError('update download exceeded the safety limit');
-        }
-        hashInput.add(chunk);
-        sink.add(chunk);
-        if (total > 0) onProgress?.call(received / total);
-      }
+      await sink.addStream(
+        resp.stream.timeout(idleTimeout).map((chunk) {
+          received += chunk.length;
+          if (received > maxBytes) {
+            throw StateError('update download exceeded the safety limit');
+          }
+          hashInput.add(chunk);
+          if (total > 0) onProgress?.call((received / total).clamp(0.0, 1.0));
+          return chunk;
+        }),
+      );
     } finally {
       await sink.close();
       hashInput.close();
@@ -128,14 +156,13 @@ Future<void> downloadAndInstall(
       await outFile.delete();
       throw StateError('update hash mismatch — download rejected');
     }
-    await _install(outFile.path);
   } catch (_) {
     try {
       if (await outFile.exists()) await outFile.delete();
     } catch (_) {}
     rethrow;
   } finally {
-    client.close();
+    if (client == null) transport.close();
   }
 }
 

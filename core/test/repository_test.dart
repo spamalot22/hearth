@@ -7,6 +7,19 @@ import 'package:test/test.dart';
 
 Uint8List _b(String s) => Uint8List.fromList(utf8.encode(s));
 
+class _FailOnceStorage extends InMemoryMessageStorage {
+  bool failNext = true;
+
+  @override
+  Future<void> append(Message message) async {
+    if (failNext) {
+      failNext = false;
+      throw StateError('simulated storage failure');
+    }
+    await super.append(message);
+  }
+}
+
 void main() {
   group('MessageRepository', () {
     late Identity author;
@@ -52,6 +65,51 @@ void main() {
       ]);
       expect(reloaded.heads(), [b.id]);
     });
+
+    test(
+      'concurrent duplicate deliveries append and account only once',
+      () async {
+        final storage = InMemoryMessageStorage();
+        final repo = MessageRepository(storage);
+        final message = await msg('duplicate');
+        expect(await Future.wait([repo.add(message), repo.add(message)]), [
+          true,
+          false,
+        ]);
+        expect((await storage.loadAll()).length, 1);
+        final reloaded = MessageRepository(storage);
+        await reloaded.load();
+        expect(repo.storedBytes, reloaded.storedBytes);
+      },
+    );
+
+    test('concurrent writes cannot bypass capacity', () async {
+      final storage = InMemoryMessageStorage();
+      final repo = MessageRepository(storage, maxMessages: 1);
+      final first = await msg('first');
+      final second = await msg('second');
+      final writing = repo.add(first);
+      await expectLater(
+        repo.add(second),
+        throwsA(isA<RepositoryCapacityException>()),
+      );
+      expect(await writing, isTrue);
+      expect(repo.length, 1);
+      expect((await storage.loadAll()).length, 1);
+    });
+
+    test(
+      'a failed append does not poison later writes or accounting',
+      () async {
+        final repo = MessageRepository(_FailOnceStorage());
+        final message = await msg('retry');
+        await expectLater(repo.add(message), throwsStateError);
+        expect(repo.length, 0);
+        expect(repo.storedBytes, 0);
+        expect(await repo.add(message), isTrue);
+        expect(repo.length, 1);
+      },
+    );
 
     test('a duplicate already in storage is de-duped on load', () async {
       final storage = InMemoryMessageStorage();

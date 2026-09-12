@@ -11,6 +11,18 @@ Uint8List _b(String s) => Uint8List.fromList(utf8.encode(s));
 
 MessageRepository _repo() => MessageRepository(InMemoryMessageStorage());
 
+class _BlockedBlobStore extends InMemoryBlobStore {
+  final waiting = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<Uint8List?> get(String hashHex) async {
+    if (!waiting.isCompleted) waiting.complete();
+    await release.future;
+    return super.get(hashHex);
+  }
+}
+
 /// An in-memory [FrameChannel]: a [partner]'s sends arrive on our stream.
 /// Single-subscription, so frames sent before the session subscribes are
 /// buffered rather than dropped.
@@ -23,11 +35,24 @@ class _Link implements FrameChannel {
   final StreamController<SyncFrame> incoming = StreamController<SyncFrame>();
   final List<SyncFrame> sent = [];
   _Link? partner;
+  bool closed = false;
+  int flushes = 0;
 
   @override
   void send(SyncFrame frame) {
+    if (closed) return;
     sent.add(frame);
-    partner?.incoming.add(frame);
+    if (partner != null && !partner!.closed) partner!.incoming.add(frame);
+  }
+
+  @override
+  Future<void> flush() async => flushes++;
+
+  @override
+  Future<void> close() async {
+    if (closed) return;
+    closed = true;
+    await incoming.close();
   }
 
   @override
@@ -72,6 +97,38 @@ void main() {
           payload: _b(text),
           prev: prev,
         );
+
+    test(
+      'history resumes after a temporary ingest limit on the same link',
+      () async {
+        final sourceRepo = _repo();
+        final targetRepo = _repo();
+        final message = await msg('delayed history');
+        await sourceRepo.add(message);
+        final source = SyncEngine(sourceRepo, 'general');
+        final (sourceLink, targetLink) = _pair();
+        var allowed = false;
+        final target = SyncSession(
+          repository: targetRepo,
+          channel: 'general',
+          link: targetLink,
+          onAdded: (_, _) {},
+          allowIngest: () => allowed,
+          reconcileInterval: const Duration(milliseconds: 20),
+        );
+        addTearDown(source.close);
+        addTearDown(target.close);
+        source.addPeer(sourceLink);
+        target.start();
+        await _pump();
+        expect(targetRepo.length, 0);
+        allowed = true;
+        for (var i = 0; i < 100 && targetRepo.length == 0; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(targetRepo.get(message.id), isNotNull);
+      },
+    );
 
     test('backfills a peer with the whole chain from heads alone', () async {
       final a = _repo();
@@ -276,6 +333,146 @@ void main() {
   });
 
   group('blob transfer', () {
+    test(
+      'locally acquired blobs cancel requests on existing and future peers',
+      () async {
+        final engine = SyncEngine(
+          _repo(),
+          'general',
+          blobRetryInterval: const Duration(milliseconds: 20),
+        );
+        addTearDown(engine.close);
+        final first = _Link();
+        engine.addPeer(first);
+        final hash = await blobHash(_b('acquired elsewhere'));
+        engine.requestBlob(hash);
+        engine.cancelBlobRequest(hash);
+        final second = _Link();
+        engine.addPeer(second);
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(first.sent.whereType<WantBlobFrame>(), hasLength(1));
+        expect(second.sent.whereType<WantBlobFrame>(), isEmpty);
+      },
+    );
+
+    test('disconnects a peer that floods a blocked receive queue', () async {
+      final blobs = _BlockedBlobStore();
+      final engine = SyncEngine(_repo(), 'general', blobStore: blobs);
+      final link = _Link();
+      engine.addPeer(link);
+      link.incoming.add(WantBlobFrame(await blobHash(_b('missing'))));
+      await blobs.waiting.future;
+      try {
+        for (var i = 0; i < 2100; i++) {
+          link.incoming.add(const HaveFrame([]));
+        }
+        await _settle(() => link.closed);
+        expect(link.closed, isTrue);
+      } finally {
+        blobs.release.complete();
+        await _pump();
+        await engine.close();
+      }
+    });
+
+    test(
+      'retries missing blobs on the same connection without starvation',
+      () async {
+        final sourceBlobs = InMemoryBlobStore();
+        final targetBlobs = InMemoryBlobStore();
+        final source = SyncEngine(_repo(), 'general', blobStore: sourceBlobs);
+        final target = SyncEngine(
+          _repo(),
+          'general',
+          blobStore: targetBlobs,
+          blobRetryInterval: const Duration(milliseconds: 20),
+        );
+        addTearDown(source.close);
+        addTearDown(target.close);
+        final (sourceLink, targetLink) = _pair();
+        source.addPeer(sourceLink);
+        target.addPeer(targetLink);
+        final hashes = <String>[];
+        for (var i = 0; i < 6; i++) {
+          hashes.add(await blobHash(_b('late blob $i')));
+        }
+        for (final hash in hashes) {
+          target.requestBlob(hash);
+        }
+        expect(targetLink.sent.whereType<WantBlobFrame>().length, 4);
+        await _pump();
+        // The first four remain unavailable; waiting blobs still get a turn.
+        await sourceBlobs.put(_b('late blob 4'));
+        await sourceBlobs.put(_b('late blob 5'));
+        for (var i = 0; i < 100 && !await targetBlobs.has(hashes.last); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(await targetBlobs.has(hashes[4]), isTrue);
+        expect(await targetBlobs.has(hashes[5]), isTrue);
+        await sourceBlobs.put(_b('late blob 0'));
+        for (var i = 0; i < 100 && !await targetBlobs.has(hashes.first); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(await targetBlobs.has(hashes.first), isTrue);
+      },
+    );
+
+    test(
+      'retries corrupt responses and stops requesting after arrival',
+      () async {
+        final blobs = InMemoryBlobStore();
+        final engine = SyncEngine(
+          _repo(),
+          'general',
+          blobStore: blobs,
+          blobRetryInterval: const Duration(milliseconds: 20),
+        );
+        addTearDown(engine.close);
+        final link = _Link();
+        engine.addPeer(link);
+        final bytes = _b('valid bytes');
+        final hash = await blobHash(bytes);
+        engine.requestBlob(hash);
+        link.incoming.add(GiveBlobFrame(hash, _b('wrong')));
+        for (
+          var i = 0;
+          i < 100 && link.sent.whereType<WantBlobFrame>().length < 2;
+          i++
+        ) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(
+          link.sent.whereType<WantBlobFrame>().length,
+          greaterThanOrEqualTo(2),
+        );
+        link.incoming.add(GiveBlobFrame(hash, bytes));
+        for (var i = 0; i < 100 && !await blobs.has(hash); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(await blobs.has(hash), isTrue);
+        await _pump();
+        final count = link.sent.length;
+        await Future<void>.delayed(const Duration(milliseconds: 80));
+        expect(link.sent.length, count);
+      },
+    );
+
+    test('disconnect cancels pending blob retries', () async {
+      final engine = SyncEngine(
+        _repo(),
+        'general',
+        blobRetryInterval: const Duration(milliseconds: 20),
+      );
+      addTearDown(engine.close);
+      final link = _Link();
+      engine.addPeer(link);
+      engine.requestBlob(await blobHash(_b('missing')));
+      await link.incoming.close();
+      final count = link.sent.length;
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(link.sent.length, count);
+    });
+
     test('a peer fetches a blob it lacks via want/give', () async {
       final aBlobs = InMemoryBlobStore();
       final bBlobs = InMemoryBlobStore();
@@ -321,6 +518,7 @@ void main() {
         isTrue,
       );
       expect(sourceLink.sent.whereType<GiveBlobFrame>(), isEmpty);
+      expect(sourceLink.flushes, greaterThan(0));
       await arrivedSub.cancel();
       await source.close();
       await target.close();
