@@ -147,10 +147,17 @@ Future<void> downloadVerifiedUpdate(
           return chunk;
         }),
       );
+    } catch (_) {
+      // A failed addStream can already close the file. Preserve its error
+      // even if closing the sink reports a second failure.
+      try {
+        await sink.close();
+      } catch (_) {}
+      rethrow;
     } finally {
-      await sink.close();
       hashInput.close();
     }
+    await sink.close();
 
     if (digestSink.events.single.toString() != expectedHash) {
       await outFile.delete();

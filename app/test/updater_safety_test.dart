@@ -70,6 +70,24 @@ void main() {
       expect(await file.exists(), isFalse);
     });
 
+    test('stream errors retain their cause and remove partial files', () async {
+      final failure = http.ClientException('connection interrupted');
+      Stream<List<int>> interrupted() async* {
+        yield bytes.take(4).toList();
+        throw failure;
+      }
+
+      final client = MockClient.streaming(
+        (_, _) async => http.StreamedResponse(interrupted(), 200),
+      );
+      addTearDown(client.close);
+      await expectLater(
+        downloadVerifiedUpdate(uri, file, hash, client: client),
+        throwsA(same(failure)),
+      );
+      expect(await file.exists(), isFalse);
+    });
+
     test('corruption and oversized streams are removed', () async {
       final client = MockClient.streaming(
         (_, _) async => http.StreamedResponse(Stream.value(bytes), 200),
