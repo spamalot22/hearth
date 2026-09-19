@@ -57,12 +57,20 @@ class MainActivity : FlutterActivity() {
 
     /** Keeps cleanup armed while this process remains alive. */
     private val cleanupHandler by lazy { Handler(Looper.getMainLooper()) }
+    private var nearby: NearbyAndroid? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         setupDownloaderChannel(flutterEngine)
         setupCredentialChannel(flutterEngine)
         setupVoiceServiceChannel(flutterEngine)
+        nearby = NearbyAndroid(this, flutterEngine.dartExecutor.binaryMessenger)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        nearby?.dispose()
+        nearby = null
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     private fun setupVoiceServiceChannel(flutterEngine: FlutterEngine) {

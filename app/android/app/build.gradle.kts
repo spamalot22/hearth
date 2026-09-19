@@ -26,9 +26,10 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.hearth.app"
-    // A plugin pulled in by file_picker (flutter_plugin_android_lifecycle) requires
-    // compileSdk 36; Flutter's default is still lower, so pin it explicitly.
-    compileSdk = 36
+    // Framework-managed Aware pairing is gated at runtime to API 37.2.
+    compileSdk {
+        version = release(37) { minorApiLevel = 2 }
+    }
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

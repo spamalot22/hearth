@@ -119,6 +119,23 @@ jobs:
           flutter pub get
           flutter build apk --release --dart-define=APP_VERSION=ci
 
+  build-ios:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Compile iPhone app without signing
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter build ios --debug --no-codesign --dart-define=APP_VERSION=ci
+
   build-windows:
     runs-on: windows-latest
     steps:

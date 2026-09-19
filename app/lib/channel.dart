@@ -412,11 +412,15 @@ class ChannelSession {
   /// owned by the remote identity confirms durable receipt; groups always
   /// retain the courier fallback because a group member is not a trusted
   /// custody witness.
-  Future<void> publish(Message message) async {
+  Future<void> publish(
+    Message message, {
+    Future<void> Function()? onStored,
+  }) async {
     final peerStored = await engine.publish(
       message,
       peerConfirmationTimeout: isDm ? _courierConfirmationTimeout : null,
     );
+    await onStored?.call();
     if (isDm && peerStored) return;
     // Best-effort relay send — failure is fine (relay might be down, or peer
     // will get it via P2P later).

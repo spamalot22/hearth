@@ -358,6 +358,12 @@ A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 
 ## Roadmap
 
+- [ ] **Mobile nearby text mesh and proximity scanner.** Wi-Fi Aware preferred
+  where compatible, common Android/iPhone Bluetooth fallback, encrypted neighbour
+  links and couriering, and a Settings radar popup are implemented locally,
+  pending CI and physical-device verification. The Android-initiated iPhone Aware
+  path requires API 37.2+ and compatible pairing firmware; older phones use BLE.
+  See [nearby messaging](NEARBY_MESSAGING.md) for scope and platform limitations.
 - [ ] **Authenticated LAN discovery and local signalling.** This would enable
   relay-free same-network cold starts, but it is deliberately deferred.
 

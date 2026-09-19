@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   app_links
   audioplayers_windows
+  bluetooth_low_energy_windows
   flutter_inappwebview_windows
   flutter_secure_storage_windows
   flutter_webrtc

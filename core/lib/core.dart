@@ -27,6 +27,20 @@ export 'src/identity.dart'
 export 'src/message.dart'
     show Message, kHearthMessageVersion, maxMessagePayloadBytes;
 export 'src/mnemonic.dart' show seedToMnemonic, mnemonicToSeed, bip39Words;
+export 'src/nearby_courier.dart' show NearbyCourier, NearbyLink;
+export 'src/nearby_fragments.dart' show nearbyFragments, NearbyFragmentReader;
+export 'src/nearby_mux.dart' show NearbyMux, NearbyLinkEvent;
+export 'src/nearby_packet.dart' show NearbyPacket;
+export 'src/nearby_policy.dart'
+    show
+        InternetReachability,
+        NearbyActivation,
+        NearbyActivationPolicy,
+        NearbyMedium,
+        NearbyRoute;
+export 'src/nearby_queue.dart'
+    show NearbyAdmission, NearbyQueue, NearbyQueueEntry, NearbyQueueStorage;
+export 'src/proximity.dart' show ProximityBand, ProximityObservation;
 export 'src/relay_duty.dart' show RelayDutySchedule;
 export 'src/repository.dart'
     show MessageRepository, RepositoryCapacityException;

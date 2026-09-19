@@ -49,6 +49,8 @@ import 'key_store.dart';
 import 'markdown.dart';
 import 'media_library.dart';
 import 'mesh_control.dart';
+import 'nearby_messaging.dart';
+import 'nearby_settings.dart';
 import 'network_status.dart';
 import 'notify.dart';
 import 'onboarding.dart';
@@ -1105,6 +1107,7 @@ class _EnrollmentScreenState extends State<_EnrollmentScreen> {
       'hearth.requests',
       'hearth.pending_contacts',
       'hearth.settings',
+      'hearth.nearby',
       'hearth.unread',
     ]) {
       try {
@@ -1368,6 +1371,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Set<String> _ytSharedTo = {};
   ProfileStore? _profile;
   SettingsStore? _settings;
+  NearbyMessaging? _nearby;
 
   void _dismissComposerFocus() {
     if (_composerFocus.hasFocus) _composerFocus.unfocus();
@@ -1741,6 +1745,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // Decrypt the active channel's loaded history: the onUpdate calls during the
     // open loop above ran before _channels was set, so they were no-ops.
     unawaited(_refresh());
+    // Local radios must not wait for first-contact Internet retries.
+    if (widget.autoPoll &&
+        settings != null &&
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      final nearby = NearbyMessaging(
+        identity: widget.deviceKeys.device,
+        settings: settings,
+        sessions: () => _channels?.sessions ?? const <ChannelSession>[],
+      );
+      _nearby = nearby;
+      await nearby.initialize();
+      if (!mounted) return;
+      setState(() {});
+    }
     // Listen on my contact-card rendezvous so anyone I handed a card to can
     // reach me for first contact (see rendezvous.dart / contact_card.dart), and
     // resume outbound first-contacts that hadn't connected yet.
@@ -1760,6 +1780,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _onUpdate() {
+    unawaited(_nearby?.refresh());
     // Re-broadcast voice presence to newly-connected peers immediately.
     if (_voice != null) _broadcastVoicePresence(_voice!.channelId);
     // Re-broadcast read watermark only when peer count increased (new peer).
@@ -4053,7 +4074,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Widget _networkTab() {
-    return Padding(
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -4072,6 +4093,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             onRefresh: () => unawaited(_checkRelay()),
           ),
           const SizedBox(height: 12),
+          if (_nearby != null) NearbySettings(messaging: _nearby!),
           OutlinedButton.icon(
             onPressed: () async {
               await Clipboard.setData(
@@ -4443,6 +4465,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       unawaited(_channels?.recoverConnections() ?? Future<void>.value());
       unawaited(_voice?.recoverConnections() ?? Future<void>.value());
       unawaited(_checkRelay());
+      unawaited(_nearby?.refresh());
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       // Save fresh token for background fetch before the app sleeps.
@@ -4457,6 +4480,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _voicePresenceTimer?.cancel();
     _voicePresenceExpiryTimer?.cancel();
     _updateCheckTimer?.cancel();
+    unawaited(_nearby?.close());
     unawaited(_channels?.close());
     unawaited(_broadcast?.stop());
     _pendingScreenViews.clear();
@@ -5003,7 +5027,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         await session.encodePayload(content),
       );
       // Persist + gossip to peers; the updates stream re-renders it.
-      await session.publish(message);
+      await session.publish(
+        message,
+        onStored: () async {
+          await _nearby?.publish(session, message, content);
+        },
+      );
       return true;
     } catch (e) {
       if (mounted) {
@@ -5037,7 +5066,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         session,
         await session.encodePayload(content),
       );
-      await session.publish(message);
+      await session.publish(
+        message,
+        onStored: () async {
+          await _nearby?.publish(session, message, content);
+        },
+      );
     } catch (_) {
       // Best-effort; inference responses failing silently is acceptable.
     }

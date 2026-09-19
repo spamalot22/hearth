@@ -59,6 +59,8 @@ class SyncEngine {
   final Set<String> _pendingBlobs = {};
   final _ingestLimiter = _IngestRateLimiter(1200, const Duration(minutes: 1));
   final StreamController<void> _updates = StreamController<void>.broadcast();
+  final StreamController<Message> _stored =
+      StreamController<Message>.broadcast();
   final StreamController<String> _blobArrived =
       StreamController<String>.broadcast();
   final StreamController<String> _peerStored =
@@ -67,6 +69,10 @@ class SyncEngine {
   /// Fires whenever a message is stored (locally published or gossiped in), so a
   /// UI can re-render.
   Stream<void> get updates => _updates.stream;
+
+  /// Newly accepted durable messages only, never rejected input or duplicates.
+  /// Optional transport bridges must still decrypt and apply their own scope.
+  Stream<Message> get stored => _stored.stream;
 
   /// Fires with a blob's id once its bytes arrive from a peer.
   Stream<String> get blobArrived => _blobArrived.stream;
@@ -172,6 +178,7 @@ class SyncEngine {
   }
 
   void _onNewMessage(Message message, SyncSession? from) {
+    if (!_stored.isClosed) _stored.add(message);
     if (!_updates.isClosed) _updates.add(null);
     for (final session in _sessions) {
       if (session != from) session.gossip(message);
@@ -217,6 +224,7 @@ class SyncEngine {
     }
     _sessions.clear();
     await _updates.close();
+    await _stored.close();
     await _blobArrived.close();
     await _peerStored.close();
   }

@@ -10,6 +10,16 @@ class SettingsStore {
 
   final Box<String> _box;
 
+  bool get nearbyEnabled => _box.get('nearbyEnabled') == 'true';
+  bool get nearbyAutomatic => _box.get('nearbyAutomatic') == 'true';
+  bool get proximityScanner => _box.get('proximityScanner') == 'true';
+  Future<void> setProximityScanner(bool enabled) =>
+      _box.put('proximityScanner', '$enabled');
+  Future<void> setNearbyEnabled(bool enabled) =>
+      _box.put('nearbyEnabled', '$enabled');
+  Future<void> setNearbyAutomatic(bool automatic) =>
+      _box.put('nearbyAutomatic', '$automatic');
+
   static const _relayKey = 'relayUrl';
   static const _fallbackRelaysKey = 'fallbackRelays';
   static const _noiseKey = 'noiseSuppression';

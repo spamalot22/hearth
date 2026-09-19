@@ -44,6 +44,20 @@
 	<string>Hearth uses the camera to scan channel invites and contact cards.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Hearth uses the microphone for voice chat and voice messages.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Hearth uses Bluetooth for optional nearby encrypted messaging and signal-based proximity scanning.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Hearth connects to nearby devices for encrypted messaging without Internet access.</string>
+	<key>WiFiAwareServices</key>
+	<dict>
+		<key>_hearth-text._tcp</key>
+		<dict>
+			<key>Publishable</key><dict/>
+			<key>Subscribable</key><dict/>
+		</dict>
+	</dict>
+	<key>UIBackgroundModes</key>
+	<array><string>bluetooth-central</string><string>bluetooth-peripheral</string></array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
