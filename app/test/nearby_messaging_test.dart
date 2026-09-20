@@ -55,7 +55,7 @@ void main() {
     messenger.setMockMethodCallHandler(paths, (_) async => dir.path);
     messenger.setMockMethodCallHandler(permissions, (call) async {
       if (call.method == 'requestPermissions') {
-        return {for (final value in call.arguments as List) '$value': 1};
+        return {for (final value in call.arguments as List) value as int: 1};
       }
       return 1;
     });
@@ -375,8 +375,15 @@ void main() {
         ),
       );
       expect(find.text('Proximity scanner'), findsOneWidget);
+      expect(tester.takeException(), isNull);
       await tester.pumpWidget(
         MaterialApp(
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(1.8)),
+            child: child!,
+          ),
           home: Scaffold(
             body: Builder(
               builder: (context) => IconButton(

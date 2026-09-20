@@ -125,18 +125,39 @@ class _ProximityScannerState extends State<ProximityScanner>
                     builder: (context, box) {
                       final extent = math.min(box.maxWidth, box.maxHeight);
                       final center = Offset(extent / 2, extent / 2);
-                      final plotted = <({ProximityObservation signal, double angle, double radius})>[];
-                      for (final band in [ProximityBand.near, ProximityBand.nearby, ProximityBand.weak]) {
+                      final plotted =
+                          <
+                            ({
+                              ProximityObservation signal,
+                              double angle,
+                              double radius,
+                            })
+                          >[];
+                      for (final band in [
+                        ProximityBand.near,
+                        ProximityBand.nearby,
+                        ProximityBand.weak,
+                      ]) {
                         final fraction = switch (band) {
                           ProximityBand.near => .28,
                           ProximityBand.nearby => .58,
                           _ => .88,
                         };
                         final radius = extent * .44 * fraction;
-                        final slots = (2 * math.pi * radius / 36).floor().clamp(1, 24);
-                        final group = signals.where((s) => s.band == band).take(slots).toList();
+                        final slots = (2 * math.pi * radius / 36).floor().clamp(
+                          1,
+                          24,
+                        );
+                        final group = signals
+                            .where((s) => s.band == band)
+                            .take(slots)
+                            .toList();
                         for (var i = 0; i < group.length; i++) {
-                          plotted.add((signal: group[i], angle: i * math.pi * 2 / group.length, radius: radius));
+                          plotted.add((
+                            signal: group[i],
+                            angle: i * math.pi * 2 / group.length,
+                            radius: radius,
+                          ));
                         }
                       }
                       return ClipOval(
@@ -168,49 +189,49 @@ class _ProximityScannerState extends State<ProximityScanner>
                                 ),
                               ),
                               for (final dot in plotted)
-                                  Builder(
-                                    builder: (context) {
-                                      final signal = dot.signal;
-                                      // Angular slots are layout only: ordinary RSSI has no bearing.
-                                      final angle = dot.angle;
-                                      final radius = dot.radius;
-                                      final point =
-                                          center +
-                                          Offset(
-                                                math.cos(angle),
-                                                math.sin(angle),
-                                              ) *
-                                              radius;
-                                      return Positioned(
-                                        left: point.dx - 16,
-                                        top: point.dy - 16,
-                                        width: 32,
-                                        height: 32,
-                                        child: IconButton(
-                                          padding: EdgeInsets.zero,
-                                          constraints:
-                                              const BoxConstraints.tightFor(
-                                                width: 32,
-                                                height: 32,
-                                              ),
-                                          tooltip:
-                                              '${nearby.labelFor(signal.id)}: ${_band(signal.band)}',
-                                          onPressed: () => setState(
-                                            () => _selected = signal.id,
-                                          ),
-                                          icon: Icon(
-                                            _selected == signal.id
-                                                ? Icons.radio_button_checked
-                                                : Icons.circle,
-                                            size: _selected == signal.id
-                                                ? 22
-                                                : 13,
-                                            color: _color(signal.band),
-                                          ),
+                                Builder(
+                                  builder: (context) {
+                                    final signal = dot.signal;
+                                    // Angular slots are layout only: ordinary RSSI has no bearing.
+                                    final angle = dot.angle;
+                                    final radius = dot.radius;
+                                    final point =
+                                        center +
+                                        Offset(
+                                              math.cos(angle),
+                                              math.sin(angle),
+                                            ) *
+                                            radius;
+                                    return Positioned(
+                                      left: point.dx - 16,
+                                      top: point.dy - 16,
+                                      width: 32,
+                                      height: 32,
+                                      child: IconButton(
+                                        padding: EdgeInsets.zero,
+                                        constraints:
+                                            const BoxConstraints.tightFor(
+                                              width: 32,
+                                              height: 32,
+                                            ),
+                                        tooltip:
+                                            '${nearby.labelFor(signal.id)}: ${_band(signal.band)}',
+                                        onPressed: () => setState(
+                                          () => _selected = signal.id,
                                         ),
-                                      );
-                                    },
-                                  ),
+                                        icon: Icon(
+                                          _selected == signal.id
+                                              ? Icons.radio_button_checked
+                                              : Icons.circle,
+                                          size: _selected == signal.id
+                                              ? 22
+                                              : 13,
+                                          color: _color(signal.band),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
                             ],
                           ),
                         ),
@@ -237,7 +258,7 @@ class _ProximityScannerState extends State<ProximityScanner>
                         children: [
                           Icon(Icons.circle, size: 8, color: _color(band)),
                           const SizedBox(width: 6),
-                          Text(_band(band)),
+                          Flexible(child: Text(_band(band))),
                         ],
                       ),
                   ],
