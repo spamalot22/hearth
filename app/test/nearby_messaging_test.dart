@@ -293,35 +293,42 @@ void main() {
     expect(calls.where((c) => c == 'pair'), hasLength(1));
   });
 
-  testWidgets('paired Aware control follows native capability on Android', (
-    tester,
-  ) async {
-    await nearby.configure(enabled: true, automatic: false);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: SingleChildScrollView(child: NearbySettings(messaging: nearby)),
+  testWidgets(
+    'paired Aware control follows native capability on Android',
+    (tester) async {
+      // Settings and queue operations use real file I/O, outside the fake clock.
+      await tester.runAsync(
+        () => nearby.configure(enabled: true, automatic: false),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: NearbySettings(messaging: nearby),
+            ),
+          ),
         ),
-      ),
-    );
-    expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
-    awarePairing = true;
-    await nearby.refresh();
-    await tester.pump();
-    final button = find.text('Pair Wi-Fi Aware device');
-    expect(button, findsOneWidget);
-    expect(calls, isNot(contains('pair')));
-    await tester.ensureVisible(button);
-    await tester.tap(button);
-    await tester.pump();
-    expect(calls.where((c) => c == 'pair'), hasLength(1));
-    awarePairing = false;
-    await nearby.refresh();
-    await tester.pump();
-    expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
-    expect(bluetooth.active, isTrue);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
+      );
+      expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
+      awarePairing = true;
+      await tester.runAsync(nearby.refresh);
+      await tester.pump();
+      final button = find.text('Pair Wi-Fi Aware device');
+      expect(button, findsOneWidget);
+      expect(calls, isNot(contains('pair')));
+      await tester.ensureVisible(button);
+      await tester.tap(button);
+      await tester.pump();
+      expect(calls.where((c) => c == 'pair'), hasLength(1));
+      awarePairing = false;
+      await tester.runAsync(nearby.refresh);
+      await tester.pump();
+      expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
+      expect(bluetooth.active, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+    timeout: const Timeout(Duration(minutes: 2)),
+  );
 
   test(
     'accepted WAN text bridges to nearby without renewing its lifetime',
