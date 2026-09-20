@@ -296,36 +296,41 @@ void main() {
   testWidgets(
     'paired Aware control follows native capability on Android',
     (tester) async {
-      // Settings and queue operations use real file I/O, outside the fake clock.
-      await tester.runAsync(
-        () => nearby.configure(enabled: true, automatic: false),
-      );
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: SingleChildScrollView(
-              child: NearbySettings(messaging: nearby),
+      try {
+        // Settings and queue operations use real file I/O, outside the fake clock.
+        await tester.runAsync(
+          () => nearby.configure(enabled: true, automatic: false),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: NearbySettings(messaging: nearby),
+              ),
             ),
           ),
-        ),
-      );
-      expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
-      awarePairing = true;
-      await tester.runAsync(nearby.refresh);
-      await tester.pump();
-      final button = find.text('Pair Wi-Fi Aware device');
-      expect(button, findsOneWidget);
-      expect(calls, isNot(contains('pair')));
-      await tester.ensureVisible(button);
-      await tester.tap(button);
-      await tester.pump();
-      expect(calls.where((c) => c == 'pair'), hasLength(1));
-      awarePairing = false;
-      await tester.runAsync(nearby.refresh);
-      await tester.pump();
-      expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
-      expect(bluetooth.active, isTrue);
-      await tester.pumpWidget(const SizedBox.shrink());
+        );
+        expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
+        awarePairing = true;
+        await tester.runAsync(nearby.refresh);
+        await tester.pump();
+        final button = find.text('Pair Wi-Fi Aware device');
+        expect(button, findsOneWidget);
+        expect(calls, isNot(contains('pair')));
+        await tester.ensureVisible(button);
+        await tester.tap(button);
+        await tester.pump();
+        expect(calls.where((c) => c == 'pair'), hasLength(1));
+        awarePairing = false;
+        await tester.runAsync(nearby.refresh);
+        await tester.pump();
+        expect(find.text('Pair Wi-Fi Aware device'), findsNothing);
+        expect(bluetooth.active, isTrue);
+        await tester.pumpWidget(const SizedBox.shrink());
+      } finally {
+        // Widget invariants run before the file's tearDown callback.
+        debugDefaultTargetPlatformOverride = null;
+      }
     },
     timeout: const Timeout(Duration(minutes: 2)),
   );
@@ -362,55 +367,59 @@ void main() {
   testWidgets(
     'scanner is a separate closable popup with narrow and large-text layouts',
     (tester) async {
-      tester.view.physicalSize = const Size(360, 800);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.resetPhysicalSize);
-      addTearDown(tester.view.resetDevicePixelRatio);
-      await tester.pumpWidget(
-        MaterialApp(
-          home: MediaQuery(
-            data: const MediaQueryData(
-              size: Size(360, 800),
-              textScaler: TextScaler.linear(1.8),
-            ),
-            child: Scaffold(
-              body: SingleChildScrollView(
-                child: NearbySettings(messaging: nearby),
+      try {
+        tester.view.physicalSize = const Size(360, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MediaQuery(
+              data: const MediaQueryData(
+                size: Size(360, 800),
+                textScaler: TextScaler.linear(1.8),
+              ),
+              child: Scaffold(
+                body: SingleChildScrollView(
+                  child: NearbySettings(messaging: nearby),
+                ),
               ),
             ),
           ),
-        ),
-      );
-      expect(find.text('Proximity scanner'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(
-        MaterialApp(
-          builder: (context, child) => MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(textScaler: const TextScaler.linear(1.8)),
-            child: child!,
-          ),
-          home: Scaffold(
-            body: Builder(
-              builder: (context) => IconButton(
-                tooltip: 'Open scanner',
-                icon: const Icon(Icons.radar),
-                onPressed: () => showProximityScanner(context, nearby),
+        );
+        expect(find.text('Proximity scanner'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(1.8)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Builder(
+                builder: (context) => IconButton(
+                  tooltip: 'Open scanner',
+                  icon: const Icon(Icons.radar),
+                  onPressed: () => showProximityScanner(context, nearby),
+                ),
               ),
             ),
           ),
-        ),
-      );
-      await tester.tap(find.byTooltip('Open scanner'));
-      await tester.pumpAndSettle();
-      expect(find.byType(Dialog), findsOneWidget);
-      expect(find.text('Scanner inactive'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await tester.tap(find.byTooltip('Close scanner'));
-      await tester.pumpAndSettle();
-      expect(find.byType(Dialog), findsNothing);
-      await tester.pumpWidget(const SizedBox.shrink());
+        );
+        await tester.tap(find.byTooltip('Open scanner'));
+        await tester.pumpAndSettle();
+        expect(find.byType(Dialog), findsOneWidget);
+        expect(find.text('Scanner inactive'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.tap(find.byTooltip('Close scanner'));
+        await tester.pumpAndSettle();
+        expect(find.byType(Dialog), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     },
   );
 }
