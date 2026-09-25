@@ -53,6 +53,9 @@ class WebRtcMesh {
     this.externalSignalSender,
     this.externalRouteAvailable,
     this.relayFallbackDelay = Duration.zero,
+    this.handshakeTimeout = const Duration(seconds: 30),
+    this.retryBackoffBase = const Duration(seconds: 10),
+    this.retryBackoffMax = const Duration(minutes: 5),
     this.coordinateRelayDuty = false,
     this.onRelayDutyChanged,
     this.onRelayStandbyProbe,
@@ -155,6 +158,9 @@ class WebRtcMesh {
   /// Grace period reserved for direct and peer-assisted discovery before relay
   /// rendezvous is enabled. Ordinary chat meshes use zero for cold starts.
   final Duration relayFallbackDelay;
+  final Duration handshakeTimeout;
+  final Duration retryBackoffBase;
+  final Duration retryBackoffMax;
 
   /// When true, authenticated direct peers rotate redundant relay-watch duty.
   /// Media/star meshes leave this disabled because their topology differs.
@@ -202,6 +208,13 @@ class WebRtcMesh {
   final Map<String, DateTime> _backoffUntil = {};
   final Map<String, int> _backoffFailures = {}; // consecutive failure count
   final Map<String, String> _signalTransport = {};
+  final Map<String, String> _lastLinkFailures = {};
+  final Map<String, Future<void>> _signalHandlers = {};
+  final Map<String, Object> _signalEpochs = {};
+  int _queuedSignalHandlers = 0;
+  int _rejectedSignals = 0;
+  int _staleSignals = 0;
+  final Set<String> _requestedPeers = {};
   final Map<String, DateTime> _relayReplyUntil = {};
   final Map<String, List<Map<String, Object?>>> _earlyRemoteIce = {};
   final Map<String, DateTime> _relayPresenceUntil = {};
@@ -225,6 +238,7 @@ class WebRtcMesh {
   Timer? _standbyProbeTimer;
   Timer? _relayPresenceTimer;
   Timer? _relayFallbackTimer;
+  Timer? _peerRetryTimer;
   int _signalSince = 0;
   bool _announcing = false;
   bool _pollingSignals = false;
@@ -269,6 +283,12 @@ class WebRtcMesh {
 
   /// Closes one peer deliberately without treating it as a failed connection.
   Future<void> disconnectPeer(String peerHex) async {
+    _signalEpochs.remove(peerHex);
+    _earlyRemoteIce.remove(peerHex);
+    _requestedPeers.remove(peerHex);
+    _backoffUntil.remove(peerHex);
+    _backoffFailures.remove(peerHex);
+    _lastLinkFailures.remove(peerHex);
     final link = _links[peerHex];
     if (link != null) {
       HearthDiagnostics.log(
@@ -281,10 +301,60 @@ class WebRtcMesh {
 
   /// Attempts to connect to a peer learned through an existing mesh link.
   void maybeInitiateVia(String peerHex, {String? viaPeerHex}) {
+    if (_closed) return;
+    if (_peerIdPattern.hasMatch(peerHex) &&
+        peerHex != selfPubkeyHex &&
+        _requestedPeers.length < _kMaxPeerConnections &&
+        (peerAllowed?.call(peerHex) ?? true)) {
+      _requestedPeers.add(peerHex);
+    }
     if (viaPeerHex != null) {
       _peerSignalRouter.learnRoute(peerHex, viaPeerHex);
     }
     _maybeInitiate(peerHex);
+  }
+
+  bool connectionFailedFor(String peerHex) =>
+      _links[peerHex]?.open != true && _lastLinkFailures.containsKey(peerHex);
+
+  /// Anonymous, bounded connection state. Never include SDP, addresses or keys.
+  String diagnosticReport({Iterable<String>? peers}) {
+    final selected =
+        (peers ??
+                {..._requestedPeers, ..._links.keys, ..._lastLinkFailures.keys})
+            .toSet()
+            .take(_kMaxPeerConnections);
+    final lines = <String>[
+      'Mesh: $diagnosticLabel',
+      'Relay discovery: ${_relayFallbackEnabled ? "enabled" : "waiting for P2P grace period"}',
+      'Relay authenticated: ${_authToken != null}',
+      'Connected peers: ${connections.length}',
+      'Pending signalling operations: $_queuedSignalHandlers',
+      'Rejected unauthenticated or malformed signals: $_rejectedSignals',
+      'Ignored answers from another attempt: $_staleSignals',
+    ];
+    var index = 0;
+    for (final peer in selected) {
+      final link = _links[peer];
+      final retryAt = _backoffUntil[peer];
+      lines.addAll([
+        '',
+        'Peer ${++index}: ${link == null
+            ? "waiting for a connection"
+            : link.open
+            ? "connected"
+            : "connecting"}',
+        'Parent mesh route: ${externalRouteAvailable?.call(peer) ?? false}',
+        'Last signalling path: ${_signalTransport[peer] ?? "none"}',
+        'Failed attempts: ${_backoffFailures[peer] ?? 0}',
+        if (retryAt != null)
+          'Retry backoff remaining: ${max(0, retryAt.difference(DateTime.now()).inSeconds)}s',
+        if (_lastLinkFailures[peer] != null)
+          'Last failure: ${_lastLinkFailures[peer]}',
+        if (link != null) link.diagnosticReport(),
+      ]);
+    }
+    return lines.join('\n');
   }
 
   /// Whether this mesh can carry an authenticated child-mesh signal toward
@@ -370,9 +440,23 @@ class WebRtcMesh {
   void _start() {
     if (_started) return;
     _started = true;
+    for (final peer in initialPeers.take(_kMaxPeerConnections)) {
+      maybeInitiateVia(peer);
+    }
     // A child media mesh can signal over its established parent without touching
     // the relay. Only enable rendezvous after that bounded grace period expires.
     _tryCachedPeers();
+    // Chat meshes need the same relay-independent recovery as child media
+    // meshes. A surviving bridge can carry fresh signalling during an outage.
+    _peerRetryTimer = Timer.periodic(announceInterval, (_) {
+      for (final peer in _requestedPeers.toList()) {
+        // The answerer already has its mailbox poll timer. Do not turn local
+        // retry bookkeeping into extra relay polls for every remembered peer.
+        if (forceInitiator ?? (selfPubkeyHex.compareTo(peer) > 0)) {
+          _maybeInitiate(peer);
+        }
+      }
+    });
     if (relayFallbackDelay <= Duration.zero) {
       unawaited(_enableRelayFallback());
     } else {
@@ -410,16 +494,19 @@ class WebRtcMesh {
 
   void _tryCachedPeers() {
     final cached = <({String peer, Duration delay})>[
-      for (final peer in initialPeers) (peer: peer, delay: Duration.zero),
+      for (final peer in _requestedPeers.toList())
+        (peer: peer, delay: Duration.zero),
       ...?candidateCache?.peersToTry(channel),
     ];
     final attempted = <String>{};
     for (final (:peer, :delay) in cached) {
       if (!attempted.add(peer)) continue;
       if (delay == Duration.zero) {
-        _maybeInitiate(peer);
+        maybeInitiateVia(peer);
       } else {
-        Future.delayed(delay, () => _maybeInitiate(peer));
+        Future.delayed(delay, () {
+          if (!_closed) maybeInitiateVia(peer);
+        });
       }
     }
   }
@@ -712,7 +799,7 @@ class WebRtcMesh {
             for (final peer in peers.whereType<String>().take(
               _kMaxPeerFanout,
             )) {
-              _maybeInitiate(peer);
+              maybeInitiateVia(peer);
             }
           }
           return true;
@@ -886,16 +973,19 @@ class WebRtcMesh {
   static const int _kMaxPeerConnections = 64;
   static const int _kMaxRememberedFailures = 1024;
   static final RegExp _peerIdPattern = RegExp(r'^[0-9a-f]{64}$');
+  static final Random _signalRandom = Random.secure();
 
   /// We initiate (offer) only to peers whose key sorts below ours, so exactly
   /// one side of every pair offers.
   void _maybeInitiate(String peerHex) {
     // A pubkey is 32 bytes = 64 hex chars; drop anything malformed or our own.
     if (_closed ||
+        _recovering ||
         !_peerIdPattern.hasMatch(peerHex) ||
         peerHex == selfPubkeyHex ||
         !(peerAllowed?.call(peerHex) ?? true) ||
         _links.containsKey(peerHex) ||
+        _signalHandlers.containsKey(peerHex) ||
         _links.length >= _kMaxPeerConnections) {
       return;
     }
@@ -927,6 +1017,8 @@ class WebRtcMesh {
       try {
         await link.start();
       } catch (error) {
+        link.failure =
+            'Creating or sending offer failed (${error.runtimeType})';
         HearthDiagnostics.log(
           '[hearth][$diagnosticLabel] offer failed: ${error.runtimeType}',
         );
@@ -964,6 +1056,7 @@ class WebRtcMesh {
           control,
           channelAuthKey: channelAuthKey,
         )) {
+      _rejectedSignals++;
       return;
     }
     if (_closed || !_peerSignalRouter.remember(control)) return;
@@ -973,6 +1066,43 @@ class WebRtcMesh {
     if (routedVia != null) {
       _peerSignalRouter.learnRoute(from, routedVia);
     }
+    // Parent-mesh frames are handled asynchronously. Serialize per peer so a
+    // reconnect offer cannot race another offer or its trickled candidates.
+    if (_queuedSignalHandlers >= 256 ||
+        (!_signalHandlers.containsKey(from) && _signalHandlers.length >= 64)) {
+      return;
+    }
+    _queuedSignalHandlers++;
+    final epoch = _signalEpochs.putIfAbsent(from, Object.new);
+    final previous = _signalHandlers[from] ?? Future<void>.value();
+    final operation = previous
+        .catchError((Object _) {})
+        .then((_) => _applySignal(from, kind, payload, epoch));
+    _signalHandlers[from] = operation;
+    try {
+      await operation;
+    } catch (error) {
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] signal cleanup failed: ${error.runtimeType}',
+      );
+    } finally {
+      _queuedSignalHandlers--;
+      if (identical(_signalHandlers[from], operation)) {
+        unawaited(_signalHandlers.remove(from));
+        _signalEpochs.remove(from);
+      }
+    }
+  }
+
+  Future<void> _applySignal(
+    String from,
+    String kind,
+    Map<String, Object?> payload,
+    Object epoch,
+  ) async {
+    bool current() => !_closed && identical(_signalEpochs[from], epoch);
+    if (!current()) return;
+    _PeerLink? affected;
     try {
       switch (kind) {
         case 'offer':
@@ -980,20 +1110,47 @@ class WebRtcMesh {
               _links.length >= _kMaxPeerConnections) {
             return;
           }
-          final link = _links[from] ?? _createLink(from, initiator: false);
-          await link.handleOffer(payload);
+          final old = _links[from];
+          if (old != null) {
+            // This mesh never renegotiates existing links. A fresh SDP offer
+            // is a new connection, e.g. the other app left and rejoined voice.
+            if (old.initiator &&
+                !old.open &&
+                (forceInitiator ?? (selfPubkeyHex.compareTo(from) > 0))) {
+              return; // Keep the deterministic offerer during glare.
+            }
+            _intentionalDisconnects.add(from);
+            await old.dispose();
+            if (!current()) return;
+          }
+          final link = _createLink(
+            from,
+            initiator: false,
+            signalSession: payload['session'] as String?,
+          );
+          affected = link;
+          await link.handleOffer(payload).timeout(handshakeTimeout);
           final earlyIce = _earlyRemoteIce.remove(from);
           if (earlyIce != null) {
             for (final candidate in earlyIce) {
-              await link.handleIce(candidate);
+              if (candidate['session'] == link.signalSession) {
+                await link.handleIce(candidate).timeout(handshakeTimeout);
+              }
             }
           }
         case 'answer':
-          await _links[from]?.handleAnswer(payload);
+          affected = _links[from];
+          if (affected == null ||
+              affected.signalSession != payload['session']) {
+            _staleSignals++;
+            return;
+          }
+          await affected.handleAnswer(payload).timeout(handshakeTimeout);
         case 'ice':
           final link = _links[from];
-          if (link != null) {
-            await link.handleIce(payload);
+          affected = link;
+          if (link != null && link.signalSession == payload['session']) {
+            await link.handleIce(payload).timeout(handshakeTimeout);
           } else {
             _bufferEarlyRemoteIce(from, payload);
           }
@@ -1005,7 +1162,10 @@ class WebRtcMesh {
       );
       // One malformed signed SDP/candidate must not abort the mailbox batch or
       // leave a permanently handshaking link behind.
-      await _links[from]?.dispose();
+      if (affected != null) {
+        affected.failure = '$kind processing failed (${error.runtimeType})';
+        await affected.dispose();
+      }
     }
   }
 
@@ -1020,20 +1180,44 @@ class WebRtcMesh {
     if (pending.length < maxCandidatesPerPeer) pending.add(candidate);
   }
 
-  _PeerLink _createLink(String peerHex, {required bool initiator}) {
+  _PeerLink _createLink(
+    String peerHex, {
+    required bool initiator,
+    String? signalSession,
+  }) {
+    if (_requestedPeers.length < _kMaxPeerConnections) {
+      _requestedPeers.add(peerHex);
+    }
     late final _PeerLink link;
     link = _PeerLink(
       peerHex: peerHex,
       initiator: initiator,
+      signalSession: initiator
+          ? hex.encode(
+              List<int>.generate(16, (_) => _signalRandom.nextInt(256)),
+            )
+          : signalSession,
       iceServers: _iceServers,
       localStream: localStream,
       onRemoteStream: onRemoteStream,
       diagnosticLabel: diagnosticLabel,
+      handshakeTimeout: handshakeTimeout,
       onControl: (peer, control) {
         _handleControl(peer, control);
         onControl?.call(peer, control);
       },
-      onSignal: (kind, data) => _sendSignal(peerHex, kind, data),
+      onSignal: (kind, data) async {
+        if (link.disposed || _closed) return;
+        try {
+          await _sendSignal(peerHex, kind, {
+            ...(data! as Map).cast<String, Object?>(),
+            if (link.signalSession != null) 'session': link.signalSession,
+          });
+        } catch (error) {
+          link.failure = '$kind delivery failed (${error.runtimeType})';
+          rethrow;
+        }
+      },
       onOpen: _emitPeer,
       onClosed: () {
         // A delayed callback from an old link must never remove a replacement.
@@ -1042,7 +1226,6 @@ class WebRtcMesh {
         _links.remove(peerHex);
         _peerSignalRouter.removeNextHop(peerHex);
         _routedSignalRates.remove(peerHex);
-        _signalTransport.remove(peerHex);
         _relayReplyUntil.remove(peerHex);
         _refreshRelayDuty();
         if (_closed) return;
@@ -1062,10 +1245,20 @@ class WebRtcMesh {
         }
         final failures = (_backoffFailures[peerHex] ?? 0) + 1;
         _backoffFailures[peerHex] = failures;
-        // Exponential: 10s, 20s, 40s, 80s, 160s, capped at 300s (5min).
-        final delaySec = min(10 * (1 << min(failures - 1, 5)), 300);
+        if (!_lastLinkFailures.containsKey(peerHex) &&
+            _lastLinkFailures.length >= 64) {
+          final oldest = _lastLinkFailures.keys.first;
+          _lastLinkFailures.remove(oldest);
+          _signalTransport.remove(oldest);
+        }
+        _lastLinkFailures[peerHex] =
+            '${link.failure ?? "Connection closed"}\n${link.diagnosticReport()}';
+        final delayMs = min(
+          retryBackoffBase.inMilliseconds * (1 << min(failures - 1, 8)),
+          retryBackoffMax.inMilliseconds,
+        );
         _backoffUntil[peerHex] = DateTime.now().add(
-          Duration(seconds: delaySec),
+          Duration(milliseconds: delayMs),
         );
         onPeerLeft?.call(peerHex);
       },
@@ -1083,6 +1276,7 @@ class WebRtcMesh {
     }
     _backoffUntil.remove(link.peerHex); // connected — reset its backoff
     _backoffFailures.remove(link.peerHex);
+    _lastLinkFailures.remove(link.peerHex);
     _relayReplyUntil.remove(link.peerHex);
     _peerSignalRouter.removeNextHop(link.peerHex);
     if (!_closed && !_peerConnected.isClosed) _peerConnected.add(link);
@@ -1116,8 +1310,7 @@ class WebRtcMesh {
     switch (control) {
       case PeersControl(:final peers):
         for (final peerHex in peers.take(_kMaxPeerFanout)) {
-          _peerSignalRouter.learnRoute(peerHex, fromHex);
-          _maybeInitiate(peerHex);
+          maybeInitiateVia(peerHex, viaPeerHex: fromHex);
         }
       case SignalControl():
         unawaited(_handleRoutedSignal(fromHex, control));
@@ -1212,6 +1405,9 @@ class WebRtcMesh {
 
   void _logSignalTransport(String peerHex, String transport) {
     if (_signalTransport[peerHex] == transport) return;
+    if (_signalTransport.length >= 128) {
+      _signalTransport.remove(_signalTransport.keys.first);
+    }
     _signalTransport[peerHex] = transport;
     HearthDiagnostics.log('[hearth][$diagnosticLabel] signal using $transport');
   }
@@ -1252,7 +1448,9 @@ class WebRtcMesh {
     final relayReplyUntil = _relayReplyUntil[to];
     final replyViaRelay =
         relayReplyUntil != null && DateTime.now().isBefore(relayReplyUntil);
-    if (peerFailures < 3 && !replyViaRelay) {
+    // A failed relay rendezvous must not permanently disable a working mesh
+    // route. After three attempts, try the relay once, then resume P2P attempts.
+    if ((peerFailures % 4 < 3 || _authToken == null) && !replyViaRelay) {
       if (_routeSignal(control)) {
         _logSignalTransport(to, 'child mesh');
         return;
@@ -1299,12 +1497,14 @@ class WebRtcMesh {
 
   Future<void> close() async {
     _closed = true;
+    _signalEpochs.clear();
     _announceTimer?.cancel();
     _signalTimer?.cancel();
     _relayDutyTimer?.cancel();
     _standbyProbeTimer?.cancel();
     _relayPresenceTimer?.cancel();
     _relayFallbackTimer?.cancel();
+    _peerRetryTimer?.cancel();
     for (final link in _links.values.toList()) {
       await link.dispose();
     }
@@ -1312,6 +1512,8 @@ class WebRtcMesh {
     _earlyRemoteIce.clear();
     _routedSignalRates.clear();
     _signalTransport.clear();
+    _lastLinkFailures.clear();
+    _requestedPeers.clear();
     _relayReplyUntil.clear();
     _relayPresenceUntil.clear();
     _relayVoicePresenceUntil.clear();
@@ -1335,6 +1537,7 @@ class _PeerLink implements FrameChannel {
   _PeerLink({
     required this.peerHex,
     required this.initiator,
+    required this.signalSession,
     required this._iceServers,
     required this.onSignal,
     required this.onOpen,
@@ -1343,15 +1546,20 @@ class _PeerLink implements FrameChannel {
     this.onRemoteStream,
     this.onControl,
     required this.diagnosticLabel,
+    required Duration handshakeTimeout,
   }) {
-    _handshakeTimer = Timer(const Duration(seconds: 30), () {
-      if (!_opened) unawaited(dispose());
+    _handshakeTimer = Timer(handshakeTimeout, () {
+      if (!_opened) {
+        failure ??= 'Timed out before the peer data channel opened';
+        unawaited(dispose());
+      }
     });
   }
 
   @override
   final String peerHex;
   final bool initiator;
+  final String? signalSession;
   final List<Map<String, dynamic>> _iceServers;
   final MediaStream? localStream;
   final void Function(String peerHex, MediaStream stream)? onRemoteStream;
@@ -1368,9 +1576,22 @@ class _PeerLink implements FrameChannel {
   bool _remoteSet = false;
   bool _opened = false;
   bool _disposed = false;
+  Future<void>? _disposing;
+  bool get disposed => _disposed;
+  final DateTime _createdAt = DateTime.now();
+  String? failure;
+  String _stage = 'Creating peer connection';
+  String _iceState = 'not started';
+  String _peerState = 'not started';
+  int _localCandidates = 0;
+  int _remoteCandidates = 0;
+  int _rejectedCandidates = 0;
   Timer? _handshakeTimer;
   late final PeerConnectionHealthMonitor _health = PeerConnectionHealthMonitor(
-    onStale: () => unawaited(dispose()),
+    onStale: () {
+      failure ??= 'Native connection became unavailable';
+      unawaited(dispose());
+    },
   );
   Future<void> _sendTail = Future<void>.value();
   int _queuedSendBytes = 0;
@@ -1383,6 +1604,7 @@ class _PeerLink implements FrameChannel {
   static const int _maxBufferedSendBytes = 512 * 1024;
   static const int _maxQueuedSendBytes = 32 * 1024 * 1024;
   static const int _maxQueuedSends = 4096;
+  static const Duration _nativeSendTimeout = Duration(seconds: 5);
 
   @override
   Stream<SyncFrame> get frames => _frames.stream;
@@ -1391,7 +1613,17 @@ class _PeerLink implements FrameChannel {
   RTCPeerConnection? get connection => _pc;
 
   /// Whether this link's data channel is open (handshake complete).
-  bool get open => _opened;
+  bool get open => _opened && !_disposed;
+
+  String diagnosticReport() => [
+    'Role: ${initiator ? "offerer" : "answerer"}',
+    'Stage: $_stage',
+    'Attempt age: ${DateTime.now().difference(_createdAt).inSeconds}s',
+    'Peer connection: $_peerState',
+    'ICE: $_iceState',
+    'Remote description applied: $_remoteSet',
+    'ICE candidates: local=$_localCandidates remote=$_remoteCandidates rejected=$_rejectedCandidates',
+  ].join('\n');
 
   /// Native state is still usable, so activity resume must not tear it down.
   bool get healthy => isPeerConnectionHealthy(
@@ -1442,7 +1674,11 @@ class _PeerLink implements FrameChannel {
                 channel.state == RTCDataChannelState.RTCDataChannelOpen) {
               var buffered = channel.bufferedAmount ?? 0;
               try {
-                buffered = await channel.getBufferedAmount();
+                buffered = await channel.getBufferedAmount().timeout(
+                  _nativeSendTimeout,
+                );
+              } on TimeoutException {
+                rethrow;
               } catch (_) {
                 // Some web implementations only expose the synchronous getter.
               }
@@ -1456,11 +1692,16 @@ class _PeerLink implements FrameChannel {
             }
             if (!_disposed &&
                 channel.state == RTCDataChannelState.RTCDataChannelOpen) {
-              await channel.send(RTCDataChannelMessage(text));
+              await channel
+                  .send(RTCDataChannelMessage(text))
+                  .timeout(_nativeSendTimeout);
             }
           })
-          .catchError((Object _) {
-            if (!_disposed) unawaited(dispose());
+          .catchError((Object error) {
+            if (!_disposed) {
+              failure = 'Data-channel send failed (${error.runtimeType})';
+              unawaited(dispose());
+            }
           })
           .whenComplete(() {
             _queuedSendBytes -= bytes;
@@ -1478,9 +1719,9 @@ class _PeerLink implements FrameChannel {
     final pc = await createPeerConnection({'iceServers': _iceServers});
     if (_disposed) {
       try {
-        await pc.close();
+        await pc.close().timeout(const Duration(seconds: 3));
       } finally {
-        await pc.dispose();
+        await pc.dispose().timeout(const Duration(seconds: 3));
       }
       throw StateError('peer link closed during creation');
     }
@@ -1490,7 +1731,12 @@ class _PeerLink implements FrameChannel {
       'role=${initiator ? 'offerer' : 'answerer'}',
     );
     pc.onIceCandidate = (candidate) {
-      if (candidate.candidate == null) return; // end-of-candidates marker
+      if (_disposed ||
+          candidate.candidate == null ||
+          candidate.candidate!.isEmpty) {
+        return;
+      }
+      _localCandidates++;
       final payload = <String, Object?>{
         'candidate': candidate.candidate,
         'sdpMid': candidate.sdpMid,
@@ -1500,16 +1746,21 @@ class _PeerLink implements FrameChannel {
     };
     pc.onDataChannel = _wireChannel;
     pc.onConnectionState = (state) {
+      if (_disposed) return;
+      _peerState = state.name;
       HearthDiagnostics.log(
         '[hearth][$diagnosticLabel] connection state=$state',
       );
       _health.handlePeerState(state);
     };
     pc.onIceConnectionState = (state) {
+      if (_disposed) return;
+      _iceState = state.name;
       HearthDiagnostics.log('[hearth][$diagnosticLabel] ICE state=$state');
       _health.handleIceState(state);
     };
     pc.onIceGatheringState = (state) {
+      if (_disposed) return;
       HearthDiagnostics.log('[hearth][$diagnosticLabel] ICE gathering=$state');
     };
     // Voice/screen: attach our local media before the offer/answer so it rides
@@ -1517,6 +1768,7 @@ class _PeerLink implements FrameChannel {
     // receive-only viewers have none and just add nothing.
     final stream = localStream;
     if (stream != null) {
+      _stage = 'Attaching local media';
       for (final track in stream.getTracks()) {
         await pc.addTrack(track, stream);
         if (_disposed) throw StateError('peer link closed during setup');
@@ -1568,9 +1820,15 @@ class _PeerLink implements FrameChannel {
   /// Initiator path: open the data channel and send an offer.
   Future<void> start() async {
     final pc = await _ensurePc();
+    if (_disposed) return;
     _wireChannel(await pc.createDataChannel('hearth', RTCDataChannelInit()));
+    if (_disposed) return;
+    _stage = 'Creating offer';
     final offer = await pc.createOffer();
+    if (_disposed) return;
     await pc.setLocalDescription(offer);
+    if (_disposed) return;
+    _stage = 'Sending offer / waiting for answer';
     await _outgoingSignals.sendDescription('offer', {
       'sdp': offer.sdp,
       'type': offer.type,
@@ -1579,13 +1837,21 @@ class _PeerLink implements FrameChannel {
 
   Future<void> handleOffer(Map<String, Object?> data) async {
     final pc = await _ensurePc();
+    if (_disposed) return;
+    _stage = 'Applying remote offer';
     await pc.setRemoteDescription(
       RTCSessionDescription(data['sdp'] as String?, data['type'] as String?),
     );
+    if (_disposed) return;
     _remoteSet = true;
     await _flushCandidates();
+    if (_disposed) return;
+    _stage = 'Creating answer';
     final answer = await pc.createAnswer();
+    if (_disposed) return;
     await pc.setLocalDescription(answer);
+    if (_disposed) return;
+    _stage = 'Sending answer / checking direct path';
     await _outgoingSignals.sendDescription('answer', {
       'sdp': answer.sdp,
       'type': answer.type,
@@ -1594,15 +1860,21 @@ class _PeerLink implements FrameChannel {
 
   Future<void> handleAnswer(Map<String, Object?> data) async {
     final pc = _pc;
-    if (pc == null) return;
+    if (_disposed || pc == null || !initiator || _remoteSet) return;
+    _stage = 'Applying remote answer';
     await pc.setRemoteDescription(
       RTCSessionDescription(data['sdp'] as String?, data['type'] as String?),
     );
+    if (_disposed) return;
     _remoteSet = true;
     await _flushCandidates();
+    if (_disposed) return;
+    _stage = 'Checking direct path';
   }
 
   Future<void> handleIce(Map<String, Object?> data) async {
+    if (_disposed) return;
+    _remoteCandidates++;
     final candidate = RTCIceCandidate(
       data['candidate'] as String?,
       data['sdpMid'] as String?,
@@ -1614,14 +1886,28 @@ class _PeerLink implements FrameChannel {
       _pendingCandidates.add(candidate);
       return;
     }
-    await _pc?.addCandidate(candidate);
+    await _addCandidate(candidate);
+  }
+
+  Future<void> _addCandidate(RTCIceCandidate candidate) async {
+    if (_disposed) return;
+    try {
+      await _pc?.addCandidate(candidate);
+    } catch (_) {
+      // A delayed candidate from a retired ICE generation must not destroy
+      // the new connection. Other candidates may still establish a route.
+      _rejectedCandidates++;
+      HearthDiagnostics.log(
+        '[hearth][$diagnosticLabel] remote ICE candidate rejected',
+      );
+    }
   }
 
   Future<void> _flushCandidates() async {
     final pc = _pc;
     if (pc == null) return;
-    for (final candidate in _pendingCandidates) {
-      await pc.addCandidate(candidate);
+    for (final candidate in _pendingCandidates.toList()) {
+      await _addCandidate(candidate);
     }
     _pendingCandidates.clear();
   }
@@ -1667,50 +1953,62 @@ class _PeerLink implements FrameChannel {
         );
       }
     };
-    channel.onDataChannelState = (state) {
+    void handleState(RTCDataChannelState state) {
       if (_disposed) return;
       HearthDiagnostics.log(
         '[hearth][$diagnosticLabel] data channel state=$state',
       );
       if (state == RTCDataChannelState.RTCDataChannelOpen && !_opened) {
         _opened = true;
+        _stage = 'Connected';
         _handshakeTimer?.cancel();
         _handshakeTimer = null;
         onOpen(this); // surfaces this peer to the gossip layer
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
         unawaited(dispose());
       }
-    };
+    }
+
+    channel.onDataChannelState = handleState;
+    final state = channel.state;
+    if (state != null) handleState(state);
   }
 
-  Future<void> dispose() async {
-    if (_disposed) return;
+  Future<void> dispose() => _disposing ??= _dispose();
+
+  Future<void> _dispose() async {
     _disposed = true;
     _handshakeTimer?.cancel();
     _handshakeTimer = null;
     _health.close();
     _pendingCandidates.clear();
     _outgoingSignals.clear();
+    // Retire logical ownership before native cleanup, which can stall during
+    // network changes. Late callbacks are guarded by _disposed and link identity.
+    onClosed();
     try {
-      await _channel?.close();
+      await _channel?.close().timeout(const Duration(seconds: 3));
     } catch (_) {}
     try {
-      await _pc?.close();
+      await _pc?.close().timeout(const Duration(seconds: 3));
     } catch (_) {}
     try {
-      await _pc?.dispose();
+      await _pc?.dispose().timeout(const Duration(seconds: 3));
     } catch (_) {}
     // Handshakes and media-only links may never subscribe to gossip frames.
     // Closing a single-subscription stream waits forever without a listener.
     if (!_frames.isClosed) {
       final listening = _frames.hasListener;
       final closed = _frames.close();
-      if (listening) await closed;
+      if (listening) {
+        try {
+          await closed.timeout(const Duration(seconds: 3));
+        } catch (_) {}
+      }
     }
-    onClosed();
     for (final stream in _syntheticRemoteStreams) {
       try {
-        await stream.dispose();
+        await stream.dispose().timeout(const Duration(seconds: 3));
       } catch (_) {}
     }
     _syntheticRemoteStreams.clear();

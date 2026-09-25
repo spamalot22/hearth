@@ -42,6 +42,7 @@ import 'device_keys.dart';
 import 'device_store.dart';
 import 'diagnostics.dart';
 import 'emoji_picker.dart';
+import 'error_details.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
 import 'inference_bot.dart';
@@ -1411,6 +1412,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _promptingMember = false;
   final Map<String, GroupChannel> _groups = {}; // id -> {key, local name}
   String? _error;
+  String? _errorDetails;
   Timer? _errorTimer;
   bool _sending = false;
   Message? _replyTo; // message being replied to (shown above composer)
@@ -1466,10 +1468,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  void _setError(String msg) {
+  String _diagnosticDetails({String? details}) => [
+    'Hearth $appVersion',
+    'Platform: ${kIsWeb ? "web" : defaultTargetPlatform.name}',
+    'Captured: ${DateTime.now().toUtc().toIso8601String()}',
+    ?details,
+    '',
+    'Recent diagnostic events:',
+    HearthDiagnostics.snapshot(),
+  ].join('\n');
+
+  void _setError(String msg, {String? details}) {
     _errorTimer?.cancel();
-    setState(() => _error = msg);
-    _errorTimer = Timer(const Duration(seconds: 5), () {
+    setState(() {
+      _error = msg;
+      _errorDetails = _diagnosticDetails(details: details);
+    });
+    _errorTimer = Timer(const Duration(seconds: 15), () {
       if (mounted) setState(() => _error = null);
     });
   }
@@ -1783,6 +1798,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(_nearby?.refresh());
     // Re-broadcast voice presence to newly-connected peers immediately.
     if (_voice != null) _broadcastVoicePresence(_voice!.channelId);
+    final voice = _voice;
+    if (voice != null) {
+      for (final peer in _voiceDevicePeers(voice.channelId)) {
+        voice.connectTo(peer);
+      }
+    }
     // Re-broadcast read watermark only when peer count increased (new peer).
     final active = _channels?.active;
     if (active != null) {
@@ -1983,6 +2004,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       });
       if (control.channelId.isNotEmpty && _voice?.channelId == channelId) {
         _voice?.connectTo(fromHex);
+      } else if (control.channelId.isEmpty && _voice?.channelId == channelId) {
+        unawaited(_voice?.disconnectFrom(fromHex));
       }
       _scheduleVoicePresenceExpiry();
       return;
@@ -5465,17 +5488,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     try {
+      _pruneVoicePresenceEntries();
       final channelSession = _channels?.sessions
           .where((session) => session.channelId == channelId)
           .firstOrNull;
       final initialVoicePeers = <String>{
         ...?_voicePresence[channelId],
         ...?channelSession?.relayVoicePeers,
-        ...?channelSession?.mesh?.connectedPeers,
-        for (final candidate
-            in _channels?.candidateCache?.peersToTry(channelId) ??
-                const <({String peer, Duration delay})>[])
-          candidate.peer,
       }..remove(widget.deviceKeys.publicKeyHex);
       final voice = await VoiceSession.join(
         channelId: channelId,
@@ -5487,7 +5506,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
         audioInputId: _settings?.audioInputDevice,
         audioOutputId: _settings?.audioOutputDevice,
-        candidateCache: _channels?.candidateCache,
         signalingMesh: channelSession?.mesh,
         initialPeers: initialVoicePeers,
         channelAuthKey: _groups[channelId]?.key,
@@ -5521,10 +5539,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         (_) => _broadcastVoicePresence(channelId),
       );
       if (mounted) setState(() {});
-    } catch (_) {
+    } catch (error) {
       await _stopAndroidVoiceService();
       if (mounted) {
-        _setError('microphone access is needed for voice');
+        _setError(
+          'Could not join voice',
+          details:
+              'Voice startup failed (${error.runtimeType}).\n'
+              'Microphone capture, device selection or peer setup could not complete.',
+        );
       }
     }
   }
@@ -5588,15 +5611,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Set<String> _voiceMembersFor(String channelId) {
+    return _voiceDevicePeers(channelId).map(_rootHexForPeer).toSet()
+      ..remove(widget.identity.publicKeyHex);
+  }
+
+  Set<String> _voiceDevicePeers(String channelId) {
     final session = _channels?.sessions
         .where((candidate) => candidate.channelId == channelId)
         .firstOrNull;
-    return {
-      for (final peer in _voicePresence[channelId] ?? const <String>{})
-        _rootHexForPeer(peer),
-      for (final peer in session?.relayVoicePeers ?? const <String>[])
-        _rootHexForPeer(peer),
-    }..remove(widget.identity.publicKeyHex);
+    return {...?_voicePresence[channelId], ...?session?.relayVoicePeers}
+      ..remove(widget.deviceKeys.publicKeyHex);
   }
 
   Future<void> _leaveVoice({bool cancelJoin = true}) {
@@ -6248,10 +6272,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       _displayName(Uint8List.fromList(hex.decode(peerHex))),
                     ),
                   for (final memberHex in connectingVoiceMembers)
-                    _connectingVoiceTile(
-                      memberHex,
-                      failed: voice.connectionWaitExpired,
-                    ),
+                    _connectingVoiceTile(voice, memberHex),
                   const SizedBox(height: 8),
                   OutlinedButton.icon(
                     onPressed: () => unawaited(_openVoiceSoundboard(session)),
@@ -6300,25 +6321,60 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _connectingVoiceTile(
-    String rootHex, {
-    required bool failed,
-  }) => ListTile(
-    dense: true,
-    contentPadding: EdgeInsets.zero,
-    leading: _avatar(Uint8List.fromList(hex.decode(rootHex)), radius: 16),
-    title: Text(
-      _displayName(Uint8List.fromList(hex.decode(rootHex))),
-      overflow: TextOverflow.ellipsis,
-    ),
-    subtitle: Text(failed ? 'P2P voice connection failed' : 'Connecting...'),
-    trailing: failed
-        ? Icon(Icons.error_outline, color: Theme.of(context).colorScheme.error)
-        : const SizedBox.square(
-            dimension: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-  );
+  Widget _connectingVoiceTile(VoiceSession voice, String rootHex) {
+    final peers = _voiceDevicePeers(
+      voice.channelId,
+    ).where((peer) => _rootHexForPeer(peer) == rootHex).toList();
+    final failed = voice.connectionFailedFor(peers);
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: _avatar(Uint8List.fromList(hex.decode(rootHex)), radius: 16),
+      title: Text(
+        _displayName(Uint8List.fromList(hex.decode(rootHex))),
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(failed ? 'P2P voice connection failed' : 'Connecting...'),
+      onTap: () => showErrorDetails(
+        context,
+        message: failed
+            ? 'A direct voice connection failed. Automatic retries remain active.'
+            : 'Voice is still connecting. No direct audio path is ready yet.',
+        diagnostics: _diagnosticDetails(
+          details:
+              '${voice.diagnosticReport(peers: peers)}\n\n'
+              'Voice audio is direct P2P. Relay discovery does not carry audio. '
+              'A firewall, client-isolated Wi-Fi or incompatible NAT can prevent a direct path.',
+        ),
+        onRetry: () async {
+          try {
+            if (identical(_voice, voice)) {
+              await voice.recoverConnections();
+            }
+          } catch (error) {
+            if (mounted) {
+              _setError(
+                'Could not retry voice',
+                details: 'Voice recovery failed (${error.runtimeType})',
+              );
+            }
+          }
+        },
+      ),
+      trailing: failed
+          ? Tooltip(
+              message: 'Show connection details',
+              child: Icon(
+                Icons.error_outline,
+                color: Theme.of(context).colorScheme.error,
+              ),
+            )
+          : const SizedBox.square(
+              dimension: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+    );
+  }
 
   /// One voice participant: avatar (green ring when speaking) + name + level
   /// bar. Tapping a peer opens their volume slider. Long-press to mute.
@@ -9322,13 +9378,46 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   PreferredSizeWidget _errorBar(BuildContext context, String text) {
+    final style = Theme.of(context).textTheme.bodyMedium!;
+    final height = max(
+      48.0,
+      MediaQuery.textScalerOf(context).scale(style.fontSize ?? 14) *
+              2 *
+              (style.height ?? 1.4) +
+          16,
+    );
+    final details = _errorDetails ?? _diagnosticDetails();
     return PreferredSize(
-      preferredSize: const Size.fromHeight(22),
-      child: Container(
-        width: double.infinity,
+      preferredSize: Size.fromHeight(height),
+      child: Material(
         color: Theme.of(context).colorScheme.errorContainer,
-        padding: const EdgeInsets.symmetric(vertical: 2),
-        child: Text(text, textAlign: TextAlign.center),
+        child: InkWell(
+          onTap: () =>
+              showErrorDetails(context, message: text, diagnostics: details),
+          child: SizedBox(
+            height: height,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      text,
+                      style: style,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Tooltip(
+                    message: 'Show error details',
+                    child: Icon(Icons.info_outline),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

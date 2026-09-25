@@ -8,7 +8,6 @@ import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import 'candidate_cache.dart';
 import 'diagnostics.dart';
 import 'mesh_control.dart';
 import 'webrtc_mesh.dart';
@@ -59,8 +58,15 @@ class VoiceSession {
 
   bool get isMuted => _muted || _deafened;
   bool get isDeafened => _deafened;
-  bool get connectionWaitExpired =>
-      DateTime.now().difference(_joinedAt) > const Duration(seconds: 30);
+  bool connectionFailedFor(Iterable<String> peers) =>
+      peers.any(_mesh.connectionFailedFor);
+
+  String diagnosticReport({Iterable<String>? peers}) => [
+    'Microphone tracks: ${_localStream.getAudioTracks().length}',
+    'Muted: $isMuted; deafened: $isDeafened',
+    'Audio RTP observed: sent=$_loggedOutboundRtp received=$_loggedInboundRtp',
+    _mesh.diagnosticReport(peers: peers),
+  ].join('\n');
 
   /// A peer's playback volume (0..1) — defaults to full.
   double volumeOf(String peerHex) => _volumes[peerHex] ?? 1.0;
@@ -92,6 +98,8 @@ class VoiceSession {
     if (!_closed) _mesh.maybeInitiateVia(peerHex);
   }
 
+  Future<void> disconnectFrom(String peerHex) => _mesh.disconnectPeer(peerHex);
+
   /// Requests the mic and joins [channelId]'s voice mesh. Throws if mic access
   /// is denied.
   static Future<VoiceSession> join({
@@ -104,7 +112,6 @@ class VoiceSession {
     bool enhancedNoiseSuppression = false,
     String? audioInputId,
     String? audioOutputId,
-    CandidateCache? candidateCache,
     WebRtcMesh? signalingMesh,
     Set<String> initialPeers = const <String>{},
     bool Function(String peerHex)? peerAllowed,
@@ -225,13 +232,16 @@ class VoiceSession {
         channel: 'voice:$channelId',
         identity: meshIdentity ?? identity,
         localStream: stream,
-        candidateCache: candidateCache,
+        // The parent remembers contacts. A voice call only dials peers with
+        // current voice presence, not everybody seen in a previous call.
         initialPeers: initialPeers,
         externalSignalSender: signalingMesh?.routeExternalSignal,
         externalRouteAvailable: signalingMesh?.canRouteSignalTo,
         relayFallbackDelay: signalingMesh == null
             ? Duration.zero
             : const Duration(seconds: 35),
+        retryBackoffBase: const Duration(seconds: 2),
+        retryBackoffMax: const Duration(seconds: 30),
         peerAllowed: peerAllowed,
         channelAuthKey: channelAuthKey,
         diagnosticLabel: 'voice',
@@ -295,7 +305,9 @@ class VoiceSession {
     var self = 0.0;
     for (final entry in _mesh.connections.entries.toList()) {
       try {
-        final reports = await entry.value.getStats();
+        final reports = await entry.value.getStats().timeout(
+          const Duration(seconds: 3),
+        );
         if (_closed) return;
         if (!identical(_mesh.connections[entry.key], entry.value)) continue;
         for (final report in reports) {

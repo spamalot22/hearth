@@ -9,7 +9,7 @@ import 'mesh_control.dart';
 import 'signal_auth.dart';
 
 /// Routing state for carrying authenticated WebRTC signalling over an existing
-/// mesh. Routes only live while their next-hop data channel is alive; the
+/// mesh. Routes expire even while their next-hop data channel is alive; the
 /// persistent candidate cache stores identities, not stale network addresses.
 class PeerSignalRouter {
   PeerSignalRouter({
@@ -18,6 +18,7 @@ class PeerSignalRouter {
     this.maxRoutes = 1024,
     this.maxSeenSignals = 4096,
     this.seenTtl = const Duration(minutes: 2),
+    this.routeTtl = const Duration(seconds: 30),
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now;
 
@@ -30,9 +31,11 @@ class PeerSignalRouter {
   final int maxRoutes;
   final int maxSeenSignals;
   final Duration seenTtl;
+  final Duration routeTtl;
   final DateTime Function() _now;
 
-  final LinkedHashMap<String, String> _routes = LinkedHashMap();
+  final LinkedHashMap<String, ({String via, DateTime expires})> _routes =
+      LinkedHashMap();
   final LinkedHashMap<String, DateTime> _seen = LinkedHashMap();
 
   /// Learns that [destination] is reachable through the currently-open [via]
@@ -47,7 +50,7 @@ class PeerSignalRouter {
       return;
     }
     _routes.remove(destination);
-    _routes[destination] = via;
+    _routes[destination] = (via: via, expires: _now().add(routeTtl));
     while (_routes.length > maxRoutes) {
       _routes.remove(_routes.keys.first);
     }
@@ -55,7 +58,7 @@ class PeerSignalRouter {
 
   /// Drops every route whose first hop disappeared.
   void removeNextHop(String peer) {
-    _routes.removeWhere((_, nextHop) => nextHop == peer);
+    _routes.removeWhere((_, route) => route.via == peer);
   }
 
   /// Chooses a known route when possible, otherwise bounded-floods the signal
@@ -77,7 +80,15 @@ class PeerSignalRouter {
     if (open.contains(destination)) return [destination];
 
     final preferred = _routes[destination];
-    if (preferred != null && open.contains(preferred)) return [preferred];
+    if (preferred != null) {
+      if (!preferred.expires.isAfter(_now())) {
+        // A bridge can stay online after losing its onward path. Re-discover
+        // through other open peers instead of pinning every retry to it.
+        _routes.remove(destination);
+      } else if (open.contains(preferred.via)) {
+        return [preferred.via];
+      }
+    }
 
     final fallback = open.toList()..sort();
     return fallback.take(maxFanout).toList(growable: false);
@@ -176,6 +187,11 @@ class PeerSignalRouter {
   }
 
   bool _validPayload(SignalControl signal) {
+    final session = signal.data['session'];
+    if (session != null &&
+        (session is! String || !RegExp(r'^[0-9a-f]{32}$').hasMatch(session))) {
+      return false;
+    }
     final signature = signal.data['sig'];
     if (signature is! String || signature.length > 128) return false;
     final capability = signal.data[signalCapabilityField];

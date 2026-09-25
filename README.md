@@ -194,6 +194,19 @@ Voice signalling first travels over the already-established channel data mesh,
 including bounded forwarding by shared channel peers. Relay rendezvous is enabled
 only after that direct path has had time to connect.
 
+Connection details are available by tapping a connecting/failed voice member or
+the app's error banner. The popup includes a copyable, memory-only diagnostic
+snapshot (connection stage, ICE state, candidate counts and retry status), without
+peer keys, SDP or IP addresses, and offers a manual voice retry. A failed attempt
+also retries automatically with capped backoff, independently of relay polling.
+Ordinary chat meshes use the same retry mechanism, so surviving peers can carry
+reconnection signalling during a relay outage. Learned routing hints expire after
+30 seconds; an online bridge with a stale onward route cannot pin retries forever.
+Stalled native data-channel sends time out and retire the link for reconnection.
+Fresh offers replace retired connections; signed attempt IDs keep delayed answers
+and ICE from an earlier connection out of its replacement. Both devices must use
+the updated signalling implementation. Voice media remains direct P2P, with no TURN.
+
 ### AI bot (local LLM, decentralised hosting)
 [`app/lib/inference_bot.dart`](app/lib/inference_bot.dart) provides an **@bot**
 you can mention in any channel. The bot runs a GGUF model locally on whichever

@@ -75,6 +75,63 @@ void main() {
     );
   });
 
+  test('stale routes expire even when the first hop remains online', () {
+    var now = DateTime.utc(2026);
+    final router = PeerSignalRouter(
+      selfPeer: '0' * 64,
+      channel: 'channel',
+      routeTtl: const Duration(seconds: 30),
+      now: () => now,
+    );
+    final bridge = '1' * 64;
+    final alternate = '2' * 64;
+    final target = '3' * 64;
+    router.learnRoute(target, bridge);
+    expect(
+      router.nextHops(destination: target, openPeers: [bridge, alternate]),
+      [bridge],
+    );
+    now = now.add(const Duration(seconds: 30));
+    expect(
+      router.nextHops(destination: target, openPeers: [bridge, alternate]),
+      [bridge, alternate],
+    );
+    expect(
+      router.nextHops(
+        destination: target,
+        openPeers: [bridge, alternate, target],
+      ),
+      [target],
+      reason: 'A direct connection always wins over routing hints',
+    );
+  });
+
+  test('new evidence refreshes a route, but sending through it does not', () {
+    var now = DateTime.utc(2026);
+    final router = PeerSignalRouter(
+      selfPeer: '0' * 64,
+      channel: 'channel',
+      routeTtl: const Duration(seconds: 30),
+      now: () => now,
+    );
+    final bridge = '1' * 64;
+    final alternate = '2' * 64;
+    final target = '3' * 64;
+    router.learnRoute(target, bridge);
+    now = now.add(const Duration(seconds: 20));
+    router.learnRoute(target, alternate);
+    now = now.add(const Duration(seconds: 20));
+    expect(
+      router.nextHops(destination: target, openPeers: [bridge, alternate]),
+      [alternate],
+    );
+    now = now.add(const Duration(seconds: 10));
+    expect(
+      router.nextHops(destination: target, openPeers: [bridge, alternate]),
+      [bridge, alternate],
+    );
+  });
+
   test(
     'deduplicates across hop changes and accepts again after expiry',
     () async {

@@ -169,7 +169,12 @@ List<int> signalSigningBytes(
   };
   // Bind the channel too, so a malicious relay can't replay a signed signal into
   // a different channel's mailbox (cross-channel connection confusion).
-  return utf8.encode('$channel|$kind|$to|$payload');
+  final session = data['session'];
+  return utf8.encode(
+    session == null
+        ? '$channel|$kind|$to|$payload'
+        : '$channel|$kind|$to|session:$session|$payload',
+  );
 }
 
 /// Proves that a signalling peer possesses a channel's encryption capability.
