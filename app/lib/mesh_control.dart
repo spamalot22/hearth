@@ -28,6 +28,7 @@ sealed class MeshControl {
   static MeshControl? decodeBody(String body) {
     try {
       final json = (jsonDecode(body) as Map).cast<String, Object?>();
+      final packets = json['packets'];
       return switch (json['t']) {
         'peers' => PeersControl(
           ((json['peers'] as List?) ?? const []).cast<String>(),
@@ -73,6 +74,11 @@ sealed class MeshControl {
           channelId: json['ch'] as String? ?? '',
         ),
         'voice_leave' => VoiceLeaveControl(),
+        'voice_receipt'
+            when packets is int &&
+                packets >= 0 &&
+                packets <= 9007199254740991 =>
+          VoiceReceiptControl(packets),
         'read' => ReadWatermarkControl(
           channelId: json['ch'] as String? ?? '',
           messageId: json['msg'] as String? ?? '',
@@ -307,6 +313,18 @@ class VoicePresenceControl extends MeshControl {
 class VoiceLeaveControl extends MeshControl {
   @override
   Map<String, Object?> toJson() => {'t': 'voice_leave'};
+}
+
+/// RTP receipt count for this direct voice link only. No audio or identifiers.
+class VoiceReceiptControl extends MeshControl {
+  const VoiceReceiptControl(this.packetsReceived);
+  final int packetsReceived;
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'voice_receipt',
+    'packets': packetsReceived,
+  };
 }
 
 /// Broadcasts the sender's latest read message in a channel (watermark).

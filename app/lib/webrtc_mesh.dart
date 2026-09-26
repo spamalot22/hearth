@@ -52,6 +52,8 @@ class WebRtcMesh {
     this.initialPeers = const <String>{},
     this.externalSignalSender,
     this.externalRouteAvailable,
+    this.externalRouteQuality,
+    this.peerResponseTimeout,
     this.relayFallbackDelay = Duration.zero,
     this.handshakeTimeout = const Duration(seconds: 30),
     this.retryBackoffBase = const Duration(seconds: 10),
@@ -101,7 +103,7 @@ class WebRtcMesh {
   /// Optional local media (the mic) sent to every peer — set for a voice mesh,
   /// null for the gossip mesh. Added to each connection *before* the offer, so
   /// the audio rides in the initial SDP and no renegotiation is needed.
-  final MediaStream? localStream;
+  MediaStream? localStream;
 
   /// Called with each peer's remote stream (their mic), for voice playback.
   final void Function(String peerHex, MediaStream stream)? onRemoteStream;
@@ -154,6 +156,11 @@ class WebRtcMesh {
 
   /// Whether the parent mesh currently has a direct or peer-assisted route.
   final bool Function(String peerHex)? externalRouteAvailable;
+  final SignalRouteQuality Function(String peerHex)? externalRouteQuality;
+
+  /// Optional shorter deadline for a mesh-routed offer to receive its answer.
+  /// ICE still gets the full handshake deadline once an answer is received.
+  final Duration? peerResponseTimeout;
 
   /// Grace period reserved for direct and peer-assisted discovery before relay
   /// rendezvous is enabled. Ordinary chat meshes use zero for cold starts.
@@ -211,6 +218,10 @@ class WebRtcMesh {
   final Map<String, String> _lastLinkFailures = {};
   final Map<String, Future<void>> _signalHandlers = {};
   final Map<String, Object> _signalEpochs = {};
+  final Map<String, int> _signalsPerPeer = {};
+  final Map<String, Timer> _retryTimers = {};
+  Future<void> _routedSignalTail = Future<void>.value();
+  int _queuedRoutedSignals = 0;
   int _queuedSignalHandlers = 0;
   int _rejectedSignals = 0;
   int _staleSignals = 0;
@@ -283,6 +294,7 @@ class WebRtcMesh {
 
   /// Closes one peer deliberately without treating it as a failed connection.
   Future<void> disconnectPeer(String peerHex) async {
+    _retryTimers.remove(peerHex)?.cancel();
     _signalEpochs.remove(peerHex);
     _earlyRemoteIce.remove(peerHex);
     _requestedPeers.remove(peerHex);
@@ -361,6 +373,46 @@ class WebRtcMesh {
   /// [peerHex] without contacting the relay.
   bool canRouteSignalTo(String peerHex) =>
       _peerSignalRouter.hasPath(peerHex, _openPeerIds);
+
+  SignalRouteQuality signalRouteTo(String peerHex) => _closed
+      ? SignalRouteQuality.none
+      : _peerSignalRouter.routeQuality(peerHex, _openPeerIds);
+
+  /// New parent links may appear between periodic retry ticks.
+  void retryConnections() {
+    if (_closed) return;
+    for (final peer in _requestedPeers.toList()) {
+      if (forceInitiator ?? (selfPubkeyHex.compareTo(peer) > 0)) {
+        _maybeInitiate(peer);
+      }
+    }
+  }
+
+  /// Retires a media-stalled peer while preserving its reconnect intent.
+  Future<void> repairPeer(String peerHex) async {
+    if (_closed) return;
+    final link = _links[peerHex];
+    if (link == null) return;
+    link.failure =
+        'Audio delivery stalled while the data connection remained open';
+    await link.dispose();
+  }
+
+  /// A repaired capture stream is used by every subsequent signed handshake.
+  /// Rebuilding links also covers native senders created during a capture race.
+  Future<void> replaceLocalStream(MediaStream stream) async {
+    if (_closed) return;
+    localStream = stream;
+    final cleanup = <Future<void>>[];
+    for (final link in _links.values.toList()) {
+      _backoffUntil.remove(link.peerHex);
+      _retryTimers.remove(link.peerHex)?.cancel();
+      _intentionalDisconnects.add(link.peerHex);
+      cleanup.add(link.dispose());
+    }
+    retryConnections();
+    await Future.wait(cleanup);
+  }
 
   /// Routes a signal for this channel's voice child over existing P2P links.
   /// The envelope is authenticated before forwarding, even on the originating
@@ -448,15 +500,10 @@ class WebRtcMesh {
     _tryCachedPeers();
     // Chat meshes need the same relay-independent recovery as child media
     // meshes. A surviving bridge can carry fresh signalling during an outage.
-    _peerRetryTimer = Timer.periodic(announceInterval, (_) {
-      for (final peer in _requestedPeers.toList()) {
-        // The answerer already has its mailbox poll timer. Do not turn local
-        // retry bookkeeping into extra relay polls for every remembered peer.
-        if (forceInitiator ?? (selfPubkeyHex.compareTo(peer) > 0)) {
-          _maybeInitiate(peer);
-        }
-      }
-    });
+    _peerRetryTimer = Timer.periodic(
+      announceInterval,
+      (_) => retryConnections(),
+    );
     if (relayFallbackDelay <= Duration.zero) {
       unawaited(_enableRelayFallback());
     } else {
@@ -679,6 +726,10 @@ class WebRtcMesh {
       _signalTimer?.cancel();
       _backoffUntil.clear();
       _backoffFailures.clear();
+      for (final timer in _retryTimers.values) {
+        timer.cancel();
+      }
+      _retryTimers.clear();
       _earlyRemoteIce.clear();
 
       final unhealthyLinks = _links.values
@@ -947,9 +998,11 @@ class WebRtcMesh {
         for (final raw in signals.take(256)) {
           try {
             if (raw is Map) {
-              await _handleSignal(
-                raw.cast<String, Object?>(),
-                deliveredByRelay: true,
+              unawaited(
+                _handleSignal(
+                  raw.cast<String, Object?>(),
+                  deliveredByRelay: true,
+                ),
               );
             }
           } catch (_) {
@@ -994,7 +1047,7 @@ class WebRtcMesh {
     // relay fallback rather than creating a doomed PeerConnection.
     if (_authToken == null &&
         !_peerSignalRouter.hasPath(peerHex, _openPeerIds) &&
-        !(externalRouteAvailable?.call(peerHex) ?? false)) {
+        _externalSignalRouteTo(peerHex) == SignalRouteQuality.none) {
       return;
     }
     // Default policy: the greater key offers (one offerer per pair). A forced
@@ -1030,7 +1083,6 @@ class WebRtcMesh {
   Future<void> _handleSignal(
     Map<String, Object?> signal, {
     String? routedVia,
-    bool authenticated = false,
     bool deliveredByRelay = false,
   }) async {
     if (_closed) return;
@@ -1049,35 +1101,45 @@ class WebRtcMesh {
       kind: kind,
       data: payload,
     );
-    // Relay and P2P signalling take the same authenticated path. This also
-    // deduplicates a signal delivered over both transports during failover.
-    if (!authenticated &&
-        !await _peerSignalRouter.authenticate(
-          control,
-          channelAuthKey: channelAuthKey,
-        )) {
-      _rejectedSignals++;
-      return;
-    }
-    if (_closed || !_peerSignalRouter.remember(control)) return;
-    if (deliveredByRelay) {
-      _relayReplyUntil[from] = DateTime.now().add(const Duration(seconds: 30));
-    }
-    if (routedVia != null) {
-      _peerSignalRouter.learnRoute(from, routedVia);
-    }
-    // Parent-mesh frames are handled asynchronously. Serialize per peer so a
-    // reconnect offer cannot race another offer or its trickled candidates.
+    // Include authentication in the per-peer queue so asynchronous signature
+    // checks cannot reorder an offer and its candidates. Other peers progress
+    // independently, including when a native operation stalls in a relay batch.
     if (_queuedSignalHandlers >= 256 ||
+        (_signalsPerPeer[from] ?? 0) >= 64 ||
         (!_signalHandlers.containsKey(from) && _signalHandlers.length >= 64)) {
       return;
     }
+    if (!_peerSignalRouter.validEnvelope(control)) {
+      _rejectedSignals++;
+      return;
+    }
     _queuedSignalHandlers++;
+    _signalsPerPeer[from] = (_signalsPerPeer[from] ?? 0) + 1;
     final epoch = _signalEpochs.putIfAbsent(from, Object.new);
     final previous = _signalHandlers[from] ?? Future<void>.value();
-    final operation = previous
-        .catchError((Object _) {})
-        .then((_) => _applySignal(from, kind, payload, epoch));
+    final operation = previous.catchError((Object _) {}).then((_) async {
+      if (_closed || !identical(_signalEpochs[from], epoch)) return;
+      if (!await _peerSignalRouter.authenticate(
+        control,
+        channelAuthKey: channelAuthKey,
+      )) {
+        _rejectedSignals++;
+        return;
+      }
+      if (_closed ||
+          !identical(_signalEpochs[from], epoch) ||
+          !(peerAllowed?.call(from) ?? true) ||
+          !_peerSignalRouter.remember(control)) {
+        return;
+      }
+      if (deliveredByRelay) {
+        _relayReplyUntil[from] = DateTime.now().add(
+          const Duration(seconds: 30),
+        );
+      }
+      if (routedVia != null) _peerSignalRouter.learnRoute(from, routedVia);
+      await _applySignal(from, kind, payload, epoch);
+    });
     _signalHandlers[from] = operation;
     try {
       await operation;
@@ -1087,9 +1149,20 @@ class WebRtcMesh {
       );
     } finally {
       _queuedSignalHandlers--;
+      final pending = (_signalsPerPeer[from] ?? 1) - 1;
+      if (pending == 0) {
+        _signalsPerPeer.remove(from);
+      } else {
+        _signalsPerPeer[from] = pending;
+      }
       if (identical(_signalHandlers[from], operation)) {
         unawaited(_signalHandlers.remove(from));
         _signalEpochs.remove(from);
+        if (_started &&
+            _requestedPeers.contains(from) &&
+            (forceInitiator ?? (selfPubkeyHex.compareTo(from) > 0))) {
+          _maybeInitiate(from);
+        }
       }
     }
   }
@@ -1213,6 +1286,10 @@ class WebRtcMesh {
             ...(data! as Map).cast<String, Object?>(),
             if (link.signalSession != null) 'session': link.signalSession,
           });
+          if (kind == 'offer' &&
+              _signalTransport[peerHex] != 'relay rendezvous') {
+            link.expectAnswerWithin(peerResponseTimeout);
+          }
         } catch (error) {
           link.failure = '$kind delivery failed (${error.runtimeType})';
           rethrow;
@@ -1260,6 +1337,16 @@ class WebRtcMesh {
         _backoffUntil[peerHex] = DateTime.now().add(
           Duration(milliseconds: delayMs),
         );
+        _retryTimers.remove(peerHex)?.cancel();
+        if (_started) {
+          _retryTimers[peerHex] = Timer(Duration(milliseconds: delayMs), () {
+            _retryTimers.remove(peerHex);
+            if (_requestedPeers.contains(peerHex) &&
+                (forceInitiator ?? (selfPubkeyHex.compareTo(peerHex) > 0))) {
+              _maybeInitiate(peerHex);
+            }
+          });
+        }
         onPeerLeft?.call(peerHex);
       },
     );
@@ -1275,6 +1362,7 @@ class WebRtcMesh {
       return;
     }
     _backoffUntil.remove(link.peerHex); // connected — reset its backoff
+    _retryTimers.remove(link.peerHex)?.cancel();
     _backoffFailures.remove(link.peerHex);
     _lastLinkFailures.remove(link.peerHex);
     _relayReplyUntil.remove(link.peerHex);
@@ -1334,6 +1422,8 @@ class WebRtcMesh {
         break; // Handled by the external onControl callback (app layer).
       case VoiceLeaveControl():
         break; // Handled by the external onControl callback (voice layer).
+      case VoiceReceiptControl():
+        break; // Direct voice receipt; never forwarded to another peer.
       case ReadWatermarkControl():
         break; // Handled by the external onControl callback (app layer).
       case DeviceRevocationControl():
@@ -1345,29 +1435,66 @@ class WebRtcMesh {
     String fromLinkHex,
     SignalControl control,
   ) async {
-    if (!_allowRoutedSignal(fromLinkHex) ||
+    if (_closed ||
+        !_allowRoutedSignal(fromLinkHex) ||
+        !_peerSignalRouter.validEnvelope(control) ||
         !(peerAllowed?.call(control.from) ?? true) ||
         (control.to != selfPubkeyHex &&
-            !(peerAllowed?.call(control.to) ?? true)) ||
+            !(peerAllowed?.call(control.to) ?? true))) {
+      return;
+    }
+    if (control.to == selfPubkeyHex &&
+        (control.namespace == null || control.namespace == channel)) {
+      // Authentication belongs inside the destination's per-peer queue too.
+      await _handleSignal({
+        'from': control.from,
+        'kind': control.kind,
+        'data': control.data,
+      }, routedVia: fromLinkHex);
+      return;
+    }
+    if (_queuedRoutedSignals >= 256) return;
+    _queuedRoutedSignals++;
+    // Only verification and forwarding use this tail, never native handshakes.
+    // This preserves the order delivered to a child voice mesh after verification.
+    final operation = _routedSignalTail
+        .then((_) => _forwardRoutedSignal(fromLinkHex, control))
+        .catchError((Object error) {
+          HearthDiagnostics.log(
+            '[hearth][$diagnosticLabel] routed signal rejected: ${error.runtimeType}',
+          );
+        });
+    _routedSignalTail = operation;
+    try {
+      await operation;
+    } finally {
+      _queuedRoutedSignals--;
+    }
+  }
+
+  Future<void> _forwardRoutedSignal(
+    String fromLinkHex,
+    SignalControl control,
+  ) async {
+    bool allowed() =>
+        !_closed &&
+        _links[fromLinkHex]?.open == true &&
+        (peerAllowed?.call(control.from) ?? true) &&
+        (control.to == selfPubkeyHex ||
+            (peerAllowed?.call(control.to) ?? true));
+    if (!allowed() ||
         !await _peerSignalRouter.authenticate(
           control,
           channelAuthKey: channelAuthKey,
-        )) {
+        ) ||
+        !allowed()) {
       return;
     }
 
     if (control.to == selfPubkeyHex) {
-      if (control.namespace != null && control.namespace != channel) {
-        if (!_peerSignalRouter.remember(control)) return;
-        _peerSignalRouter.learnRoute(control.from, fromLinkHex);
-        if (!_externalSignals.isClosed) _externalSignals.add(control);
-        return;
-      }
-      await _handleSignal(
-        {'from': control.from, 'kind': control.kind, 'data': control.data},
-        routedVia: fromLinkHex,
-        authenticated: true,
-      );
+      if (!_peerSignalRouter.remember(control)) return;
+      _peerSignalRouter.learnRoute(control.from, fromLinkHex);
+      if (!_externalSignals.isClosed) _externalSignals.add(control);
       return;
     }
 
@@ -1441,7 +1568,7 @@ class WebRtcMesh {
     );
     if (!_peerSignalRouter.remember(control)) return;
 
-    // Try the child mesh, then its established parent mesh. Do not duplicate a
+    // Prefer the best route across the child and parent meshes. Do not duplicate a
     // successfully peer-routed handshake to the relay: relay signalling is the
     // final rendezvous fallback, not a parallel transport.
     final peerFailures = _backoffFailures[to] ?? 0;
@@ -1451,18 +1578,52 @@ class WebRtcMesh {
     // A failed relay rendezvous must not permanently disable a working mesh
     // route. After three attempts, try the relay once, then resume P2P attempts.
     if ((peerFailures % 4 < 3 || _authToken == null) && !replyViaRelay) {
-      if (_routeSignal(control)) {
-        _logSignalTransport(to, 'child mesh');
-        return;
-      }
+      final childQuality = signalRouteTo(to);
+      final parentQuality = _externalSignalRouteTo(to);
       final sendExternal = externalSignalSender;
-      if (sendExternal != null && await sendExternal(control)) {
-        _logSignalTransport(to, 'parent mesh');
-        return;
+      var sent = false;
+      // Prefer direct paths on either mesh before learned routes or flooding.
+      // Flood both independent meshes when neither has a known destination;
+      // receiving peers still apply the same authenticated deduplication.
+      for (final quality in [
+        SignalRouteQuality.direct,
+        SignalRouteQuality.learned,
+        SignalRouteQuality.flood,
+      ]) {
+        if (parentQuality == quality && sendExternal != null) {
+          try {
+            if (await sendExternal(control)) {
+              _logSignalTransport(to, 'parent mesh');
+              sent = true;
+              if (quality != SignalRouteQuality.flood) return;
+            }
+          } catch (error) {
+            HearthDiagnostics.log(
+              '[hearth][$diagnosticLabel] parent signalling failed: ${error.runtimeType}',
+            );
+          }
+        }
+        if (childQuality == quality && _routeSignal(control)) {
+          _logSignalTransport(to, 'child mesh');
+          sent = true;
+          if (quality != SignalRouteQuality.flood) return;
+        }
       }
+      if (sent) return;
     }
     _logSignalTransport(to, 'relay rendezvous');
     await _sendSignalToRelay(control);
+  }
+
+  SignalRouteQuality _externalSignalRouteTo(String peerHex) {
+    if (externalSignalSender == null) return SignalRouteQuality.none;
+    final quality = externalRouteQuality?.call(peerHex);
+    if (quality != null) return quality;
+    final available = externalRouteAvailable?.call(peerHex);
+    if (available == false) return SignalRouteQuality.none;
+    return available == true
+        ? SignalRouteQuality.learned
+        : SignalRouteQuality.flood;
   }
 
   Future<void> _sendSignalToRelay(SignalControl control) async {
@@ -1505,6 +1666,10 @@ class WebRtcMesh {
     _relayPresenceTimer?.cancel();
     _relayFallbackTimer?.cancel();
     _peerRetryTimer?.cancel();
+    for (final timer in _retryTimers.values) {
+      timer.cancel();
+    }
+    _retryTimers.clear();
     for (final link in _links.values.toList()) {
       await link.dispose();
     }
@@ -1587,6 +1752,18 @@ class _PeerLink implements FrameChannel {
   int _remoteCandidates = 0;
   int _rejectedCandidates = 0;
   Timer? _handshakeTimer;
+  Timer? _answerTimer;
+
+  void expectAnswerWithin(Duration? timeout) {
+    if (timeout == null || _disposed || _remoteSet || _opened) return;
+    _answerTimer?.cancel();
+    _answerTimer = Timer(timeout, () {
+      if (_disposed || _remoteSet || _opened) return;
+      failure = 'No answer received through the mesh';
+      unawaited(dispose());
+    });
+  }
+
   late final PeerConnectionHealthMonitor _health = PeerConnectionHealthMonitor(
     onStale: () {
       failure ??= 'Native connection became unavailable';
@@ -1861,6 +2038,7 @@ class _PeerLink implements FrameChannel {
   Future<void> handleAnswer(Map<String, Object?> data) async {
     final pc = _pc;
     if (_disposed || pc == null || !initiator || _remoteSet) return;
+    _answerTimer?.cancel();
     _stage = 'Applying remote answer';
     await pc.setRemoteDescription(
       RTCSessionDescription(data['sdp'] as String?, data['type'] as String?),
@@ -1962,6 +2140,7 @@ class _PeerLink implements FrameChannel {
         _opened = true;
         _stage = 'Connected';
         _handshakeTimer?.cancel();
+        _answerTimer?.cancel();
         _handshakeTimer = null;
         onOpen(this); // surfaces this peer to the gossip layer
       } else if (state == RTCDataChannelState.RTCDataChannelClosed) {
@@ -1979,6 +2158,7 @@ class _PeerLink implements FrameChannel {
   Future<void> _dispose() async {
     _disposed = true;
     _handshakeTimer?.cancel();
+    _answerTimer?.cancel();
     _handshakeTimer = null;
     _health.close();
     _pendingCandidates.clear();

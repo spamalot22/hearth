@@ -42,6 +42,28 @@ Future<SignalControl> _signedSignal({
 }
 
 void main() {
+  test('route quality distinguishes direct, learned, flood and no path', () {
+    var now = DateTime.utc(2026);
+    final bridge = '1' * 64;
+    final target = '2' * 64;
+    final router = PeerSignalRouter(
+      selfPeer: '0' * 64,
+      channel: 'channel',
+      routeTtl: const Duration(seconds: 30),
+      now: () => now,
+    );
+    expect(router.routeQuality(target, []), SignalRouteQuality.none);
+    expect(router.routeQuality(target, [bridge]), SignalRouteQuality.flood);
+    router.learnRoute(target, bridge);
+    expect(router.routeQuality(target, [bridge]), SignalRouteQuality.learned);
+    expect(
+      router.routeQuality(target, [target, bridge]),
+      SignalRouteQuality.direct,
+    );
+    now = now.add(const Duration(seconds: 30));
+    expect(router.routeQuality(target, [bridge]), SignalRouteQuality.flood);
+  });
+
   test('prefers a learned next hop and forgets it when the link closes', () {
     final self = '0' * 64;
     final bridge = '1' * 64;
@@ -227,6 +249,7 @@ void main() {
       data: const {},
     );
     expect(await router.authenticate(badKind), isFalse);
+    expect(router.validEnvelope(badKind), isFalse);
 
     final overHopped = await _signedSignal(
       from: sender,
@@ -235,6 +258,7 @@ void main() {
       hops: kDefaultSignalRouteHops + 1,
     );
     expect(await router.authenticate(overHopped), isFalse);
+    expect(router.validEnvelope(overHopped), isFalse);
 
     final oversized = await _signedSignal(
       from: sender,
@@ -246,5 +270,6 @@ void main() {
       },
     );
     expect(await router.authenticate(oversized), isFalse);
+    expect(router.validEnvelope(oversized), isFalse);
   });
 }

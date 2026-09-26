@@ -8,6 +8,8 @@ import 'package:crypto/crypto.dart';
 import 'mesh_control.dart';
 import 'signal_auth.dart';
 
+enum SignalRouteQuality { none, flood, learned, direct }
+
 /// Routing state for carrying authenticated WebRTC signalling over an existing
 /// mesh. Routes expire even while their next-hop data channel is alive; the
 /// persistent candidate cache stores identities, not stale network addresses.
@@ -100,6 +102,22 @@ class PeerSignalRouter {
     maxFanout: 1,
   ).isNotEmpty;
 
+  SignalRouteQuality routeQuality(
+    String destination,
+    Iterable<String> openPeers,
+  ) {
+    final hops = nextHops(
+      destination: destination,
+      openPeers: openPeers,
+      maxFanout: 1,
+    );
+    if (hops.isEmpty) return SignalRouteQuality.none;
+    if (hops.single == destination) return SignalRouteQuality.direct;
+    return _routes[destination]?.via == hops.single
+        ? SignalRouteQuality.learned
+        : SignalRouteQuality.flood;
+  }
+
   /// Returns false for a duplicate recently seen signal. The fingerprint uses
   /// only fixed, end-to-end-authenticated fields, so JSON map ordering and hop
   /// metadata cannot create alternate identities for the same signal.
@@ -135,12 +153,8 @@ class PeerSignalRouter {
     ]).toString();
   }
 
-  /// Validates shape, size, identity signature, and optional group capability
-  /// before a signal is processed or forwarded.
-  Future<bool> authenticate(
-    SignalControl signal, {
-    Uint8List? channelAuthKey,
-  }) async {
+  /// Cheap validation before queueing; this does not authenticate a sender.
+  bool validEnvelope(SignalControl signal) {
     final signalChannel = signal.namespace ?? channel;
     // A channel mesh may carry signalling only for its own voice sub-mesh. This
     // keeps routed controls from becoming a cross-channel social-graph oracle.
@@ -162,6 +176,17 @@ class PeerSignalRouter {
     } catch (_) {
       return false;
     }
+    return true;
+  }
+
+  /// Validates shape, size, identity signature, and optional group capability
+  /// before a signal is processed or forwarded.
+  Future<bool> authenticate(
+    SignalControl signal, {
+    Uint8List? channelAuthKey,
+  }) async {
+    if (!validEnvelope(signal)) return false;
+    final signalChannel = signal.namespace ?? channel;
 
     if (!await verifySignal(
       signal.from,

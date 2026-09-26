@@ -104,5 +104,20 @@ void main() {
       expect(MeshControl.decodeBody('not json {'), isNull);
       expect(MeshControl.decodeBody('{"t":"unknown"}'), isNull);
     });
+
+    test('voice receipts carry only a bounded non-negative packet counter', () {
+      for (final count in [0, 100, 9007199254740991]) {
+        final back = MeshControl.decodeBody(
+          splitFrame(VoiceReceiptControl(count).encode()).body,
+        );
+        expect((back! as VoiceReceiptControl).packetsReceived, count);
+      }
+      for (final value in ['-1', '1.5', 'null', '"100"', '9007199254740992']) {
+        expect(
+          MeshControl.decodeBody('{"t":"voice_receipt","packets":$value}'),
+          isNull,
+        );
+      }
+    });
   });
 }

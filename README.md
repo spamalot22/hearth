@@ -203,6 +203,19 @@ Ordinary chat meshes use the same retry mechanism, so surviving peers can carry
 reconnection signalling during a relay outage. Learned routing hints expire after
 30 seconds; an online bridge with a stale onward route cannot pin retries forever.
 Stalled native data-channel sends time out and retire the link for reconnection.
+Direct signalling routes on either the voice or parent channel mesh take priority
+over learned routes and flooding. Native signalling is serialized per peer, not
+across the entire relay mailbox. Retries wake at their backoff deadline and when
+parent links appear; unanswered mesh offers have a shorter answer deadline, while
+answered offers retain the full ICE connection window.
+
+During voice calls, direct peers exchange bounded audio packet counters every
+three seconds when receiver stats are available. Sustained outgoing RTP with fresh
+but stationary receiver counters triggers a rate-limited link rebuild. Silence,
+mute, missing stats, and missing receipts alone do not trigger recovery. Ended
+microphones and previously progressing capture counters that stall are recovered
+with mute/deafen preserved. Capture recovery has bounded waits and disposes late
+results after leaving. These counters contain no audio and are never forwarded.
 Fresh offers replace retired connections; signed attempt IDs keep delayed answers
 and ICE from an earlier connection out of its replacement. Both devices must use
 the updated signalling implementation. Voice media remains direct P2P, with no TURN.

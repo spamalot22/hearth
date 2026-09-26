@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:core/core.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hearth/mesh_control.dart';
 import 'package:hearth/peer_signal_router.dart';
 import 'package:hearth/signal_auth.dart';
@@ -79,8 +81,13 @@ void main() {
   WebRtcMesh create({
     bool initiator = false,
     bool Function(String)? routeAvailable,
+    SignalRouteQuality Function(String)? routeQuality,
+    Future<bool> Function(SignalControl)? sendExternal,
     Set<String> initialPeers = const {},
     Duration timeout = const Duration(seconds: 2),
+    Duration? responseTimeout,
+    Duration retryTick = const Duration(milliseconds: 10),
+    MediaStream? localStream,
   }) => WebRtcMesh(
     baseUrl: Uri.parse('https://relay.example'),
     channel: _channel,
@@ -88,13 +95,18 @@ void main() {
     forceInitiator: initiator,
     initialPeers: initialPeers,
     externalRouteAvailable: routeAvailable ?? (_) => true,
-    externalSignalSender: (signal) async {
-      sent.add(signal);
-      return true;
-    },
+    externalRouteQuality: routeQuality,
+    externalSignalSender:
+        sendExternal ??
+        (signal) async {
+          sent.add(signal);
+          return true;
+        },
+    localStream: localStream,
     relayFallbackDelay: const Duration(hours: 1),
     handshakeTimeout: timeout,
-    announceInterval: const Duration(milliseconds: 10),
+    peerResponseTimeout: responseTimeout,
+    announceInterval: retryTick,
     retryBackoffBase: const Duration(milliseconds: 5),
     retryBackoffMax: const Duration(milliseconds: 20),
     diagnosticLabel: 'voice',
@@ -102,6 +114,235 @@ void main() {
       relayRequests++;
       return http.Response('{}', 503);
     }),
+  );
+
+  for (final quality in [SignalRouteQuality.direct, SignalRouteQuality.flood]) {
+    test('parent $quality is considered before child flooding', () async {
+      mesh = create(initiator: true, routeQuality: (_) => quality);
+      await mesh.receiveExternalSignal(
+        await _signal(remote, local.publicKeyHex, 'offer', _first),
+      );
+      await rtc.openRemoteDataChannel('pc1');
+      await _until(() => mesh.connectedPeers.isNotEmpty);
+      final target = (await Identity.generate()).publicKeyHex;
+      mesh.maybeInitiateVia(target);
+      await _until(() => sent.any((s) => s.kind == 'offer' && s.to == target));
+      await mesh.flushPendingSends();
+      final flooded = rtc.sentControls.whereType<SignalControl>().where(
+        (s) => s.to == target,
+      );
+      expect(
+        flooded,
+        quality == SignalRouteQuality.direct ? isEmpty : hasLength(1),
+      );
+      expect(relayRequests, 0);
+    });
+  }
+
+  test(
+    'a failing parent route falls back to a surviving child bridge',
+    () async {
+      var failParent = false;
+      mesh = create(
+        initiator: true,
+        routeQuality: (_) => SignalRouteQuality.direct,
+        sendExternal: (signal) async {
+          if (failParent) throw StateError('test-parent-closed');
+          sent.add(signal);
+          return true;
+        },
+      );
+      await mesh.receiveExternalSignal(
+        await _signal(remote, local.publicKeyHex, 'offer', _first),
+      );
+      await rtc.openRemoteDataChannel('pc1');
+      await _until(() => mesh.connectedPeers.isNotEmpty);
+      failParent = true;
+      final target = (await Identity.generate()).publicKeyHex;
+      mesh.maybeInitiateVia(target);
+      await _until(
+        () => rtc.sentControls.whereType<SignalControl>().any(
+          (s) => s.to == target,
+        ),
+      );
+      expect(relayRequests, 0);
+    },
+  );
+
+  test(
+    'native failures retry at backoff expiry without the periodic tick',
+    () async {
+      rtc.failCreations = 1;
+      mesh = create(
+        initiator: true,
+        initialPeers: {remote.publicKeyHex},
+        retryTick: const Duration(hours: 1),
+      );
+      final subscription = mesh.peerConnected.listen((_) {});
+      addTearDown(subscription.cancel);
+      await _until(() => sent.isNotEmpty);
+      expect(rtc.created, 2);
+      expect(relayRequests, 0);
+      await mesh.disconnectPeer(remote.publicKeyHex);
+      mesh.retryConnections();
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(rtc.created, 2);
+    },
+  );
+
+  test(
+    'parent connection events wake requested peers without waiting for a tick',
+    () async {
+      var available = false;
+      mesh = create(
+        initiator: true,
+        initialPeers: {remote.publicKeyHex},
+        routeAvailable: (_) => available,
+        retryTick: const Duration(hours: 1),
+      );
+      final subscription = mesh.peerConnected.listen((_) {});
+      addTearDown(subscription.cancel);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(rtc.created, 0);
+      available = true;
+      mesh.retryConnections();
+      await _until(() => sent.isNotEmpty);
+      expect(rtc.created, 1);
+      expect(relayRequests, 0);
+    },
+  );
+
+  test('mesh answer deadline retires unanswered attempts promptly', () async {
+    mesh = create(
+      initiator: true,
+      responseTimeout: const Duration(milliseconds: 60),
+    );
+    mesh.maybeInitiateVia(remote.publicKeyHex);
+    await _until(() => mesh.connectionFailedFor(remote.publicKeyHex));
+    expect(
+      mesh.diagnosticReport(),
+      contains('No answer received through the mesh'),
+    );
+    expect(rtc.created, 1);
+  });
+
+  test('a valid answer gives ICE the full handshake deadline', () async {
+    mesh = create(
+      initiator: true,
+      responseTimeout: const Duration(milliseconds: 200),
+    );
+    mesh.maybeInitiateVia(remote.publicKeyHex);
+    await _until(() => sent.isNotEmpty);
+    await mesh.receiveExternalSignal(
+      await _signal(
+        remote,
+        local.publicKeyHex,
+        'answer',
+        sent.single.data['session']! as String,
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(mesh.peers, contains(remote.publicKeyHex));
+    expect(mesh.connectionFailedFor(remote.publicKeyHex), isFalse);
+  });
+
+  test(
+    'capture replacement uses fresh signed attempts and new tracks',
+    () async {
+      mesh = create(initiator: true, localStream: _Stream('old'));
+      mesh.maybeInitiateVia(remote.publicKeyHex);
+      await _until(() => sent.isNotEmpty);
+      final firstSession = sent.single.data['session'];
+      await mesh.replaceLocalStream(_Stream('new'));
+      await _until(() => sent.length == 2);
+      expect(sent.last.data['session'], isNot(firstSession));
+      final tracks = rtc.calls
+          .where((c) => c.method == 'addTrack')
+          .map((c) => (c.arguments as Map)['trackId']);
+      expect(tracks, ['old-track', 'new-track']);
+      expect(rtc.idsFor('peerConnectionDispose'), contains('pc1'));
+      expect(relayRequests, 0);
+    },
+  );
+
+  test(
+    'stalled media links reconnect without cancelling peer intent',
+    () async {
+      mesh = create(initiator: true, retryTick: const Duration(hours: 1));
+      final subscription = mesh.peerConnected.listen((_) {});
+      addTearDown(subscription.cancel);
+      await mesh.receiveExternalSignal(
+        await _signal(remote, local.publicKeyHex, 'offer', _first),
+      );
+      await rtc.openRemoteDataChannel('pc1');
+      await _until(() => mesh.connectedPeers.isNotEmpty);
+      await mesh.repairPeer(remote.publicKeyHex);
+      await _until(() => sent.any((s) => s.kind == 'offer'));
+      expect(rtc.created, 2);
+      expect(relayRequests, 0);
+    },
+  );
+
+  test(
+    'relay batch peers progress independently while each peer stays ordered',
+    () async {
+      final other = await Identity.generate();
+      final offer = await _signal(remote, local.publicKeyHex, 'offer', _first);
+      final ice = await _signal(remote, local.publicKeyHex, 'ice', _first);
+      final otherOffer = await _signal(
+        other,
+        local.publicKeyHex,
+        'offer',
+        _second,
+      );
+      final gate = Completer<void>();
+      rtc.remoteSdpGates[offer.data['sdp']! as String] = gate;
+      addTearDown(() {
+        if (!gate.isCompleted) gate.complete();
+      });
+      final replies = <Map<String, dynamic>>[];
+      mesh = WebRtcMesh(
+        baseUrl: Uri.parse('https://relay.example'),
+        channel: _channel,
+        identity: local,
+        forceInitiator: false,
+        announceInterval: const Duration(hours: 1),
+        signalPollInterval: const Duration(hours: 1),
+        client: MockClient((request) async {
+          if (request.url.path == '/announce') {
+            return http.Response('{"peers":[],"token":"token"}', 200);
+          }
+          if (request.method == 'POST') {
+            replies.add(jsonDecode(request.body) as Map<String, dynamic>);
+            return http.Response('{}', 200);
+          }
+          return http.Response(
+            jsonEncode({
+              'seq': 3,
+              'signals': [offer.toJson(), ice.toJson(), otherOffer.toJson()],
+            }),
+            200,
+          );
+        }),
+      );
+      final subscription = mesh.peerConnected.listen((_) {});
+      addTearDown(subscription.cancel);
+      await _until(() => replies.any((r) => r['to'] == other.publicKeyHex));
+      expect(gate.isCompleted, isFalse);
+      expect(rtc.idsFor('addCandidate'), isEmpty);
+      gate.complete();
+      await _until(() => rtc.idsFor('addCandidate').isNotEmpty);
+      expect(replies.any((r) => r['to'] == remote.publicKeyHex), isTrue);
+      final blocked = rtc.calls.firstWhere(
+        (call) =>
+            call.method == 'setRemoteDescription' &&
+            ((call.arguments as Map)['description'] as Map)['sdp'] ==
+                offer.data['sdp'],
+      );
+      expect(rtc.idsFor('addCandidate'), [
+        (blocked.arguments as Map)['peerConnectionId'],
+      ]);
+    },
   );
 
   test(
@@ -196,6 +437,43 @@ void main() {
     await one;
     await two;
     expect(rtc.idsFor('setRemoteDescription'), ['pc1', 'pc2']);
+  });
+
+  test('a bridge carries other peers while one routed offer stalls', () async {
+    mesh = create();
+    await mesh.receiveExternalSignal(
+      await _signal(remote, local.publicKeyHex, 'offer', _first),
+    );
+    await rtc.openRemoteDataChannel('pc1');
+    await _until(() => mesh.connectedPeers.isNotEmpty);
+    final firstPeer = await Identity.generate();
+    final nextPeer = await Identity.generate();
+    final gate = Completer<void>();
+    rtc.remoteDescriptionGates['pc2'] = gate;
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    await rtc.receiveControl(
+      'pc1',
+      await _signal(firstPeer, local.publicKeyHex, 'offer', _first),
+    );
+    await _until(() => rtc.idsFor('setRemoteDescription').contains('pc2'));
+    await rtc.receiveControl(
+      'pc1',
+      await _signal(firstPeer, local.publicKeyHex, 'ice', _first),
+    );
+    await rtc.receiveControl(
+      'pc1',
+      await _signal(nextPeer, local.publicKeyHex, 'offer', _second),
+    );
+    await _until(
+      () =>
+          sent.any((s) => s.kind == 'answer' && s.to == nextPeer.publicKeyHex),
+    );
+    expect(rtc.idsFor('addCandidate'), isEmpty);
+    gate.complete();
+    await _until(() => rtc.idsFor('addCandidate').isNotEmpty);
+    expect(rtc.idsFor('addCandidate'), ['pc2']);
   });
 
   test(
@@ -470,6 +748,8 @@ class _NativeRtc {
   int failCreations = 0;
   bool rejectCandidate = false;
   Completer<void>? remoteDescriptionGate;
+  final remoteDescriptionGates = <String, Completer<void>>{};
+  final remoteSdpGates = <String, Completer<void>>{};
   Completer<void>? createOfferGate;
   Completer<void>? sendGate;
   String? stalledMethod;
@@ -506,7 +786,23 @@ class _NativeRtc {
           return {'sdp': 'test-local-offer-$created', 'type': 'offer'};
         case 'createAnswer':
           return {'sdp': 'test-local-answer-$created', 'type': 'answer'};
+        case 'addTrack':
+          return {
+            'senderId': 'sender',
+            'track': <String, Object>{},
+            'rtpParameters': <String, Object>{
+              'encodings': <Object>[],
+              'headerExtensions': <Object>[],
+              'codecs': <Object>[],
+              'rtcp': <String, Object>{},
+            },
+            'ownsTrack': false,
+          };
         case 'setRemoteDescription':
+          final id = (call.arguments as Map)['peerConnectionId'] as String;
+          final description = (call.arguments as Map)['description'] as Map;
+          await remoteSdpGates[description['sdp']]?.future;
+          await remoteDescriptionGates[id]?.future;
           await remoteDescriptionGate?.future;
         case 'addCandidate':
           if (rejectCandidate) {
@@ -562,4 +858,21 @@ class _NativeRtc {
       messenger.setMockStreamHandler(channel, null);
     }
   }
+}
+
+class _Stream extends MediaStream {
+  _Stream(String id) : _track = _Track('$id-track'), super(id, 'local');
+  final MediaStreamTrack _track;
+  @override
+  List<MediaStreamTrack> getTracks() => [_track];
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _Track extends MediaStreamTrack {
+  _Track(this.id);
+  @override
+  final String id;
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

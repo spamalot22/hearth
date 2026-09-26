@@ -28,12 +28,16 @@ class PeerConnectionHealthMonitor {
   final Duration disconnectGrace;
   Timer? _disconnectTimer;
   bool _closed = false;
+  bool _peerDisconnected = false;
+  bool _iceDisconnected = false;
 
   void handlePeerState(RTCPeerConnectionState state) {
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-        _markHealthy();
+        _peerDisconnected = false;
+        _checkRecovered();
       case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
+        _peerDisconnected = true;
         _markDisconnected();
       case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
       case RTCPeerConnectionState.RTCPeerConnectionStateClosed:
@@ -48,8 +52,10 @@ class PeerConnectionHealthMonitor {
     switch (state) {
       case RTCIceConnectionState.RTCIceConnectionStateConnected:
       case RTCIceConnectionState.RTCIceConnectionStateCompleted:
-        _markHealthy();
+        _iceDisconnected = false;
+        _checkRecovered();
       case RTCIceConnectionState.RTCIceConnectionStateDisconnected:
+        _iceDisconnected = true;
         _markDisconnected();
       case RTCIceConnectionState.RTCIceConnectionStateFailed:
       case RTCIceConnectionState.RTCIceConnectionStateClosed:
@@ -72,6 +78,10 @@ class PeerConnectionHealthMonitor {
   void _markHealthy() {
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
+  }
+
+  void _checkRecovered() {
+    if (!_peerDisconnected && !_iceDisconnected) _markHealthy();
   }
 
   void _markStale() {

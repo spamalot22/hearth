@@ -45,6 +45,7 @@ void main() {
         identity: await Identity.generate(),
         forceInitiator: true,
         externalRouteAvailable: (_) => true,
+        externalSignalSender: (_) async => true,
         onPeerLeft: left.add,
         client: MockClient((_) async => http.Response('{}', 200)),
       );
@@ -80,6 +81,7 @@ void main() {
         identity: await Identity.generate(),
         forceInitiator: true,
         externalRouteAvailable: (_) => true,
+        externalSignalSender: (_) async => true,
         client: MockClient((_) async => http.Response('{}', 200)),
       );
       addTearDown(mesh.close);

@@ -87,4 +87,58 @@ void main() {
     expect(staleCalls, 1);
     monitor.close();
   });
+
+  for (final iceFirst in [false, true]) {
+    test(
+      'one connected callback cannot mask the other disconnect ($iceFirst)',
+      () async {
+        var staleCalls = 0;
+        final monitor = PeerConnectionHealthMonitor(
+          onStale: () => staleCalls++,
+          disconnectGrace: const Duration(milliseconds: 10),
+        );
+        addTearDown(monitor.close);
+        if (iceFirst) {
+          monitor.handleIceState(
+            RTCIceConnectionState.RTCIceConnectionStateDisconnected,
+          );
+          monitor.handlePeerState(
+            RTCPeerConnectionState.RTCPeerConnectionStateConnected,
+          );
+        } else {
+          monitor.handlePeerState(
+            RTCPeerConnectionState.RTCPeerConnectionStateDisconnected,
+          );
+          monitor.handleIceState(
+            RTCIceConnectionState.RTCIceConnectionStateCompleted,
+          );
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        expect(staleCalls, 1);
+      },
+    );
+  }
+
+  test('both recovered states cancel the shared disconnect deadline', () async {
+    var staleCalls = 0;
+    final monitor = PeerConnectionHealthMonitor(
+      onStale: () => staleCalls++,
+      disconnectGrace: const Duration(milliseconds: 10),
+    );
+    addTearDown(monitor.close);
+    monitor.handleIceState(
+      RTCIceConnectionState.RTCIceConnectionStateDisconnected,
+    );
+    monitor.handlePeerState(
+      RTCPeerConnectionState.RTCPeerConnectionStateDisconnected,
+    );
+    monitor.handleIceState(
+      RTCIceConnectionState.RTCIceConnectionStateConnected,
+    );
+    monitor.handlePeerState(
+      RTCPeerConnectionState.RTCPeerConnectionStateConnected,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(staleCalls, 0);
+  });
 }
