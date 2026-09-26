@@ -1425,6 +1425,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Set<String> _announced = {}; // channels we've published our name into
   final Set<String> _memberBaseline =
       {}; // channels whose baseline is scheduled
+  final Map<String, Timer> _memberBaselineTimers = {};
   final Set<String> _baselined = {}; // channels past their initial settle
   final Map<String, Set<String>> _seenMembers =
       {}; // channelId -> known members
@@ -3123,6 +3124,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// On first sight of a channel we baseline its members silently after a short
   /// settle, then offer to add anyone new who's shared a name.
   void _detectNewMembers(ChannelSession session) {
+    if (!mounted ||
+        _leavingChannels.contains(session.channelId) ||
+        !(_channels?.sessions.contains(session) ?? false)) {
+      return;
+    }
     final channel = session.channelId;
     final group = _groups[channel];
     if (group != null) {
@@ -3133,7 +3139,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
     if (_memberBaseline.add(channel)) {
-      Timer(const Duration(seconds: 4), () {
+      _memberBaselineTimers[channel] = Timer(const Duration(seconds: 4), () {
+        _memberBaselineTimers.remove(channel);
+        if (!mounted || !(_channels?.sessions.contains(session) ?? false)) {
+          return;
+        }
         _seenMembers[channel] = _membersOf(session);
         _baselined.add(channel);
       });
@@ -4555,6 +4565,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _voicePresenceTimer?.cancel();
     _voicePresenceExpiryTimer?.cancel();
     _updateCheckTimer?.cancel();
+    for (final timer in _memberBaselineTimers.values) {
+      timer.cancel();
+    }
+    _memberBaselineTimers.clear();
     unawaited(_nearby?.close());
     unawaited(_channels?.close());
     unawaited(_broadcast?.stop());
@@ -5560,6 +5574,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _groups.remove(channelId);
       }
       await _channels?.leave(channelId);
+      _memberBaselineTimers.remove(channelId)?.cancel();
+      _memberBaseline.remove(channelId);
+      _baselined.remove(channelId);
+      _seenMembers.remove(channelId);
+      _membersCache.remove(channelId);
     } finally {
       _leavingChannels.remove(channelId);
       _updateVoiceBar();
