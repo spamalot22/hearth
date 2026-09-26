@@ -306,6 +306,7 @@ void main() {
         channel: _channel,
         identity: local,
         forceInitiator: false,
+        initialPeers: {remote.publicKeyHex, other.publicKeyHex},
         announceInterval: const Duration(hours: 1),
         signalPollInterval: const Duration(hours: 1),
         client: MockClient((request) async {
@@ -794,7 +795,7 @@ class _NativeRtc {
               'encodings': <Object>[],
               'headerExtensions': <Object>[],
               'codecs': <Object>[],
-              'rtcp': <String, Object>{},
+              'rtcp': <String, Object>{'reducedSize': false},
             },
             'ownsTrack': false,
           };
