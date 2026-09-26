@@ -41,6 +41,13 @@ provider-backed media search; it can verify authenticity but cannot read message
   server-side.
 - **Voice chat** per channel (Discord-style join/leave) with mute, deafen,
   per-user volume, join/leave cues, and live speaking indicators.
+- **Channel polls** with 2-10 immutable options, one current vote per identity,
+  live totals, visible voters, and vote changes/withdrawals. Definitions and
+  votes are signed, encrypted messages, including over the nearby text mesh.
+  Offline votes converge in deterministic channel-history order after syncing;
+  concurrent votes from the same identity use that same order to pick a winner.
+  Polls are open-ended and non-anonymous, with no server-side tally or deadline.
+  Deleting a poll uses the existing author-only message tombstone.
 - **Offline delivery is epidemic, not routed** — any peer can carry and re-serve
   another's (signed, sealed) messages without being able to forge or read them.
 - **Signed auto-updates with P2P enforcement** — a release signing key (Ed25519)
@@ -194,6 +201,12 @@ Voice signalling first travels over the already-established channel data mesh,
 including bounded forwarding by shared channel peers. Relay rendezvous is enabled
 only after that direct path has had time to connect.
 
+An active call remains visible in a persistent bar when switching channels or
+opening settings. The bar returns to the call's channel and provides microphone,
+deafen, disconnect, and diagnostic controls. It distinguishes waiting for others,
+connecting, reconnecting, and open direct peer connections; it does not treat
+relay presence as working audio. Leaving the channel also closes its voice call.
+
 Connection details are available by tapping a connecting/failed voice member or
 the app's error banner. The popup includes a copyable, memory-only diagnostic
 snapshot (connection stage, ICE state, candidate counts and retry status), without
@@ -342,6 +355,12 @@ flutter analyze app             # client static analysis
 
 GitHub Actions runs the Flutter widget tests and native Android/Windows builds.
 See [`AGENTS.md`](AGENTS.md) before running resource-heavy tasks locally.
+
+Manual device verification: the user confirmed working voice between two
+Android devices on the same LAN with release **0.7.33**. This does not verify
+WAN/NAT traversal, Windows audio, or background/lock-screen behaviour. That
+test also found that leaving a channel could leave its voice call connected;
+the successful audio test does not cover channel-departure cleanup.
 
 A `lefthook` pre-commit hook runs format + analyze + backend typecheck.
 

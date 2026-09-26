@@ -10,6 +10,7 @@ import 'candidate_cache.dart';
 import 'content.dart';
 import 'mesh_control.dart';
 import 'message_storage_hive.dart';
+import 'polls.dart';
 import 'update_checker.dart';
 import 'webrtc_mesh.dart';
 
@@ -172,6 +173,7 @@ class ChannelSession {
     this._peersSub,
     this._blobSub,
     this._relayCourier,
+    this._isDeviceRevoked,
   );
 
   final String channelId;
@@ -188,9 +190,15 @@ class ChannelSession {
   final StreamSubscription<FrameChannel>? _peersSub;
   final StreamSubscription<String>? _blobSub;
   final RelayTransport? _relayCourier;
+  final bool Function(String rootKeyHex, String deviceKeyHex)? _isDeviceRevoked;
+  Map<String, PollResults> _polls = {};
+  // Retain bounded poll envelopes even when the general content LRU evicts
+  // them, so old votes never reappear as placeholder timeline messages.
+  Map<String, Content> _pollMessages = {};
+  PollResults? pollOf(String messageId) => _polls[messageId];
   final Map<String, Content> _content = <String, Content>{};
   static const int _maxContentCache = 5000;
-  bool _refreshing = false;
+  Completer<void>? _refreshDone;
   bool _refreshDirty = false;
   final Map<String, Uint8List> _blobs = {};
   final Set<String> _requested = {};
@@ -365,6 +373,7 @@ class ChannelSession {
       peersSub,
       blobSub,
       courier,
+      isDeviceRevoked,
     );
 
     // Feed relay-couriered messages into the sync engine — via receive() so
@@ -435,24 +444,32 @@ class ChannelSession {
   Future<void> refreshContent() async {
     // Prevent overlapping calls from clearing each other's revision index.
     // If a call arrives while refreshing, mark dirty and re-run after.
-    if (_refreshing) {
+    final pending = _refreshDone;
+    if (pending != null) {
       _refreshDirty = true;
-      return;
+      return pending.future;
     }
-    _refreshing = true;
+    final done = Completer<void>();
+    _refreshDone = done;
     try {
       do {
         _refreshDirty = false;
         await _refreshContentInner();
       } while (_refreshDirty);
+      done.complete();
+    } catch (error, stack) {
+      done.completeError(error, stack);
     } finally {
-      _refreshing = false;
+      _refreshDone = null;
     }
+    return done.future;
   }
 
   Future<void> _refreshContentInner() async {
     _edits.clear();
     _deleted.clear();
+    final pollEvents = <PollEvent>[];
+    final pollMessages = <String, Content>{};
     for (final message in repository.ordered()) {
       // Build device→root mapping from device-signed messages.
       if (message.device != null && message.cert != null) {
@@ -462,9 +479,14 @@ class ChannelSession {
       }
       if (!_content.containsKey(message.idHex)) {
         try {
-          _content[message.idHex] = parseContent(
-            await cipher.decrypt(message.payload, senderDevice: message.device),
-          );
+          _content[message.idHex] =
+              _pollMessages[message.idHex] ??
+              parseContent(
+                await cipher.decrypt(
+                  message.payload,
+                  senderDevice: message.device,
+                ),
+              );
         } catch (_) {
           _content[message.idHex] = const TextContent('🔒 unreadable');
         }
@@ -475,6 +497,22 @@ class ChannelSession {
         }
       }
       final content = _content[message.idHex]!;
+      if (content is PollContent ||
+          content is PollVoteContent ||
+          content is InvalidPollContent) {
+        pollMessages[message.idHex] = content;
+      }
+      if ((content is PollContent || content is PollVoteContent) &&
+          (message.device == null ||
+              !(_isDeviceRevoked?.call(
+                    hex.encode(message.author),
+                    hex.encode(message.device!),
+                  ) ??
+                  false))) {
+        pollEvents.add(
+          PollEvent(message.idHex, hex.encode(message.author), content),
+        );
+      }
       await _ensureBlob(content);
       // ordered() is a deterministic topological sort, so overwriting here
       // makes the last valid edit the winner on every device.
@@ -487,6 +525,10 @@ class ChannelSession {
           break;
       }
     }
+    _polls = buildPollResults(
+      pollEvents.where((event) => !_deleted.contains(event.id)),
+    );
+    _pollMessages = pollMessages;
   }
 
   /// True if [revision]'s target exists locally and shares its author — checked
@@ -542,7 +584,9 @@ class ChannelSession {
 
   /// The (decrypted, parsed) content of [message].
   Content contentOf(Message message) =>
-      _content[message.idHex] ?? const TextContent('…');
+      _pollMessages[message.idHex] ??
+      _content[message.idHex] ??
+      const TextContent('…');
 
   /// The bytes of a held blob (sticker/sound), or null if not yet fetched.
   Uint8List? blobOf(String hash) => _blobs[hash];
@@ -1029,8 +1073,10 @@ class ChannelManager {
   }
 
   Future<void> enforcePeerPolicies() async {
-    for (final session in _sessions.values) {
+    for (final session in _sessions.values.toList()) {
       await session.mesh?.enforcePeerPolicy();
+      // Revocations also invalidate previously stored device-signed votes.
+      await session.refreshContent();
     }
   }
 }

@@ -55,6 +55,8 @@ import 'nearby_settings.dart';
 import 'network_status.dart';
 import 'notify.dart';
 import 'onboarding.dart';
+import 'poll_widgets.dart';
+import 'polls.dart';
 import 'profile.dart';
 import 'rendezvous.dart';
 import 'screen_picker.dart';
@@ -66,6 +68,7 @@ import 'unread.dart';
 import 'update_checker.dart';
 import 'updater.dart';
 import 'voice.dart';
+import 'voice_call_bar.dart';
 import 'windows_data_migration.dart';
 import 'youtube_share.dart';
 
@@ -403,6 +406,11 @@ class HearthTestApi {
   /// key, then the rendezvous intro carries its root-signed device cert.
   late Future<void> Function(String deviceHex, DeviceCert cert)
   simulateIncomingDeviceContact;
+
+  /// Replaces native voice startup while exercising the real UI lifecycle.
+  Future<VoiceSession> Function(String channelId)? createVoiceSession;
+  late VoiceSession? Function() activeVoice;
+  late Future<void> Function(String channelId) joinVoice;
 }
 
 @visibleForTesting
@@ -1292,6 +1300,16 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+typedef _VoiceBarState = ({
+  String channelId,
+  String channelName,
+  VoiceCallState state,
+  int connectedPeers,
+  bool muted,
+  bool deafened,
+  bool controlsEnabled,
+});
+
 class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _input = TextEditingController();
   final FocusNode _composerFocus = FocusNode();
@@ -1319,9 +1337,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   MediaLibrary? _library;
   AudioPlayer? _player;
   VoiceSession? _voice;
-  bool _joiningVoice = false;
+  String? _joiningVoiceChannelId;
+  int? _joiningVoiceEpoch;
+  final _voiceBar = ValueNotifier<_VoiceBarState?>(null);
+  bool _voiceBarDisposed = false;
+  final Set<String> _leavingChannels = {};
   int _voiceJoinEpoch = 0;
   Future<void>? _leavingVoice;
+  String? _leavingVoiceChannelId;
   bool _speakerOn = true;
   // Voice presence: who's in voice per channel (learned via gossip mesh).
   final Map<String, Set<String>> _voicePresence = {}; // channelId -> peerHexes
@@ -1530,6 +1553,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     widget.testApi
       ?..injectControl = _handleMeshControl
       ..activeChannel = (() => _channels?.active)
+      ..activeVoice = (() => _voice)
+      ..joinVoice = _joinVoice
       ..refresh = _refresh
       ..acceptCard = ((code) async {
         final card = ContactCard.decode(code);
@@ -1819,55 +1844,67 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       _lastPeerCount[active.channelId] = peerCount;
     }
+    _updateVoiceBar();
     unawaited(_refresh());
   }
 
-  void _notifyBackground(String channelId) {
+  Future<void> _notifyBackground(String channelId) async {
     if (!mounted) return;
     final session = _channels?.sessions
         .where((s) => s.channelId == channelId)
         .firstOrNull;
+    // Classify encrypted votes/revisions before considering a notification.
+    try {
+      await session?.refreshContent();
+    } catch (_) {
+      return;
+    }
+    if (!mounted ||
+        session == null ||
+        !(_channels?.sessions.contains(session) ?? false) ||
+        _channels?.activeId == channelId) {
+      return;
+    }
     // Suppress notifications for DMs from blocked users.
-    if (session != null &&
-        session.isDm &&
+    if (session.isDm &&
         session.peerPubkey != null &&
         _blocked.contains(hex.encode(session.peerPubkey!))) {
       return;
     }
-    final channelName = session != null ? _channelTitle(session) : 'a channel';
-    final isDm = session?.isDm ?? false;
+    final channelName = _channelTitle(session);
+    final isDm = session.isDm;
     final selfHex = widget.identity.publicKeyHex;
 
     // Get sender name + message preview from the latest message.
     String sender = '';
     String preview = 'New message';
     var mentionsMe = false;
-    if (session != null) {
-      final ordered = session.repository.ordered();
-      if (ordered.isNotEmpty) {
-        final msg = ordered.last;
-        final authorHex = hex.encode(msg.author);
-        // Suppress notifications for blocked users in group channels.
-        if (_blocked.contains(authorHex)) return;
-        sender = _displayName(msg.author);
-        final content = session.contentOf(msg);
-        // Bookkeeping envelopes aren't "a new message" — don't notify.
-        if (content.isBookkeeping) return;
-        if (content is TextContent) {
-          mentionsMe = mentionsPubkey(content.text, selfHex);
-          final shown = stripMentions(content.text, _mentionLabel);
-          preview = shown.length > 80 ? '${shown.substring(0, 80)}…' : shown;
-        } else if (content is GifContent) {
-          preview = 'sent a GIF';
-        } else if (content is StickerContent) {
-          preview = 'sent a sticker';
-        } else if (content is SoundContent) {
-          preview = '🔊 ${content.name}';
-        } else if (content is FileContent) {
-          preview = '📎 ${content.name}';
-        } else if (content is VoiceContent) {
-          preview = 'sent a voice message';
-        }
+    final ordered = session.repository.ordered();
+    if (ordered.isNotEmpty) {
+      final msg = ordered.last;
+      final authorHex = hex.encode(msg.author);
+      // Suppress notifications for blocked users in group channels.
+      if (authorHex == selfHex || _blocked.contains(authorHex)) return;
+      sender = _displayName(msg.author);
+      final content = session.contentOf(msg);
+      // Bookkeeping envelopes aren't "a new message" — don't notify.
+      if (content.isBookkeeping) return;
+      if (content is TextContent) {
+        mentionsMe = mentionsPubkey(content.text, selfHex);
+        final shown = stripMentions(content.text, _mentionLabel);
+        preview = shown.length > 80 ? '${shown.substring(0, 80)}…' : shown;
+      } else if (content is GifContent) {
+        preview = 'sent a GIF';
+      } else if (content is StickerContent) {
+        preview = 'sent a sticker';
+      } else if (content is SoundContent) {
+        preview = '🔊 ${content.name}';
+      } else if (content is FileContent) {
+        preview = '📎 ${content.name}';
+      } else if (content is VoiceContent) {
+        preview = 'sent a voice message';
+      } else if (content is PollContent) {
+        preview = 'Poll: ${content.question}';
       }
     }
 
@@ -1898,7 +1935,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             label: 'Open',
             onPressed: () {
               _channels?.activate(channelId);
-              if (session != null) _markRead(session);
+              _markRead(session);
               _replyTo = null;
             },
           ),
@@ -2008,6 +2045,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         unawaited(_voice?.disconnectFrom(fromHex));
       }
       _scheduleVoicePresenceExpiry();
+      _updateVoiceBar();
       return;
     }
     if (control is ReadWatermarkControl &&
@@ -2183,6 +2221,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         case GroupKeyUpdateContent():
           break;
         case DmMailboxContent():
+          break;
+        case PollContent():
+        case PollVoteContent():
+        case InvalidPollContent():
           break;
       }
     }
@@ -3322,14 +3364,21 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ],
           ),
         ),
-        body: TabBarView(
+        body: Column(
           children: [
-            _audioTab(),
-            _identityTab(),
-            _devicesTab(),
-            _networkTab(),
-            _privacyTab(),
-            _aiTab(),
+            _persistentVoiceBar(inSettings: true),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  _audioTab(),
+                  _identityTab(),
+                  _devicesTab(),
+                  _networkTab(),
+                  _privacyTab(),
+                  _aiTab(),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -3342,6 +3391,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       length: kIsWeb ? 5 : 6,
       child: Column(
         children: [
+          _persistentVoiceBar(inSettings: true),
           if (showClose)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
@@ -4498,6 +4548,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _voiceBarDisposed = true;
+    _voiceBar.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _linkSub?.cancel();
     _voicePresenceTimer?.cancel();
@@ -5035,9 +5087,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         deviceCert: widget.deviceKeys.cert,
       );
 
-  Future<bool> _publish(Content content) async {
-    final session = _channels?.active;
-    if (_sending || session == null) return false;
+  Future<bool> _publish(Content content, {ChannelSession? target}) async {
+    final session = target ?? _channels?.active;
+    bool available() =>
+        session != null &&
+        !_leavingChannels.contains(session.channelId) &&
+        (_channels?.sessions.contains(session) ?? false);
+    if (_sending || session == null || !available()) return false;
     // Request web notification permission on first user action.
     if (kIsWeb && !_webNotifRequested) {
       _webNotifRequested = true;
@@ -5049,6 +5105,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         session,
         await session.encodePayload(content),
       );
+      if (!available()) return false;
       // Persist + gossip to peers; the updates stream re-renders it.
       await session.publish(
         message,
@@ -5099,6 +5156,47 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Best-effort; inference responses failing silently is acceptable.
     }
   }
+
+  /// Capture the destination before opening the modal, not at submit time.
+  Future<void> _createPoll(ChannelSession session) async {
+    if (session.isDm) return;
+    _dismissComposerFocus();
+    await showCreatePollDialog(
+      context,
+      onCreate: (poll) => _publish(poll, target: session),
+    );
+  }
+
+  Widget _pollView(
+    ChannelSession session,
+    PollContent poll,
+    String messageId,
+  ) => PollBubble(
+    key: ValueKey('poll-$messageId'),
+    results: session.pollOf(messageId) ?? PollResults(poll, {}),
+    enabled:
+        !session.isDm &&
+        session.pollOf(messageId) != null &&
+        !_leavingChannels.contains(session.channelId),
+    self: widget.identity.publicKeyHex,
+    voterName: (root) => _displayName(Uint8List.fromList(hex.decode(root))),
+    onVote: (option) async {
+      if (session.isDm ||
+          session.isDeleted(messageId) ||
+          session.pollOf(messageId) == null) {
+        return false;
+      }
+      final saved = await _publish(
+        PollVoteContent(messageId, option),
+        target: session,
+      );
+      if (saved) {
+        await session.refreshContent();
+        if (mounted) setState(() {});
+      }
+      return saved;
+    },
+  );
 
   /// Inserts a picked emoji at the cursor in the composer.
   Future<void> _insertEmoji() async {
@@ -5436,25 +5534,179 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ],
       ),
     );
-    if (confirmed != true) return;
-    await _registry?.remove(channelId);
-    _groups.remove(channelId);
-    await _channels?.leave(channelId);
+    if (confirmed != true || !mounted) return;
+    await _closeChannel(channelId, forgetGroup: true);
     unawaited(_saveBackgroundState());
     if (mounted) setState(() {});
   }
 
+  Future<void> _closeChannel(
+    String channelId, {
+    bool forgetGroup = false,
+  }) async {
+    if (!_leavingChannels.add(channelId)) return;
+    try {
+      // Cancel late microphone/permission completions without interrupting a
+      // call (or a pending join) belonging to a different channel.
+      if (_joiningVoiceChannelId == channelId) _voiceJoinEpoch++;
+      _updateVoiceBar();
+      if (_voice?.channelId == channelId ||
+          _leavingVoiceChannelId == channelId) {
+        // Keep the parent mesh alive until voice departure has been announced.
+        await _leaveVoice(cancelJoin: false);
+      }
+      if (forgetGroup) {
+        await _registry?.remove(channelId);
+        _groups.remove(channelId);
+      }
+      await _channels?.leave(channelId);
+    } finally {
+      _leavingChannels.remove(channelId);
+      _updateVoiceBar();
+    }
+  }
+
   // --- voice ---
+
+  void _updateVoiceBar() {
+    if (!mounted || _voiceBarDisposed) return;
+    final voice = _voice;
+    final channelId =
+        voice?.channelId ?? _leavingVoiceChannelId ?? _joiningVoiceChannelId;
+    if (channelId == null) {
+      _voiceBar.value = null;
+      return;
+    }
+    final session = _channels?.sessions
+        .where((session) => session.channelId == channelId)
+        .firstOrNull;
+    final connected = voice?.peerHexes.toSet() ?? <String>{};
+    final pending = <String>{
+      ...?voice?.pendingPeerHexes,
+      ..._voiceDevicePeers(channelId),
+    }..removeAll(connected);
+    final leaving =
+        _leavingVoiceChannelId == channelId ||
+        _leavingChannels.contains(channelId) ||
+        (voice == null &&
+            _joiningVoiceChannelId == channelId &&
+            _joiningVoiceEpoch != _voiceJoinEpoch);
+    final state = leaving
+        ? VoiceCallState.disconnecting
+        : voice == null
+        ? VoiceCallState.connecting
+        : voice.connectionFailedFor(pending)
+        ? VoiceCallState.reconnecting
+        : pending.isNotEmpty
+        ? VoiceCallState.connecting
+        : connected.isNotEmpty
+        ? VoiceCallState.connected
+        : VoiceCallState.waiting;
+    // Record equality avoids rebuilding settings on every audio-level update.
+    _voiceBar.value = (
+      channelId: channelId,
+      channelName: session == null ? 'Voice channel' : _channelTitle(session),
+      state: state,
+      connectedPeers: connected.length,
+      muted: voice?.isMuted ?? false,
+      deafened: voice?.isDeafened ?? false,
+      controlsEnabled: voice != null && !leaving,
+    );
+  }
+
+  Widget _persistentVoiceBar({bool inSettings = false}) =>
+      ValueListenableBuilder<_VoiceBarState?>(
+        valueListenable: _voiceBar,
+        builder: (barContext, state, _) {
+          if (state == null) return const SizedBox.shrink();
+          return VoiceCallBar(
+            channelName: state.channelName,
+            state: state.state,
+            connectedPeers: state.connectedPeers,
+            muted: state.muted,
+            deafened: state.deafened,
+            onOpenChannel: () {
+              _dismissComposerFocus();
+              if (inSettings) Navigator.of(barContext).pop();
+              _scaffoldKey.currentState?.closeDrawer();
+              _scaffoldKey.currentState?.closeEndDrawer();
+              _channels?.activate(state.channelId);
+            },
+            onMute: state.controlsEnabled
+                ? () {
+                    if (_voice?.channelId != state.channelId) return;
+                    _voice?.toggleMute();
+                    _voiceChanged();
+                  }
+                : null,
+            onDeafen: state.controlsEnabled
+                ? () {
+                    if (_voice?.channelId != state.channelId) return;
+                    _voice?.toggleDeafen();
+                    _voiceChanged();
+                  }
+                : null,
+            onDisconnect: state.state == VoiceCallState.disconnecting
+                ? null
+                : () => unawaited(_leaveVoice()),
+            onDiagnostics: _voice?.channelId == state.channelId
+                ? () => unawaited(_showVoiceConnectionDetails(barContext))
+                : null,
+          );
+        },
+      );
+
+  Future<void> _showVoiceConnectionDetails(BuildContext context) async {
+    final voice = _voice;
+    if (voice == null) return;
+    _dismissComposerFocus();
+    await showErrorDetails(
+      context,
+      title: 'Voice connection',
+      message:
+          'Voice audio uses direct P2P connections. '
+          'Relay presence alone does not mean an audio path is connected.',
+      diagnostics: _diagnosticDetails(details: voice.diagnosticReport()),
+      onRetry: () async {
+        if (!mounted || !identical(_voice, voice) || _leavingVoice != null) {
+          return;
+        }
+        try {
+          await voice.recoverConnections();
+        } catch (error) {
+          if (mounted) {
+            _setError(
+              'Could not retry voice',
+              details: 'Voice recovery failed (${error.runtimeType})',
+            );
+          }
+        }
+      },
+    );
+  }
+
+  bool _canJoinVoice(String channelId) =>
+      mounted &&
+      !_leavingChannels.contains(channelId) &&
+      (_channels?.sessions.any((session) => session.channelId == channelId) ??
+          false);
+
+  bool _voiceJoinCurrent(String channelId, int epoch) =>
+      epoch == _voiceJoinEpoch && _canJoinVoice(channelId);
 
   /// Joins (or switches to) voice in [channelId], requesting the mic.
   Future<void> _joinVoice(String channelId) async {
-    if (_joiningVoice || !mounted) return;
-    _joiningVoice = true;
+    if (_joiningVoiceChannelId != null || !_canJoinVoice(channelId)) return;
+    _joiningVoiceChannelId = channelId;
     final epoch = ++_voiceJoinEpoch;
+    _joiningVoiceEpoch = epoch;
+    _updateVoiceBar();
     try {
       await _joinVoiceOnce(channelId, epoch);
     } finally {
-      _joiningVoice = false;
+      _joiningVoiceChannelId = null;
+      _joiningVoiceEpoch = null;
+      _updateVoiceBar();
     }
   }
 
@@ -5462,13 +5714,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (_voice != null || _leavingVoice != null) {
       await _leaveVoice(cancelJoin: false);
     }
-    if (!mounted || epoch != _voiceJoinEpoch) return;
+    if (!_voiceJoinCurrent(channelId, epoch)) return;
     // Ensure mic permission on mobile before attempting getUserMedia.
     if (!kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS)) {
       final status = await Permission.microphone.request();
-      if (!mounted || epoch != _voiceJoinEpoch) return;
+      if (!_voiceJoinCurrent(channelId, epoch)) return;
       if (!status.isGranted) {
         _setError('Microphone permission denied');
         return;
@@ -5483,7 +5735,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _setError('Background voice service is unavailable');
       return;
     }
-    if (!mounted || epoch != _voiceJoinEpoch) {
+    if (!_voiceJoinCurrent(channelId, epoch)) {
       await _stopAndroidVoiceService();
       return;
     }
@@ -5496,23 +5748,28 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ...?_voicePresence[channelId],
         ...?channelSession?.relayVoicePeers,
       }..remove(widget.deviceKeys.publicKeyHex);
-      final voice = await VoiceSession.join(
-        channelId: channelId,
-        identity: widget.identity,
-        meshIdentity: widget.deviceKeys.device,
-        relayUrl: _relayUrl,
-        fallbackUrls: (_settings?.fallbackRelays ?? []).map(Uri.parse).toList(),
-        onChange: _voiceChanged,
-        enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
-        audioInputId: _settings?.audioInputDevice,
-        audioOutputId: _settings?.audioOutputDevice,
-        signalingMesh: channelSession?.mesh,
-        initialPeers: initialVoicePeers,
-        channelAuthKey: _groups[channelId]?.key,
-        peerAllowed: (peerHex) =>
-            _channels?.isPeerAllowedForChannel(channelId, peerHex) ?? false,
-      );
-      if (!mounted || epoch != _voiceJoinEpoch) {
+      final voice =
+          await (widget.testApi?.createVoiceSession?.call(channelId) ??
+              VoiceSession.join(
+                channelId: channelId,
+                identity: widget.identity,
+                meshIdentity: widget.deviceKeys.device,
+                relayUrl: _relayUrl,
+                fallbackUrls: (_settings?.fallbackRelays ?? [])
+                    .map(Uri.parse)
+                    .toList(),
+                onChange: _voiceChanged,
+                enhancedNoiseSuppression: _settings?.noiseSuppression ?? false,
+                audioInputId: _settings?.audioInputDevice,
+                audioOutputId: _settings?.audioOutputDevice,
+                signalingMesh: channelSession?.mesh,
+                initialPeers: initialVoicePeers,
+                channelAuthKey: _groups[channelId]?.key,
+                peerAllowed: (peerHex) =>
+                    _channels?.isPeerAllowedForChannel(channelId, peerHex) ??
+                    false,
+              ));
+      if (!_voiceJoinCurrent(channelId, epoch)) {
         await voice.leave();
         await _stopAndroidVoiceService();
         return;
@@ -5541,7 +5798,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (mounted) setState(() {});
     } catch (error) {
       await _stopAndroidVoiceService();
-      if (mounted) {
+      if (_voiceJoinCurrent(channelId, epoch)) {
         _setError(
           'Could not join voice',
           details:
@@ -5568,6 +5825,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _reannounceShareToNewPeers();
     _pruneWatchParty();
     _reannounceYtToNewPeers();
+    _updateVoiceBar();
     if (mounted) setState(() {});
   }
 
@@ -5605,6 +5863,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       () {
         if (!mounted) return;
         setState(_pruneVoicePresenceEntries);
+        _updateVoiceBar();
         _scheduleVoicePresenceExpiry();
       },
     );
@@ -5625,8 +5884,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _leaveVoice({bool cancelJoin = true}) {
     if (cancelJoin) _voiceJoinEpoch++;
+    if (_leavingVoice != null) return _leavingVoice!;
+    _leavingVoiceChannelId = _voice?.channelId;
+    _updateVoiceBar();
     return _leavingVoice ??= _leaveVoiceOnce().whenComplete(() {
       _leavingVoice = null;
+      _leavingVoiceChannelId = null;
+      _updateVoiceBar();
     });
   }
 
@@ -6643,7 +6907,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _persistedDms.remove(peerHex);
     unawaited(_dms?.remove(peerHex));
     final dmId = await dmChannelId(widget.identity.publicKeyHex, peerHex);
-    await _channels?.leave(dmId);
+    await _closeChannel(dmId);
     if (mounted) setState(() {});
   }
 
@@ -6892,15 +7156,47 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       endDrawer: (session != null && !wide)
           ? Drawer(child: SafeArea(child: _channelPanel(session)))
           : null,
-      body: session == null
-          ? _emptyState(context)
-          : Stack(
-              children: [
-                if (panelInline)
-                  Row(
+      body: Column(
+        children: [
+          _persistentVoiceBar(),
+          Expanded(
+            child: session == null
+                ? _emptyState(context)
+                : Stack(
                     children: [
-                      Expanded(
-                        child: PageTransitionSwitcher(
+                      if (panelInline)
+                        Row(
+                          children: [
+                            Expanded(
+                              child: PageTransitionSwitcher(
+                                duration: _motionDuration(
+                                  context,
+                                  const Duration(milliseconds: 260),
+                                ),
+                                transitionBuilder:
+                                    (
+                                      child,
+                                      primary,
+                                      secondary,
+                                    ) => SharedAxisTransition(
+                                      animation: primary,
+                                      secondaryAnimation: secondary,
+                                      transitionType:
+                                          SharedAxisTransitionType.horizontal,
+                                      fillColor: Colors.transparent,
+                                      child: child,
+                                    ),
+                                child: KeyedSubtree(
+                                  key: ValueKey(session.channelId),
+                                  child: _chatColumn(session),
+                                ),
+                              ),
+                            ),
+                            SizedBox(width: 300, child: _channelPanel(session)),
+                          ],
+                        )
+                      else
+                        PageTransitionSwitcher(
                           duration: _motionDuration(
                             context,
                             const Duration(milliseconds: 260),
@@ -6919,41 +7215,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             child: _chatColumn(session),
                           ),
                         ),
-                      ),
-                      SizedBox(width: 300, child: _channelPanel(session)),
-                    ],
-                  )
-                else
-                  PageTransitionSwitcher(
-                    duration: _motionDuration(
-                      context,
-                      const Duration(milliseconds: 260),
-                    ),
-                    transitionBuilder: (child, primary, secondary) =>
-                        SharedAxisTransition(
-                          animation: primary,
-                          secondaryAnimation: secondary,
-                          transitionType: SharedAxisTransitionType.horizontal,
-                          fillColor: Colors.transparent,
-                          child: child,
+                      // Hidden 1x1 sinks so the browser plays each remote's audio.
+                      for (final renderer
+                          in _voice?.remoteRenderers ??
+                              const <RTCVideoRenderer>[])
+                        Positioned(
+                          left: 0,
+                          bottom: 0,
+                          width: 1,
+                          height: 1,
+                          child: RTCVideoView(renderer),
                         ),
-                    child: KeyedSubtree(
-                      key: ValueKey(session.channelId),
-                      child: _chatColumn(session),
-                    ),
+                    ],
                   ),
-                // Hidden 1x1 sinks so the browser plays each remote's audio.
-                for (final renderer
-                    in _voice?.remoteRenderers ?? const <RTCVideoRenderer>[])
-                  Positioned(
-                    left: 0,
-                    bottom: 0,
-                    width: 1,
-                    height: 1,
-                    child: RTCVideoView(renderer),
-                  ),
-              ],
-            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -7947,6 +8224,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       DeviceRevocationContent() => const SizedBox.shrink(),
       GroupKeyUpdateContent() => const SizedBox.shrink(),
       DmMailboxContent() => const SizedBox.shrink(),
+      PollContent() => _pollView(session, content, messageId),
+      PollVoteContent() || InvalidPollContent() => const SizedBox.shrink(),
     };
   }
 
@@ -8544,6 +8823,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             _mentionLabel,
                           ).toLowerCase().contains(query.toLowerCase());
                         }
+                        if (content is PollContent) {
+                          return [content.question, ...content.options]
+                              .join(' ')
+                              .toLowerCase()
+                              .contains(query.toLowerCase());
+                        }
                         return false;
                       })
                       .toList()
@@ -8686,6 +8971,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           : shown;
     }
     if (content is GifContent) return 'GIF';
+    if (content is PollContent) {
+      final preview = 'Poll: ${content.question}';
+      return preview.length > maxLength
+          ? '${preview.substring(0, maxLength)}...'
+          : preview;
+    }
     if (content is StickerContent) return 'Sticker';
     if (content is SoundContent) return '🔊 ${content.name}';
     if (content is FileContent) return '📎 ${content.name}';
@@ -9222,6 +9513,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       ),
                       if (!session.isDm)
                         IconButton(
+                          onPressed: () => unawaited(_createPoll(session)),
+                          icon: const Icon(Icons.poll_outlined),
+                          tooltip: 'Create poll',
+                        ),
+                      if (!session.isDm)
+                        IconButton(
                           onPressed: () => unawaited(_insertMention(session)),
                           icon: const Icon(Icons.alternate_email),
                           tooltip: 'Mention',
@@ -9317,6 +9614,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             ),
             if (!session.isDm)
               ListTile(
+                key: const Key('composer-tool-poll'),
+                leading: Icon(Icons.poll_outlined, color: scheme.secondary),
+                title: const Text('Create poll'),
+                onTap: () => Navigator.pop(sheetContext, 'poll'),
+              ),
+            if (!session.isDm)
+              ListTile(
                 key: const Key('composer-tool-mention'),
                 leading: Icon(Icons.alternate_email, color: scheme.tertiary),
                 title: const Text('Mention'),
@@ -9339,6 +9643,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         break;
       case 'mention':
         await _insertMention(session);
+        break;
+      case 'poll':
+        await _createPoll(session);
         break;
     }
   }

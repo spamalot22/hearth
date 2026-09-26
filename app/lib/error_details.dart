@@ -6,12 +6,14 @@ Future<void> showErrorDetails(
   BuildContext context, {
   required String message,
   required String diagnostics,
+  String title = 'Error details',
   Future<void> Function()? onRetry,
 }) => showDialog<void>(
   context: context,
   builder: (_) => _ErrorDetails(
     message: message,
     diagnostics: diagnostics,
+    title: title,
     onRetry: onRetry,
   ),
 );
@@ -20,10 +22,12 @@ class _ErrorDetails extends StatefulWidget {
   const _ErrorDetails({
     required this.message,
     required this.diagnostics,
+    required this.title,
     this.onRetry,
   });
   final String message;
   final String diagnostics;
+  final String title;
   final Future<void> Function()? onRetry;
 
   @override
@@ -36,7 +40,7 @@ class _ErrorDetailsState extends State<_ErrorDetails> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Error details'),
+    title: Text(widget.title),
     content: SizedBox(
       width: 560,
       child: SingleChildScrollView(

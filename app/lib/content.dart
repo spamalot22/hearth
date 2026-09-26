@@ -35,6 +35,78 @@ class TextContent extends Content {
   Map<String, Object?> toJson() => {'t': 'text', 'text': text};
 }
 
+/// An immutable, non-anonymous, single-choice channel poll.
+class PollContent extends Content {
+  factory PollContent(String question, List<String> options) {
+    final cleanQuestion = question.trim();
+    final cleanOptions = options.map((option) => option.trim()).toList();
+    final error = validationError(cleanQuestion, cleanOptions);
+    if (error != null) throw ArgumentError(error);
+    return PollContent._(cleanQuestion, List.unmodifiable(cleanOptions));
+  }
+
+  const PollContent._(this.question, this.options);
+  static const maxQuestionLength = 240;
+  static const maxOptionLength = 100;
+  static const maxOptions = 10;
+  final String question;
+  final List<String> options;
+
+  static String? validationError(String question, List<String> options) {
+    if (question.trim().isEmpty || question.length > maxQuestionLength) {
+      return 'Enter a question of 1-$maxQuestionLength characters.';
+    }
+    if (options.length < 2 || options.length > maxOptions) {
+      return 'Add 2-$maxOptions options.';
+    }
+    if (options.any(
+      (option) => option.trim().isEmpty || option.length > maxOptionLength,
+    )) {
+      return 'Each option needs 1-$maxOptionLength characters.';
+    }
+    if (options.map((option) => option.trim().toLowerCase()).toSet().length !=
+        options.length) {
+      return 'Each option must be different.';
+    }
+    return null;
+  }
+
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'poll',
+    'question': question,
+    'options': options,
+  };
+}
+
+/// The signed message author is the voter. Null withdraws their previous vote.
+class PollVoteContent extends Content {
+  const PollVoteContent(this.targetId, this.option);
+  final String targetId;
+  final int? option;
+  static final _messageId = RegExp(r'^[0-9a-f]{68}$');
+  bool get isValid =>
+      _messageId.hasMatch(targetId) &&
+      (option == null || (option! >= 0 && option! < PollContent.maxOptions));
+  @override
+  bool get isBookkeeping => true;
+  @override
+  Map<String, Object?> toJson() => {
+    't': 'poll_vote',
+    'target': targetId,
+    'option': option,
+  };
+}
+
+/// Malformed poll envelopes must not turn into JSON chat bubbles/notifications.
+class InvalidPollContent extends Content {
+  const InvalidPollContent();
+  @override
+  bool get isBookkeeping => true;
+  @override
+  Map<String, Object?> toJson() => {'t': 'poll_invalid'};
+}
+
 /// A GIF — like a sticker, an image in the content-addressed blob store,
 /// referenced by [blob] hash. Fetched once from its source at send time, then it
 /// lives in the blob store and transfers P2P; it's never re-fetched from a CDN.
@@ -266,6 +338,32 @@ Content parseContent(List<int> payload) {
   try {
     final decoded = jsonDecode(utf8.decode(payload));
     if (decoded is Map) {
+      if (decoded['t'] == 'poll' ||
+          decoded['t'] == 'poll_vote' ||
+          decoded['t'] == 'poll_invalid') {
+        try {
+          if (decoded['t'] == 'poll') {
+            final options = decoded['options'];
+            if (options is! List || options.length > PollContent.maxOptions) {
+              return const InvalidPollContent();
+            }
+            return PollContent(
+              decoded['question'] as String,
+              options.cast<String>(),
+            );
+          }
+          if (decoded['t'] == 'poll_vote' && decoded.containsKey('option')) {
+            final vote = PollVoteContent(
+              decoded['target'] as String,
+              decoded['option'] as int?,
+            );
+            if (vote.isValid) return vote;
+          }
+        } catch (_) {
+          // Recognised but invalid; never reinterpret as legacy plaintext.
+        }
+        return const InvalidPollContent();
+      }
       final replyTo = decoded['replyTo'] as String?;
       switch (decoded['t']) {
         case 'text':

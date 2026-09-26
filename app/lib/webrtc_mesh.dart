@@ -457,6 +457,12 @@ class WebRtcMesh {
   /// Peers with an open direct WebRTC data channel.
   Iterable<String> get connectedPeers => connections.keys;
 
+  /// Requested or incoming peers whose direct link is not open yet.
+  Iterable<String> get pendingPeers => {
+    ..._requestedPeers,
+    ..._links.keys,
+  }.where((peer) => _links[peer]?.open != true);
+
   /// Peers with a fresh signed relay announcement, whether or not WebRTC opened.
   Iterable<String> get relayVisiblePeers {
     final now = DateTime.now();

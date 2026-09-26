@@ -222,6 +222,60 @@ void main() {
   );
 
   test(
+    'poll definitions and votes are sealed into nearby courier packets',
+    () async {
+      await nearby.configure(enabled: true, automatic: false);
+      final session = channels.active!;
+      final pollContent = PollContent('Private meeting?', [
+        'Deck one',
+        'Deck two',
+      ]);
+      final poll = await Message.create(
+        author: identity,
+        channel: 'group',
+        payload: await session.encodePayload(pollContent),
+      );
+      final voteContent = PollVoteContent(poll.idHex, 1);
+      final vote = await Message.create(
+        author: identity,
+        channel: 'group',
+        payload: await session.encodePayload(voteContent),
+        prev: [poll.id],
+      );
+      for (final entry in [
+        (poll, pollContent as Content),
+        (vote, voteContent as Content),
+      ]) {
+        await session.publish(
+          entry.$1,
+          onStored: () => nearby.publish(session, entry.$1, entry.$2),
+        );
+      }
+      final entries = await (await HiveNearbyQueueStorage.open()).read();
+      expect(entries, hasLength(2));
+      final restoredIds = <String>{};
+      for (final entry in entries) {
+        expect(
+          utf8.decode(entry.packet.encode()),
+          isNot(contains('Private meeting?')),
+        );
+        final message = Message.fromJson(
+          (jsonDecode(
+                    utf8.decode(
+                      await session.cipher.decrypt(entry.packet.body),
+                    ),
+                  )
+                  as Map)
+              .cast<String, Object?>(),
+        );
+        expect(await message.verify(), isTrue);
+        restoredIds.add(message.idHex);
+      }
+      expect(restoredIds, {poll.idHex, vote.idHex});
+    },
+  );
+
+  test(
     'scanner works without messaging, forces active mode and clears observations on stop',
     () async {
       await nearby.configure(enabled: true, automatic: true);

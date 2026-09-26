@@ -447,6 +447,8 @@ class NearbyMessaging extends ChangeNotifier {
 
   static bool _text(Content content) =>
       content is TextContent ||
+      content is PollContent ||
+      content is PollVoteContent ||
       content is EditContent ||
       content is DeleteContent;
 

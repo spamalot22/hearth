@@ -101,6 +101,8 @@ class VoiceSession {
   /// Connected peers, by id, for the participants list.
   List<String> get peerHexes => _mesh.connections.keys.toList();
 
+  Iterable<String> get pendingPeerHexes => _mesh.pendingPeers;
+
   /// Latest mic level (0..1) for a participant — 'self' for you, else a peerHex.
   double levelOf(String key) => _levels[key] ?? 0;
 

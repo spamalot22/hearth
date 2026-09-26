@@ -53,6 +53,10 @@ void main() {
       mesh.maybeInitiateVia(peer);
       await _waitUntil(() => left.isNotEmpty);
       expect(left, [peer]);
+      expect(mesh.pendingPeers, contains(peer));
+      expect(mesh.connectedPeers, isEmpty);
+      await mesh.disconnectPeer(peer);
+      expect(mesh.pendingPeers, isEmpty);
     },
   );
 
