@@ -2,7 +2,6 @@
 import 'dart:async';
 
 import 'package:core/core.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -44,6 +43,18 @@ Future<void> _leaveChannel(WidgetTester tester, {bool confirm = true}) async {
   await tester.pumpAndSettle();
 }
 
+void androidTestWidgets(String description, WidgetTesterCallback callback) {
+  testWidgets(description, (tester) async {
+    try {
+      await callback(tester);
+    } finally {
+      // Drain app disposal while this test's native service mocks are installed.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    }
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   final messenger =
@@ -55,7 +66,6 @@ void main() {
   late List<_Voice> calls;
 
   setUp(() {
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
     serviceCalls = [];
     calls = [];
     api = HearthTestApi()
@@ -79,7 +89,6 @@ void main() {
   tearDown(() {
     messenger.setMockMethodCallHandler(permissions, null);
     messenger.setMockMethodCallHandler(service, null);
-    debugDefaultTargetPlatformOverride = null;
   });
 
   Future<void> boot(WidgetTester tester) async {
@@ -96,33 +105,34 @@ void main() {
     expect(api.activeVoice(), isNotNull);
   }
 
-  testWidgets('channel departure waits for voice teardown before removal', (
-    tester,
-  ) async {
-    await boot(tester);
-    await join(tester);
-    final channel = api.activeChannel()!;
-    final call = calls.single;
-    final closing = Completer<void>();
-    call.closing = closing.future;
-    await _leaveChannel(tester);
-    expect(call.leaves, 1);
-    expect(api.activeVoice(), isNull);
-    expect(api.activeChannel(), same(channel));
+  androidTestWidgets(
+    'channel departure waits for voice teardown before removal',
+    (tester) async {
+      await boot(tester);
+      await join(tester);
+      final channel = api.activeChannel()!;
+      final call = calls.single;
+      final closing = Completer<void>();
+      call.closing = closing.future;
+      await _leaveChannel(tester);
+      expect(call.leaves, 1);
+      expect(api.activeVoice(), isNull);
+      expect(api.activeChannel(), same(channel));
 
-    // A stale Join button cannot start a new call during channel teardown.
-    await api.joinVoice(channel.channelId);
-    expect(calls, hasLength(1));
-    closing.complete();
-    await tester.pumpAndSettle();
-    expect(api.activeChannel(), isNull);
-    expect(serviceCalls, ['start', 'stop']);
-    await api.joinVoice(channel.channelId);
-    expect(calls, hasLength(1));
-    expect(tester.takeException(), isNull);
-  });
+      // A stale Join button cannot start a new call during channel teardown.
+      await api.joinVoice(channel.channelId);
+      expect(calls, hasLength(1));
+      closing.complete();
+      await tester.pumpAndSettle();
+      expect(api.activeChannel(), isNull);
+      expect(serviceCalls, ['start', 'stop']);
+      await api.joinVoice(channel.channelId);
+      expect(calls, hasLength(1));
+      expect(tester.takeException(), isNull);
+    },
+  );
 
-  testWidgets('cancelling channel departure keeps voice connected', (
+  androidTestWidgets('cancelling channel departure keeps voice connected', (
     tester,
   ) async {
     await boot(tester);
@@ -131,31 +141,32 @@ void main() {
     expect(api.activeVoice(), same(calls.single));
     expect(calls.single.leaves, 0);
     expect(serviceCalls, ['start']);
-    await tester.tap(find.byTooltip('Leave voice'));
+    await tester.tap(find.byKey(const Key('voice-call-disconnect')));
     await tester.pumpAndSettle();
   });
 
-  testWidgets('channel departure waits for an already-running voice leave', (
-    tester,
-  ) async {
-    await boot(tester);
-    await join(tester);
-    final channel = api.activeChannel();
-    final closing = Completer<void>();
-    calls.single.closing = closing.future;
-    await tester.tap(find.byTooltip('Leave voice'));
-    await tester.pumpAndSettle();
-    expect(api.activeVoice(), isNull);
-    await _leaveChannel(tester);
-    expect(api.activeChannel(), same(channel));
-    expect(calls.single.leaves, 1);
-    closing.complete();
-    await tester.pumpAndSettle();
-    expect(api.activeChannel(), isNull);
-    expect(serviceCalls, ['start', 'stop']);
-  });
+  androidTestWidgets(
+    'channel departure waits for an already-running voice leave',
+    (tester) async {
+      await boot(tester);
+      await join(tester);
+      final channel = api.activeChannel();
+      final closing = Completer<void>();
+      calls.single.closing = closing.future;
+      await tester.tap(find.byKey(const Key('voice-call-disconnect')));
+      await tester.pumpAndSettle();
+      expect(api.activeVoice(), isNull);
+      await _leaveChannel(tester);
+      expect(api.activeChannel(), same(channel));
+      expect(calls.single.leaves, 1);
+      closing.complete();
+      await tester.pumpAndSettle();
+      expect(api.activeChannel(), isNull);
+      expect(serviceCalls, ['start', 'stop']);
+    },
+  );
 
-  testWidgets('leaving another channel does not interrupt the call', (
+  androidTestWidgets('leaving another channel does not interrupt the call', (
     tester,
   ) async {
     await boot(tester);
@@ -167,36 +178,37 @@ void main() {
     expect(api.activeVoice(), same(calls.single));
     expect(calls.single.leaves, 0);
     expect(serviceCalls, ['start']);
-    await tester.tap(find.byTooltip('Leave voice'));
+    await tester.tap(find.byKey(const Key('voice-call-disconnect')));
     await tester.pumpAndSettle();
   });
 
-  testWidgets('late voice startup is discarded after leaving its channel', (
-    tester,
-  ) async {
-    await boot(tester);
-    final channelId = api.activeChannel()!.channelId;
-    final pending = Completer<VoiceSession>();
-    var started = false;
-    api.createVoiceSession = (_) {
-      started = true;
-      return pending.future;
-    };
-    await tester.tap(find.widgetWithText(FilledButton, 'Join voice'));
-    await tester.pumpAndSettle();
-    expect(started, isTrue);
-    await _leaveChannel(tester);
-    expect(api.activeChannel(), isNull);
-    final lateVoice = _Voice(channelId);
-    pending.complete(lateVoice);
-    await tester.pumpAndSettle();
-    expect(lateVoice.leaves, 1);
-    expect(api.activeVoice(), isNull);
-    expect(serviceCalls, ['start', 'stop']);
-    expect(tester.takeException(), isNull);
-  });
+  androidTestWidgets(
+    'late voice startup is discarded after leaving its channel',
+    (tester) async {
+      await boot(tester);
+      final channelId = api.activeChannel()!.channelId;
+      final pending = Completer<VoiceSession>();
+      var started = false;
+      api.createVoiceSession = (_) {
+        started = true;
+        return pending.future;
+      };
+      await tester.tap(find.widgetWithText(FilledButton, 'Join voice'));
+      await tester.pumpAndSettle();
+      expect(started, isTrue);
+      await _leaveChannel(tester);
+      expect(api.activeChannel(), isNull);
+      final lateVoice = _Voice(channelId);
+      pending.complete(lateVoice);
+      await tester.pumpAndSettle();
+      expect(lateVoice.leaves, 1);
+      expect(api.activeVoice(), isNull);
+      expect(serviceCalls, ['start', 'stop']);
+      expect(tester.takeException(), isNull);
+    },
+  );
 
-  testWidgets('permission completion cannot join a departed channel', (
+  androidTestWidgets('permission completion cannot join a departed channel', (
     tester,
   ) async {
     await boot(tester);
@@ -220,7 +232,7 @@ void main() {
     expect(serviceCalls, isEmpty);
   });
 
-  testWidgets('leaving another channel preserves a pending voice join', (
+  androidTestWidgets('leaving another channel preserves a pending voice join', (
     tester,
   ) async {
     await boot(tester);
@@ -242,41 +254,44 @@ void main() {
     expect(api.activeVoice(), same(voice));
     expect(voice.leaves, 0);
     expect(serviceCalls, ['start']);
-    await tester.tap(find.byTooltip('Leave voice'));
-    await tester.pumpAndSettle();
-  });
-
-  testWidgets('persistent bar controls voice and returns to its channel', (
-    tester,
-  ) async {
-    await boot(tester);
-    await join(tester);
-    final channelId = api.activeChannel()!.channelId;
-    await _createChannel(tester, 'bravo');
-    expect(api.activeChannel()!.channelId, isNot(channelId));
-    expect(
-      tester.widget<VoiceCallBar>(find.byType(VoiceCallBar)).channelName,
-      'alpha',
-    );
-    await tester.tap(find.byKey(const Key('voice-call-mute')));
-    await tester.pumpAndSettle();
-    expect(calls.single.isMuted, isTrue);
-    expect(find.byTooltip('Unmute microphone'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('voice-call-deafen')));
-    await tester.pumpAndSettle();
-    expect(calls.single.isDeafened, isTrue);
-    expect(find.byTooltip('Undeafen audio'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('voice-call-channel')));
-    await tester.pumpAndSettle();
-    expect(api.activeChannel()!.channelId, channelId);
     await tester.tap(find.byKey(const Key('voice-call-disconnect')));
     await tester.pumpAndSettle();
-    expect(api.activeVoice(), isNull);
-    expect(find.byType(VoiceCallBar), findsNothing);
-    expect(serviceCalls, ['start', 'stop']);
   });
 
-  testWidgets('mobile settings keeps live voice controls', (tester) async {
+  androidTestWidgets(
+    'persistent bar controls voice and returns to its channel',
+    (tester) async {
+      await boot(tester);
+      await join(tester);
+      final channelId = api.activeChannel()!.channelId;
+      await _createChannel(tester, 'bravo');
+      expect(api.activeChannel()!.channelId, isNot(channelId));
+      expect(
+        tester.widget<VoiceCallBar>(find.byType(VoiceCallBar)).channelName,
+        'alpha',
+      );
+      await tester.tap(find.byKey(const Key('voice-call-mute')));
+      await tester.pumpAndSettle();
+      expect(calls.single.isMuted, isTrue);
+      expect(find.byTooltip('Unmute microphone'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('voice-call-deafen')));
+      await tester.pumpAndSettle();
+      expect(calls.single.isDeafened, isTrue);
+      expect(find.byTooltip('Undeafen audio'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('voice-call-channel')));
+      await tester.pumpAndSettle();
+      expect(api.activeChannel()!.channelId, channelId);
+      await tester.tap(find.byKey(const Key('voice-call-disconnect')));
+      await tester.pumpAndSettle();
+      expect(api.activeVoice(), isNull);
+      expect(find.byType(VoiceCallBar), findsNothing);
+      expect(serviceCalls, ['start', 'stop']);
+    },
+  );
+
+  androidTestWidgets('mobile settings keeps live voice controls', (
+    tester,
+  ) async {
     await boot(tester);
     await join(tester);
     await tester.tap(find.byTooltip('Open navigation menu'));
@@ -296,7 +311,7 @@ void main() {
     expect(find.text('Settings'), findsOneWidget);
   });
 
-  testWidgets('call channel navigation returns from mobile settings', (
+  androidTestWidgets('call channel navigation returns from mobile settings', (
     tester,
   ) async {
     await boot(tester);
@@ -315,7 +330,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('bar exposes diagnostics and guarded connection retry', (
+  androidTestWidgets('bar exposes diagnostics and guarded connection retry', (
     tester,
   ) async {
     await boot(tester);
@@ -332,60 +347,62 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('bar reflects pending, failed and direct voice connections', (
-    tester,
-  ) async {
-    await boot(tester);
-    await join(tester);
-    final channelId = api.activeChannel()!.channelId;
-    final voice = calls.single;
-    final peer = 'ab' * 32;
-    // Keep the channel's deliberately animated connecting tiles off screen.
-    await _createChannel(tester, 'bravo');
-    VoiceCallState state() =>
-        tester.widget<VoiceCallBar>(find.byType(VoiceCallBar)).state;
-    expect(state(), VoiceCallState.waiting);
-    void announce() => api.injectControl(
-      peer,
-      channelId,
-      VoicePresenceControl(channelId: channelId),
-    );
-    announce();
-    await tester.pumpAndSettle();
-    expect(state(), VoiceCallState.connecting);
-    voice.failed = true;
-    announce();
-    await tester.pumpAndSettle();
-    expect(state(), VoiceCallState.reconnecting);
-    voice.connected.add(peer);
-    announce();
-    await tester.pumpAndSettle();
-    expect(state(), VoiceCallState.connected);
-    expect(find.text('Connected - 1 peer'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('voice-call-disconnect')));
-    await tester.pumpAndSettle();
-  });
+  androidTestWidgets(
+    'bar reflects pending, failed and direct voice connections',
+    (tester) async {
+      await boot(tester);
+      await join(tester);
+      final channelId = api.activeChannel()!.channelId;
+      final voice = calls.single;
+      final peer = 'ab' * 32;
+      // Keep the channel's deliberately animated connecting tiles off screen.
+      await _createChannel(tester, 'bravo');
+      VoiceCallState state() =>
+          tester.widget<VoiceCallBar>(find.byType(VoiceCallBar)).state;
+      expect(state(), VoiceCallState.waiting);
+      void announce() => api.injectControl(
+        peer,
+        channelId,
+        VoicePresenceControl(channelId: channelId),
+      );
+      announce();
+      await tester.pumpAndSettle();
+      expect(state(), VoiceCallState.connecting);
+      voice.failed = true;
+      announce();
+      await tester.pumpAndSettle();
+      expect(state(), VoiceCallState.reconnecting);
+      voice.connected.add(peer);
+      announce();
+      await tester.pumpAndSettle();
+      expect(state(), VoiceCallState.connected);
+      expect(find.text('Connected - 1 peer'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('voice-call-disconnect')));
+      await tester.pumpAndSettle();
+    },
+  );
 
-  testWidgets('bar cancels voice startup and releases a late microphone', (
-    tester,
-  ) async {
-    await boot(tester);
-    final channelId = api.activeChannel()!.channelId;
-    final pending = Completer<VoiceSession>();
-    api.createVoiceSession = (_) => pending.future;
-    await tester.tap(find.widgetWithText(FilledButton, 'Join voice'));
-    await tester.pumpAndSettle();
-    expect(find.text('Connecting'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('voice-call-disconnect')));
-    await tester.pumpAndSettle();
-    expect(find.text('Disconnecting'), findsOneWidget);
-    final lateVoice = _Voice(channelId);
-    pending.complete(lateVoice);
-    await tester.pumpAndSettle();
-    expect(lateVoice.leaves, 1);
-    expect(api.activeVoice(), isNull);
-    expect(find.byType(VoiceCallBar), findsNothing);
-  });
+  androidTestWidgets(
+    'bar cancels voice startup and releases a late microphone',
+    (tester) async {
+      await boot(tester);
+      final channelId = api.activeChannel()!.channelId;
+      final pending = Completer<VoiceSession>();
+      api.createVoiceSession = (_) => pending.future;
+      await tester.tap(find.widgetWithText(FilledButton, 'Join voice'));
+      await tester.pumpAndSettle();
+      expect(find.text('Connecting'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('voice-call-disconnect')));
+      await tester.pumpAndSettle();
+      expect(find.text('Disconnecting'), findsOneWidget);
+      final lateVoice = _Voice(channelId);
+      pending.complete(lateVoice);
+      await tester.pumpAndSettle();
+      expect(lateVoice.leaves, 1);
+      expect(api.activeVoice(), isNull);
+      expect(find.byType(VoiceCallBar), findsNothing);
+    },
+  );
 }
 
 class _Voice extends Fake implements VoiceSession {

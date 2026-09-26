@@ -7258,6 +7258,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       opacity: _showScrollDown ? 1.0 : 0.0,
                       duration: const Duration(milliseconds: 200),
                       child: FloatingActionButton.small(
+                        heroTag: null,
                         backgroundColor: _channelAccent(session),
                         onPressed: _showScrollDown
                             ? () => _scroll.animateTo(

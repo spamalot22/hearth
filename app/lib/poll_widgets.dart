@@ -253,79 +253,84 @@ class _PollBubbleState extends State<PollBubble> {
     final theme = Theme.of(context);
     return SizedBox(
       width: 340,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text(results.poll.question, style: theme.textTheme.titleSmall),
-          const SizedBox(height: 4),
-          Text(
-            'Single choice - visible votes',
-            style: theme.textTheme.labelSmall,
-          ),
-          RadioGroup<int>(
-            groupValue: choice,
-            onChanged: _vote,
-            child: Column(
-              children: [
-                for (var i = 0; i < results.poll.options.length; i++)
-                  RadioListTile<int>(
-                    key: Key('poll-choice-$i'),
-                    value: i,
-                    enabled: !_saving && widget.enabled,
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(results.poll.options[i]),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '${results.counts[i]} votes - ${results.total == 0 ? 0 : (results.counts[i] * 100 / results.total).round()}%',
-                        ),
-                        LinearProgressIndicator(
-                          value: results.total == 0
-                              ? 0
-                              : results.counts[i] / results.total,
-                          minHeight: 3,
-                        ),
-                      ],
+      child: Material(
+        type: MaterialType.transparency,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(results.poll.question, style: theme.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Text(
+              'Single choice - visible votes',
+              style: theme.textTheme.labelSmall,
+            ),
+            RadioGroup<int>(
+              groupValue: choice,
+              onChanged: _vote,
+              child: Column(
+                children: [
+                  for (var i = 0; i < results.poll.options.length; i++)
+                    RadioListTile<int>(
+                      key: Key('poll-choice-$i'),
+                      value: i,
+                      enabled: !_saving && widget.enabled,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(results.poll.options[i]),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '${results.counts[i]} votes - ${results.total == 0 ? 0 : (results.counts[i] * 100 / results.total).round()}%',
+                          ),
+                          LinearProgressIndicator(
+                            value: results.total == 0
+                                ? 0
+                                : results.counts[i] / results.total,
+                            minHeight: 3,
+                          ),
+                        ],
+                      ),
                     ),
+                ],
+              ),
+            ),
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 4,
+              children: [
+                Text(
+                  '${results.total} ${results.total == 1 ? 'vote' : 'votes'}',
+                ),
+                IconButton(
+                  tooltip: 'View votes',
+                  onPressed: _showVotes,
+                  icon: const Icon(Icons.people_outline),
+                ),
+                if (choice != null)
+                  TextButton.icon(
+                    onPressed: _saving || !widget.enabled
+                        ? null
+                        : () => _vote(null),
+                    icon: const Icon(Icons.undo),
+                    label: const Text('Remove vote'),
+                  ),
+                if (_saving)
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
               ],
             ),
-          ),
-          Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 4,
-            children: [
-              Text('${results.total} ${results.total == 1 ? 'vote' : 'votes'}'),
-              IconButton(
-                tooltip: 'View votes',
-                onPressed: _showVotes,
-                icon: const Icon(Icons.people_outline),
+            if (_failed)
+              Text(
+                'Vote not saved. Try again.',
+                style: TextStyle(color: theme.colorScheme.error),
               ),
-              if (choice != null)
-                TextButton.icon(
-                  onPressed: _saving || !widget.enabled
-                      ? null
-                      : () => _vote(null),
-                  icon: const Icon(Icons.undo),
-                  label: const Text('Remove vote'),
-                ),
-              if (_saving)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-            ],
-          ),
-          if (_failed)
-            Text(
-              'Vote not saved. Try again.',
-              style: TextStyle(color: theme.colorScheme.error),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
