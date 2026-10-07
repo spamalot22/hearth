@@ -144,14 +144,20 @@ class NearbyCourier {
     if (bytes[0] == 1) {
       final packet = await NearbyPacket.decode(bytes.sublist(1), now: now());
       if (packet == null || _closed) return;
-      final admission = await queue.add(packet);
-      if (admission != NearbyAdmission.stored) return;
-      // Delivery failure does not discard a durably stored envelope. The app
-      // can retry decrypting stored packets when channel/device keys change.
+      NearbyAdmission? admission;
+      try {
+        admission = await queue.add(packet);
+      } catch (_) {
+        // A failed custody write is local, not a peer protocol violation. The
+        // recipient's channel store may still be able to accept the message.
+      }
+      if (admission == NearbyAdmission.expired) return;
+      // Recipient delivery is independent of accepting carrier custody. A full
+      // forwarding queue must not block an otherwise valid incoming message.
       try {
         await onPacket?.call(packet);
       } catch (_) {}
-      await reconcile();
+      if (admission == NearbyAdmission.stored) await reconcile();
       return;
     }
     if (bytes[0] != 0 || bytes.length > _maxControlBytes) return;

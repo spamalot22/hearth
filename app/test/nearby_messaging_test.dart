@@ -275,6 +275,36 @@ void main() {
     },
   );
 
+  test('nearby publication retries after a failed durable write', () async {
+    await nearby.close();
+    final storage = _FailingQueueStorage();
+    nearby = NearbyMessaging(
+      identity: identity,
+      settings: settings,
+      sessions: () => channels.sessions,
+      bluetooth: bluetooth,
+      queueStorage: storage,
+    );
+    await nearby.initialize();
+    await nearby.configure(enabled: true, automatic: false);
+    final session = channels.active!;
+    const content = TextContent('retry this message');
+    final message = await Message.create(
+      author: identity,
+      channel: 'group',
+      payload: await session.encodePayload(content),
+    );
+    storage.fail = true;
+    await nearby.publish(session, message, content);
+    expect(nearby.error, 'Could not queue nearby message');
+    expect(nearby.queuedCount, 0);
+    storage.fail = false;
+    await nearby.publish(session, message, content);
+    expect(nearby.queuedCount, 1);
+    await nearby.publish(session, message, content);
+    expect(nearby.queuedCount, 1);
+  });
+
   test(
     'scanner works without messaging, forces active mode and clears observations on stop',
     () async {
@@ -476,6 +506,18 @@ void main() {
       }
     },
   );
+}
+
+class _FailingQueueStorage implements NearbyQueueStorage {
+  bool fail = false;
+  List<NearbyQueueEntry> entries = [];
+  @override
+  Future<List<NearbyQueueEntry>> read() async => entries;
+  @override
+  Future<void> replace(List<NearbyQueueEntry> next) async {
+    if (fail) throw StateError('disk unavailable');
+    entries = List.of(next);
+  }
 }
 
 class _Bluetooth implements NearbyBluetoothRadio {

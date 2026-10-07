@@ -19,6 +19,55 @@ void main() {
     await temp.delete(recursive: true);
   });
 
+  test('failed revocation write does not advance the security cache', () async {
+    final root = await Identity.generate();
+    final device = await Identity.generate();
+    final store = await DeviceStore.open();
+    final revocation = await DeviceRevocation.issue(
+      root: root,
+      deviceKey: device.publicKey,
+    );
+    await Hive.box<String>('hearth.devices').close();
+    await expectLater(
+      store.addRevocation(revocation),
+      throwsA(isA<HiveError>()),
+    );
+    expect(store.isRevoked(root.publicKeyHex, device.publicKeyHex), isFalse);
+    expect(store.revocations, isEmpty);
+  });
+
+  test(
+    'concurrent bundles preserve devices and the newest snapshot on disk',
+    () async {
+      final root = await Identity.generate();
+      final devices = await Future.wait(
+        List.generate(4, (_) => Identity.generate()),
+      );
+      final bundles = await Future.wait(
+        List.generate(
+          4,
+          (i) => DeviceBundle.publish(
+            root: root,
+            devices: [devices[i].publicKey],
+            publishedMs: 1000 + i,
+          ),
+        ),
+      );
+      var store = await DeviceStore.open();
+      await Future.wait(bundles.reversed.map(store.setBundle));
+      await Hive.close();
+      Hive.init(temp.path);
+      store = await DeviceStore.open();
+      expect(store.bundleFor(root.publicKeyHex)?.publishedMs, 1003);
+      expect(
+        store
+            .authorizedDeviceKeys(root.publicKeyHex)
+            .map((key) => key.toList()),
+        unorderedEquals(devices.map((device) => device.publicKey.toList())),
+      );
+    },
+  );
+
   test('revocations survive bundle removal and remain root-scoped', () async {
     final legitimateRoot = await Identity.generate();
     final otherRoot = await Identity.generate();

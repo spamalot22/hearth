@@ -105,7 +105,6 @@ class InferenceBot {
   /// Returns null if busy or if inference fails.
   Future<String?> generate(String prompt, {int maxTokens = 256}) async {
     if (_busy) return null;
-    if (!await File(_modelPath).exists()) return null;
     _busy = true;
     var released = false;
     var invocationStarted = false;
@@ -116,6 +115,7 @@ class InferenceBot {
     }
 
     try {
+      if (!await File(_modelPath).exists()) return null;
       // Reduce context size for large models to avoid OOM.
       final fileSize = await File(_modelPath).length();
       final ctx = fileSize > 4 * 1024 * 1024 * 1024 ? 1024 : 2048;

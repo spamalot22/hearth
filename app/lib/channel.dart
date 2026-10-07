@@ -192,12 +192,12 @@ class ChannelSession {
   final RelayTransport? _relayCourier;
   final bool Function(String rootKeyHex, String deviceKeyHex)? _isDeviceRevoked;
   Map<String, PollResults> _polls = {};
-  // Retain bounded poll envelopes even when the general content LRU evicts
-  // them, so old votes never reappear as placeholder timeline messages.
+  // Retain poll envelopes for the results and timeline bookkeeping indexes.
   Map<String, Content> _pollMessages = {};
   PollResults? pollOf(String messageId) => _polls[messageId];
   final Map<String, Content> _content = <String, Content>{};
-  static const int _maxContentCache = 5000;
+  // The repository already bounds message count and payload bytes. Evicting
+  // parsed content earlier hides history and loses edit/revocation metadata.
   Completer<void>? _refreshDone;
   bool _refreshDirty = false;
   final Map<String, Uint8List> _blobs = {};
@@ -489,11 +489,6 @@ class ChannelSession {
               );
         } catch (_) {
           _content[message.idHex] = const TextContent('🔒 unreadable');
-        }
-        // Evict oldest entries if cache exceeds threshold. LinkedHashMap
-        // preserves insertion order, so we remove from the front.
-        while (_content.length > _maxContentCache) {
-          _content.remove(_content.keys.first);
         }
       }
       final content = _content[message.idHex]!;

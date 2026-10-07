@@ -1474,11 +1474,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     };
     final allowedAuthors = <String, List<String>>{
       for (final s in sessions)
-        s.channelId: {
-          widget.identity.publicKeyHex,
-          if (s.peerPubkey != null) hex.encode(s.peerPubkey!),
-          if (!s.isDm) ..._membersOf(s),
-        }.map((root) => base64Url.encode(hex.decode(root))).toList(),
+        s.channelId:
+            {
+                  widget.identity.publicKeyHex,
+                  if (s.peerPubkey != null) hex.encode(s.peerPubkey!),
+                  if (!s.isDm) ..._membersOf(s),
+                }
+                .where((root) => !_blocked.contains(root))
+                .map((root) => base64Url.encode(hex.decode(root)))
+                .toList(),
     };
     await saveBackgroundPollState(
       relayUrl: _relayUrl.toString(),
@@ -1488,6 +1492,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       names: names,
       mailboxes: mailboxes,
       allowedAuthors: allowedAuthors,
+      revokedDevices: {
+        for (final rev
+            in _deviceStore?.revocations ?? const <DeviceRevocation>[])
+          '${base64Url.encode(rev.rootKey)}:${base64Url.encode(rev.deviceKey)}',
+      },
       selfAuthor: base64Url.encode(widget.identity.publicKey),
     );
   }
@@ -2009,6 +2018,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     String channelId,
     MeshControl control,
   ) {
+    if (!mounted) return;
     if (control is VoicePresenceControl) {
       // Presence is valid only for the channel carrying this authenticated
       // control. Never accept or disclose a different channel capability.
@@ -2140,6 +2150,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       for (final view in _screenViews.values.toList()) {
         await view.enforcePeerPolicy();
       }
+      await _saveBackgroundState();
       if (mounted) setState(() {});
       return true;
     } catch (_) {
@@ -2419,7 +2430,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Only learn certs for our own root identity.
       if (session.deviceRoots[entry.key] != myRoot) continue;
       if (store.isRevoked(myRoot, entry.key)) continue;
-      unawaited(store.addCert(entry.value));
+      unawaited(store.addCert(entry.value).catchError((Object _) => false));
     }
   }
 
@@ -2433,16 +2444,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (_indexedBundleIds.contains(message.idHex)) continue;
       final content = session.contentOf(message);
       if (content is! DeviceBundleContent) continue;
-      _indexedBundleIds.add(message.idHex);
-      if (content.bundleJson.isEmpty) continue;
+      if (content.bundleJson.isEmpty) {
+        _indexedBundleIds.add(message.idHex);
+        continue;
+      }
+      DeviceBundle bundle;
       try {
-        final bundle = DeviceBundle.fromJson(content.bundleJson);
+        bundle = DeviceBundle.fromJson(content.bundleJson);
         // Only accept bundles signed by the message author (can't advertise
         // someone else's device set).
-        if (bundle.rootKeyHex != hex.encode(message.author)) continue;
-        await store.setBundle(bundle);
+        if (bundle.rootKeyHex != hex.encode(message.author)) {
+          _indexedBundleIds.add(message.idHex);
+          continue;
+        }
       } catch (_) {
         // Malformed bundle — skip.
+        _indexedBundleIds.add(message.idHex);
+        continue;
+      }
+      try {
+        await store.setBundle(bundle);
+        _indexedBundleIds.add(message.idHex);
+      } catch (_) {
+        // Failed durable writes stay unindexed for the next refresh.
       }
     }
   }
@@ -2486,12 +2510,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   final Set<String> _indexedGroupKeyUpdateIds = {};
+  final Set<String> _applyingGroupKeyUpdateIds = {};
+  Future<void> _groupRotationTail = Future<void>.value();
 
   void _indexGroupKeyUpdates(ChannelSession session) {
     final current = _groups[session.channelId];
     if (current == null) return;
     for (final message in session.repository.ordered()) {
-      if (_indexedGroupKeyUpdateIds.contains(message.idHex)) continue;
+      if (_indexedGroupKeyUpdateIds.contains(message.idHex) ||
+          _applyingGroupKeyUpdateIds.contains(message.idHex)) {
+        continue;
+      }
       final content = session.contentOf(message);
       if (content is! GroupKeyUpdateContent) continue;
       if (content.groupId != current.id || content.boxed.length > 48 * 1024) {
@@ -2510,44 +2539,92 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         _indexedGroupKeyUpdateIds.add(message.idHex);
         continue;
       }
-      _indexedGroupKeyUpdateIds.add(message.idHex);
+      _applyingGroupKeyUpdateIds.add(message.idHex);
       unawaited(() async {
         try {
-          final boxed = base64Url.decode(content.boxed);
-          final plaintext = await MultiDeviceBox.decrypt(
-            boxed,
-            recipientDevice: widget.deviceKeys.device,
-            senderDeviceEd: senderDevice,
-          );
-          final update = (jsonDecode(utf8.decode(plaintext)) as Map)
-              .cast<String, Object?>();
-          if (update['group'] != current.id ||
-              update['epoch'] != content.epoch ||
-              update['key'] is! String) {
+          Uint8List key;
+          try {
+            final boxed = base64Url.decode(content.boxed);
+            final plaintext = await MultiDeviceBox.decrypt(
+              boxed,
+              recipientDevice: widget.deviceKeys.device,
+              senderDeviceEd: senderDevice,
+            );
+            final update = (jsonDecode(utf8.decode(plaintext)) as Map)
+                .cast<String, Object?>();
+            if (update['group'] != current.id ||
+                update['epoch'] != content.epoch ||
+                update['key'] is! String) {
+              _indexedGroupKeyUpdateIds.add(message.idHex);
+              return;
+            }
+            key = base64Url.decode(update['key']! as String);
+            if (key.length != 32) {
+              _indexedGroupKeyUpdateIds.add(message.idHex);
+              return;
+            }
+          } catch (_) {
+            // No recipient slot means this device was intentionally excluded.
+            _indexedGroupKeyUpdateIds.add(message.idHex);
             return;
           }
-          final key = base64Url.decode(update['key']! as String);
-          if (key.length != 32) return;
-          await _applyGroupRotation(current.rotate(key, content.epoch));
+          final latest = _groups[current.id];
+          if (!mounted || latest == null) return;
+          await _applyGroupRotation(latest.rotate(key, content.epoch));
+          _indexedGroupKeyUpdateIds.add(message.idHex);
         } catch (_) {
-          // No recipient slot means this device was intentionally excluded.
+          // Transient persistence/session failures must remain retryable.
+        } finally {
+          _applyingGroupKeyUpdateIds.remove(message.idHex);
         }
       }());
       return;
     }
   }
 
-  Future<void> _applyGroupRotation(GroupChannel channel) async {
+  Future<void> _applyGroupRotation(GroupChannel channel) {
+    final result = _groupRotationTail.then(
+      (_) => _applyGroupRotationInner(channel),
+    );
+    _groupRotationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
+  Future<void> _applyGroupRotationInner(GroupChannel channel) async {
     final current = _groups[channel.id];
-    if (current == null || current.epoch >= channel.epoch) return;
+    if (!mounted || current == null || current.epoch >= channel.epoch) return;
+    channel = current
+        .withMembers(channel.knownMembers)
+        .rotate(channel.key, channel.epoch);
     await _registry?.save(channel);
-    _groups[channel.id] = channel;
-    await _channels?.openGroup(
-      channel.id,
-      channel.key,
-      epoch: channel.epoch,
-      keys: channel.keys,
-      replace: true,
+    try {
+      await _channels?.openGroup(
+        channel.id,
+        channel.key,
+        epoch: channel.epoch,
+        keys: channel.keys,
+        replace: true,
+      );
+    } catch (_) {
+      // Replacing a session may fail after retiring the old one. Restore a
+      // readable session so its stored update can be retried on a refresh.
+      try {
+        await _channels?.openGroup(
+          current.id,
+          current.key,
+          epoch: current.epoch,
+          keys: current.keys,
+          replace: true,
+        );
+      } catch (_) {}
+      rethrow;
+    }
+    if (!mounted || !_groups.containsKey(channel.id)) return;
+    _groups[channel.id] = channel.withMembers(
+      _groups[channel.id]!.knownMembers,
     );
     unawaited(_saveBackgroundState());
     if (mounted) setState(() {});
@@ -2636,17 +2713,37 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   /// active one, or a background one after its content is parsed).
+  final Set<String> _persistingDms = {};
+
   void _maybePersistDm(ChannelSession session) {
     final peer = session.peerPubkey;
     if (!session.isDm || peer == null) return;
     final peerHex = hex.encode(peer);
-    if (_persistedDms.contains(peerHex)) return;
+    final registry = _dms;
+    if (registry == null ||
+        _persistedDms.contains(peerHex) ||
+        _persistingDms.contains(peerHex)) {
+      return;
+    }
     final hasHistory = session.repository.ordered().any(
       (m) => !session.contentOf(m).isBookkeeping,
     );
     if (!hasHistory) return;
-    _persistedDms.add(peerHex);
-    unawaited(_dms?.save(peerHex));
+    _persistingDms.add(peerHex);
+    unawaited(() async {
+      try {
+        await registry.save(peerHex);
+        if (_blocked.contains(peerHex)) {
+          await registry.remove(peerHex);
+          return;
+        }
+        _persistedDms.add(peerHex);
+      } catch (_) {
+        // Keep the history eligible for a later persistence attempt.
+      } finally {
+        _persistingDms.remove(peerHex);
+      }
+    }());
   }
 
   /// Owner side of first contact: someone holding my card connected to my
@@ -6927,12 +7024,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     unawaited(_dms?.remove(peerHex));
     final dmId = await dmChannelId(widget.identity.publicKeyHex, peerHex);
     await _closeChannel(dmId);
+    await _saveBackgroundState();
     if (mounted) setState(() {});
   }
 
   Future<void> _unblockPeer(String peerHex) async {
     setState(() => _blocked.remove(peerHex));
     await _settings?.unblockUser(peerHex);
+    await _saveBackgroundState();
     if (mounted) setState(() {});
   }
 

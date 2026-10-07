@@ -14,6 +14,8 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart'
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 import 'package:http/http.dart' as http;
 
+import 'background_policy.dart';
+
 /// Headless callback — runs in a separate isolate when the app is terminated.
 /// Must be a top-level function.
 @pragma('vm:entry-point')
@@ -72,6 +74,7 @@ Future<void> saveBackgroundPollState({
   Map<String, String> names = const {},
   Map<String, String> mailboxes = const {},
   Map<String, List<String>> allowedAuthors = const {},
+  Set<String> revokedDevices = const {},
   String? selfAuthor,
 }) async {
   await Hive.initFlutter();
@@ -82,6 +85,7 @@ Future<void> saveBackgroundPollState({
   await box.put('names', jsonEncode(names));
   await box.put('mailboxes', jsonEncode(mailboxes));
   await box.put('allowedAuthors', jsonEncode(allowedAuthors));
+  await box.put('revokedDevices', jsonEncode(revokedDevices.toList()));
   if (selfAuthor != null) await box.put('self', selfAuthor);
   if (cursors.isNotEmpty || epochs.isNotEmpty) {
     final cursorBox = await Hive.openBox<int>('hearth.bg_cursors');
@@ -173,6 +177,10 @@ Future<void> _pollFromStorage() async {
     final namesRaw = box.get('names');
     final mailboxesRaw = box.get('mailboxes');
     final allowedRaw = box.get('allowedAuthors');
+    final revokedRaw = box.get('revokedDevices');
+    final revokedDevices = revokedRaw == null
+        ? <String>{}
+        : (jsonDecode(revokedRaw) as List).whereType<String>().toSet();
     final names = namesRaw != null
         ? (jsonDecode(namesRaw) as Map).cast<String, String>()
         : const <String, String>{};
@@ -244,8 +252,14 @@ Future<void> _pollFromStorage() async {
           if (raw is! Map) continue;
           final message = Message.fromJson(raw.cast<String, Object?>());
           if (message.channel != channelId || !await message.verify()) continue;
-          if (!allowed.contains(raw['author'])) continue;
-          if (raw['author'] == selfAuthor) continue;
+          if (!backgroundSenderAllowed(
+            message,
+            allowedAuthors: allowed,
+            revokedDevices: revokedDevices,
+            selfAuthor: selfAuthor,
+          )) {
+            continue;
+          }
           count++;
         } catch (_) {
           // A relay is untrusted; malformed or forged entries never notify.

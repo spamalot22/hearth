@@ -82,7 +82,9 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  Future<VoiceSession> join() async => session = await VoiceSession.join(
+  Future<VoiceSession> join({
+    Duration captureTimeout = const Duration(seconds: 30),
+  }) async => session = await VoiceSession.join(
     channelId: 'room',
     identity: identity,
     relayUrl: Uri.parse('https://relay.example'),
@@ -90,7 +92,27 @@ void main() {
     enhancedNoiseSuppression: true,
     getUserMedia: devices.getUserMedia,
     enumerateDevices: devices.enumerateDevices,
+    captureTimeout: captureTimeout,
     onChange: () {},
+  );
+
+  test(
+    'startup timeout releases late capture without opening another microphone',
+    () async {
+      final pending = Completer<MediaStream>();
+      devices.pending = pending;
+      await expectLater(
+        join(captureTimeout: const Duration(milliseconds: 20)),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(devices.requests, hasLength(1));
+      final late = _CaptureStream('late-startup');
+      pending.complete(late);
+      await _until(() => late.disposed);
+      expect(late.track.stopped, isTrue);
+      expect(late.track.enabled, isFalse);
+      expect(devices.requests, hasLength(1));
+    },
   );
 
   for (final deafen in [false, true]) {

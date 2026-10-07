@@ -116,7 +116,7 @@ Flutter UI — Windows · Android · web (primary/released targets)
 └─ backend/  (optional TypeScript/Hono relay; never source of truth)
      cold start         announce/peer/signal mailboxes
      offline courier    bounded encrypted-message holding
-     data fallback      bounded encrypted gossip tunnel
+     data transport     direct WebRTC only (no traffic tunnel)
      media search       GIF/sound provider proxies
 ```
 
@@ -133,7 +133,7 @@ Flutter UI — Windows · Android · web (primary/released targets)
   messages, blobs, controls, voice, and screen media directly over WebRTC.
 - **The backend is optional coordination infrastructure**, not a source of
   truth. It bootstraps disconnected peers, temporarily holds encrypted courier
-  messages, can tunnel encrypted chat data, and proxies media searches.
+  messages, and proxies media searches. It does not tunnel live gossip or media.
 - **Default deploy = a self-hosted, tunnelled Hono container ($0 on hardware you
   already run).** Self-hosters run the same bounded in-memory relay image from
   GHCR behind a Tailscale Funnel sidecar. Cloudflare remains an alternative
@@ -348,9 +348,9 @@ courier and cold-start rendezvous._
 - [x] **Invite bootstrap metadata** — group/contact invites carry the inviter's
       identity and relay URL. Accepting records the inviter and joins the shared
       capability namespace used for rendezvous.
-- [x] **Data relay fallback** — after repeated ICE failure, the tunnelled relay
-      forwards encrypted gossip frames app-level (no coturn, UDP, or port-forward).
-      Voice and screen media remain direct-only.
+- [x] **Offline courier fallback** — the relay temporarily holds bounded opaque
+      encrypted messages. Live gossip, voice, and screen media remain direct-only;
+      there is no app-level traffic tunnel or TURN server.
 
 ### Phase 3 — Groups, voice, and the hard stuff
 - [x] Group = replicated encrypted log + random id/key capability; observed

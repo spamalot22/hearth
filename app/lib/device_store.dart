@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:convert/convert.dart';
 import 'package:core/core.dart';
-import 'package:hive_ce_flutter/hive_ce_flutter.dart';
+import 'package:hive_ce/hive.dart';
 
 /// Persists the set of known devices for the local identity and any revocations.
 /// Populated from:
@@ -24,6 +24,16 @@ class DeviceStore {
   }
 
   final Box<String> _box;
+  Future<void> _writeTail = Future<void>.value();
+
+  Future<T> _write<T>(Future<T> Function() operation) {
+    final result = _writeTail.then((_) => operation());
+    _writeTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
 
   static const _certsKey = 'certs';
   static const _revocationsKey = 'revocations';
@@ -85,12 +95,15 @@ class DeviceStore {
     } catch (_) {
       return false;
     }
-    if (_certsCache.any((c) => c.deviceKeyHex == cert.deviceKeyHex)) {
-      return false;
-    }
-    _certsCache.add(cert);
-    await _persistCerts();
-    return true;
+    return _write(() async {
+      if (_certsCache.any((c) => c.deviceKeyHex == cert.deviceKeyHex)) {
+        return false;
+      }
+      final next = [..._certsCache, cert];
+      await _persistCerts(next);
+      _certsCache = next;
+      return true;
+    });
   }
 
   /// Replaces the cert for a given device key (e.g. rename).
@@ -100,15 +113,18 @@ class DeviceStore {
     } catch (_) {
       return;
     }
-    _certsCache.removeWhere((c) => c.deviceKeyHex == cert.deviceKeyHex);
-    _certsCache.add(cert);
-    await _persistCerts();
+    await _write(() async {
+      final next = [
+        ..._certsCache.where((c) => c.deviceKeyHex != cert.deviceKeyHex),
+        cert,
+      ];
+      await _persistCerts(next);
+      _certsCache = next;
+    });
   }
 
-  Future<void> _persistCerts() => _box.put(
-    _certsKey,
-    jsonEncode(_certsCache.map((c) => c.toJson()).toList()),
-  );
+  Future<void> _persistCerts(List<DeviceCert> certs) =>
+      _box.put(_certsKey, jsonEncode(certs.map((c) => c.toJson()).toList()));
 
   /// All known revocations for this identity.
   List<DeviceRevocation> get revocations =>
@@ -151,14 +167,17 @@ class DeviceStore {
     // The verified root signature and root-scoped key prevent another identity
     // from revoking this device on behalf of its legitimate owner.
     final key = _revocationKey(rev.rootKeyHex, rev.deviceKeyHex);
-    if (_revokedCache.contains(key)) return false;
-    _revocationsCache.add(rev);
-    _revokedCache.add(key);
-    await _box.put(
-      _revocationsKey,
-      jsonEncode(_revocationsCache.map((r) => r.toJson()).toList()),
-    );
-    return true;
+    return _write(() async {
+      if (_revokedCache.contains(key)) return false;
+      final next = [..._revocationsCache, rev];
+      await _box.put(
+        _revocationsKey,
+        jsonEncode(next.map((r) => r.toJson()).toList()),
+      );
+      _revocationsCache = next;
+      _revokedCache.add(key);
+      return true;
+    });
   }
 
   /// Whether a specific device has been revoked.
@@ -250,30 +269,28 @@ class DeviceStore {
     if (bundle.publishedMs > now + 5 * 60 * 1000) {
       return false; // far-future timestamp — likely poisoned or clock-skewed
     }
-    final history = _deviceHistory[rootHex] ??= <String>{};
-    final historyLength = history.length;
-    history.addAll(bundle.devices.map(hex.encode));
-    final historyChanged = history.length != historyLength;
-    final existing = _bundlesCache[rootHex];
-    final isNewer =
-        existing == null || existing.publishedMs < bundle.publishedMs;
-    if (isNewer) {
-      _bundlesCache[rootHex] = bundle;
-      await _persistBundles();
-    }
-    if (historyChanged) await _persistDeviceHistory();
-    return isNewer || historyChanged;
+    return _write(() async {
+      final history = <String>{
+        ...?_deviceHistory[rootHex],
+        ...bundle.devices.map(hex.encode),
+      };
+      final historyChanged =
+          history.length != (_deviceHistory[rootHex]?.length ?? 0);
+      final existing = _bundlesCache[rootHex];
+      final isNewer =
+          existing == null || existing.publishedMs < bundle.publishedMs;
+      if (!isNewer && !historyChanged) return false;
+      final bundles = {..._bundlesCache, if (isNewer) rootHex: bundle};
+      final histories = {..._deviceHistory, rootHex: history};
+      await _box.putAll({
+        _bundlesKey: jsonEncode(bundles.map((k, v) => MapEntry(k, v.toJson()))),
+        _deviceHistoryKey: jsonEncode(
+          histories.map((root, devices) => MapEntry(root, devices.toList())),
+        ),
+      });
+      _bundlesCache = bundles;
+      _deviceHistory = histories;
+      return true;
+    });
   }
-
-  Future<void> _persistBundles() => _box.put(
-    _bundlesKey,
-    jsonEncode(_bundlesCache.map((k, v) => MapEntry(k, v.toJson()))),
-  );
-
-  Future<void> _persistDeviceHistory() => _box.put(
-    _deviceHistoryKey,
-    jsonEncode(
-      _deviceHistory.map((root, devices) => MapEntry(root, devices.toList())),
-    ),
-  );
 }

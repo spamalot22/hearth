@@ -23,6 +23,7 @@ class NearbyMessaging extends ChangeNotifier {
     required this.settings,
     required this.sessions,
     NearbyBluetoothRadio? bluetooth,
+    this.queueStorage,
   }) : _bluetooth = bluetooth ?? NearbyBluetooth();
 
   static const _native = MethodChannel('hearth/nearby');
@@ -31,6 +32,7 @@ class NearbyMessaging extends ChangeNotifier {
   final SettingsStore settings;
   final Iterable<ChannelSession> Function() sessions;
   final NearbyBluetoothRadio _bluetooth;
+  final NearbyQueueStorage? queueStorage;
   NearbyMux? _mux;
   String? _lastRuntime;
   String? _lastPeers;
@@ -46,6 +48,7 @@ class NearbyMessaging extends ChangeNotifier {
   final _routes = <String, ChannelSession>{};
   final _sessionSubs = <ChannelSession, StreamSubscription<Message>>{};
   final _forwardedInner = <String>{};
+  final _publishingInner = <String>{};
   final _deliveryAttempts = <String, DateTime>{};
   int _bridging = 0;
   NearbyQueue? _queue;
@@ -129,7 +132,7 @@ class NearbyMessaging extends ChangeNotifier {
       final caps = await _capabilities();
       supported = caps['supported'] == true;
       if (!supported || _closed) return;
-      final storage = await HiveNearbyQueueStorage.open();
+      final storage = queueStorage ?? await HiveNearbyQueueStorage.open();
       _queue = NearbyQueue(storage);
       await _queue!.load();
       if (_closed) return;
@@ -465,8 +468,10 @@ class NearbyMessaging extends ChangeNotifier {
         !sessions().contains(session)) {
       return;
     }
-    if (_forwardedInner.contains(message.idHex)) return;
-    _rememberInner(message.idHex);
+    if (_forwardedInner.contains(message.idHex) ||
+        !_publishingInner.add(message.idHex)) {
+      return;
+    }
     try {
       final now = DateTime.now();
       final created = DateTime.fromMillisecondsSinceEpoch(message.timestampMs);
@@ -491,6 +496,10 @@ class NearbyMessaging extends ChangeNotifier {
       );
       if (_closed || !enabled || !sessions().contains(session)) return;
       final result = await _queue!.add(packet, local: local);
+      if (result == NearbyAdmission.stored ||
+          result == NearbyAdmission.duplicate) {
+        _rememberInner(message.idHex);
+      }
       if (result == NearbyAdmission.stored) {
         // Durable custody must not make normal sends wait on a slow radio.
         unawaited(_courier?.reconcile().catchError((Object _) {}));
@@ -500,6 +509,8 @@ class NearbyMessaging extends ChangeNotifier {
       }
     } catch (_) {
       error = 'Could not queue nearby message';
+    } finally {
+      _publishingInner.remove(message.idHex);
     }
     if (!_closed) notifyListeners();
   }
@@ -540,8 +551,16 @@ class NearbyMessaging extends ChangeNotifier {
       }
       // receive() applies the existing block/revocation/DM-author checks and
       // propagates accepted text to existing WebRTC peers as usual.
+      final wasForwarded = _forwardedInner.contains(message.idHex);
       _rememberInner(message.idHex);
-      await session.engine.receive(message);
+      try {
+        await session.engine.receive(message);
+      } finally {
+        if (!wasForwarded &&
+            session.repository.getByHex(message.idHex) == null) {
+          _forwardedInner.remove(message.idHex);
+        }
+      }
       if (session.repository.getByHex(message.idHex) == null) return;
       _delivered.add(packet.id);
       if (_delivered.length > 512) _delivered.remove(_delivered.first);

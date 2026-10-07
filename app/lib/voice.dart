@@ -152,10 +152,13 @@ class VoiceSession {
     Uint8List? channelAuthKey,
     Future<MediaStream> Function(Map<String, dynamic>)? getUserMedia,
     Future<List<MediaDeviceInfo>> Function()? enumerateDevices,
+    Duration captureTimeout = const Duration(seconds: 30),
   }) async {
     final openCapture = getUserMedia ?? navigator.mediaDevices.getUserMedia;
     final listDevices =
         enumerateDevices ?? navigator.mediaDevices.enumerateDevices;
+    Future<MediaStream> capture(Object constraint) =>
+        _openCapture(openCapture, constraint, timeout: captureTimeout);
     // On desktop, select devices before opening the first real capture stream.
     // Windows WebRTC can lock its audio module to whichever defaults the first
     // getUserMedia call used, so a permission "probe" must not open and close a
@@ -164,17 +167,14 @@ class VoiceSession {
     String? activeOutputId = audioOutputId;
     if (defaultTargetPlatform != TargetPlatform.android &&
         defaultTargetPlatform != TargetPlatform.iOS) {
-      try {
-        if (kIsWeb) {
-          // Browsers may withhold labels until permission has been granted.
-          final probe = await openCapture({'audio': true, 'video': false});
-          for (final track in probe.getTracks()) {
-            await track.stop();
-          }
-          await probe.dispose();
-        }
+      if (kIsWeb) {
+        // Browsers may withhold labels until permission has been granted.
+        final probe = await capture(true);
+        await _disposeCapture(probe);
+      }
 
-        var devices = await listDevices();
+      try {
+        var devices = await listDevices().timeout(const Duration(seconds: 3));
         if (!kIsWeb &&
             devices.every((device) => device.kind != 'audioinput') &&
             (defaultTargetPlatform == TargetPlatform.windows ||
@@ -182,10 +182,8 @@ class VoiceSession {
           // The native desktop plugin may not enumerate until its factory has
           // been initialized. A PeerConnection does that without opening the
           // microphone or fixing the audio module to a default device.
-          final pc = await createPeerConnection({});
-          await pc.close();
-          await pc.dispose();
-          devices = await listDevices();
+          await _initializeAudioFactory();
+          devices = await listDevices().timeout(const Duration(seconds: 3));
         }
         final mic = preferredAudioDevice(devices, 'audioinput', audioInputId);
         final output = kIsWeb
@@ -205,13 +203,17 @@ class VoiceSession {
           var outputSelected = output == null;
           if (mic != null) {
             try {
-              await Helper.selectAudioInput(mic.deviceId);
+              await Helper.selectAudioInput(
+                mic.deviceId,
+              ).timeout(const Duration(seconds: 3));
               inputSelected = true;
             } catch (_) {}
           }
           if (output != null) {
             try {
-              await Helper.selectAudioOutput(output.deviceId);
+              await Helper.selectAudioOutput(
+                output.deviceId,
+              ).timeout(const Duration(seconds: 3));
               outputSelected = true;
             } catch (_) {}
           }
@@ -237,21 +239,29 @@ class VoiceSession {
     MediaStream? stream;
     // Try the explicit device first; fall back to unconstrained if it fails.
     try {
-      stream = await openCapture({'audio': audioConstraint, 'video': false});
+      stream = await capture(audioConstraint);
+    } on TimeoutException {
+      rethrow;
     } catch (error) {
       HearthDiagnostics.log(
         '[hearth][voice] constrained microphone open failed: '
         '${error.runtimeType}; retrying default',
       );
-      stream = await openCapture({'audio': true, 'video': false});
+      if (audioConstraint == true) rethrow;
+      stream = await capture(true);
     }
     if (stream.getAudioTracks().isEmpty) {
       await _disposeCapture(stream);
       throw StateError('Microphone returned no audio track');
     }
     // Ensure tracks are enabled — Windows can return them disabled.
-    for (final track in stream.getAudioTracks()) {
-      track.enabled = true;
+    try {
+      for (final track in stream.getAudioTracks()) {
+        track.enabled = true;
+      }
+    } catch (_) {
+      await _disposeCapture(stream);
+      rethrow;
     }
     HearthDiagnostics.log(
       '[hearth][voice] local audio stream ready '
@@ -309,7 +319,9 @@ class VoiceSession {
       // On mobile, route audio to speaker (not earpiece) by default.
       if (defaultTargetPlatform == TargetPlatform.android ||
           defaultTargetPlatform == TargetPlatform.iOS) {
-        await Helper.setSpeakerphoneOn(true);
+        await Helper.setSpeakerphoneOn(
+          true,
+        ).timeout(const Duration(seconds: 3));
       }
       session._levelTimer = Timer.periodic(
         const Duration(milliseconds: 250),
@@ -501,23 +513,62 @@ class VoiceSession {
     }
   }
 
-  Future<MediaStream> _openRecoveredCapture(Object constraint) async {
+  static Future<void> _initializeAudioFactory() async {
+    Future<void> dispose(RTCPeerConnection pc) async {
+      try {
+        await pc.close().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+      try {
+        await pc.dispose().timeout(const Duration(seconds: 3));
+      } catch (_) {}
+    }
+
+    var retired = false;
+    final pending = createPeerConnection({}).then((pc) async {
+      if (retired) {
+        await dispose(pc);
+        throw StateError('audio factory request retired');
+      }
+      return pc;
+    });
+    RTCPeerConnection? pc;
+    try {
+      pc = await pending.timeout(const Duration(seconds: 5));
+    } finally {
+      retired = true;
+      if (pc != null) await dispose(pc);
+    }
+  }
+
+  static Future<MediaStream> _openCapture(
+    Future<MediaStream> Function(Map<String, dynamic>) open,
+    Object constraint, {
+    required Duration timeout,
+    bool Function()? retired,
+  }) async {
     var expired = false;
-    final pending = _getUserMedia({'audio': constraint, 'video': false}).then((
+    final pending = open({'audio': constraint, 'video': false}).then((
       stream,
     ) async {
-      if (expired || _closed) {
+      if (expired || (retired?.call() ?? false)) {
         await _disposeCapture(stream);
         throw StateError('capture request retired');
       }
       return stream;
     });
     try {
-      return await pending.timeout(const Duration(seconds: 10));
+      return await pending.timeout(timeout);
     } finally {
       expired = true;
     }
   }
+
+  Future<MediaStream> _openRecoveredCapture(Object constraint) => _openCapture(
+    _getUserMedia,
+    constraint,
+    timeout: const Duration(seconds: 10),
+    retired: () => _closed,
+  );
 
   Future<void> _repairCapture() async {
     final now = DateTime.now();
@@ -577,8 +628,10 @@ class VoiceSession {
       if (_closed) return;
       try {
         replacement = await _openRecoveredCapture(constraint);
+      } on TimeoutException {
+        rethrow;
       } catch (_) {
-        if (_closed) return;
+        if (_closed || constraint == true) rethrow;
         replacement = await _openRecoveredCapture(true);
       }
       if (_closed) return;

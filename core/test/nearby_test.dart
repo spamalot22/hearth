@@ -248,6 +248,45 @@ void main() {
     expect(q.packets.map((p) => p.id), isNot(contains(first.id)));
   });
 
+  test(
+    'full forwarding queue still delivers verified packets locally',
+    () async {
+      final queue = NearbyQueue(_Storage(), maxEntries: 4, now: () => start);
+      for (var i = 0; i < 4; i++) {
+        expect(
+          await queue.add(await packet(i), local: true),
+          NearbyAdmission.stored,
+        );
+      }
+      final incoming = await packet(9);
+      final delivered = <NearbyPacket>[];
+      final courier = NearbyCourier(
+        queue: queue,
+        now: () => start,
+        onPacket: (packet) async {
+          delivered.add(packet);
+        },
+      );
+      addTearDown(courier.close);
+      final local = _Link('local');
+      final remote = _Link('remote');
+      local.other = remote;
+      remote.other = local;
+      addTearDown(remote.close);
+      await courier.attach(local);
+      await remote.send(Uint8List.fromList([1, ...utf8.encode('{}')]));
+      await remote.send(Uint8List.fromList([1, ...incoming.encode()]));
+      await _until(() => delivered.isNotEmpty);
+      expect(delivered.map((packet) => packet.id), [incoming.id]);
+      expect(queue.packets, hasLength(4));
+      expect(
+        queue.packets.map((packet) => packet.id),
+        isNot(contains(incoming.id)),
+      );
+      expect(courier.linkCount, 1);
+    },
+  );
+
   test('per-sender and byte caps apply independently of count', () async {
     final q = NearbyQueue(_Storage(), maxPerSender: 1, now: () => start);
     expect(await q.add(await packet(1)), NearbyAdmission.stored);
@@ -282,6 +321,36 @@ void main() {
       final reload = NearbyQueue(storage, now: () => start);
       await reload.load();
       expect(reload.packets.single.id, p.id);
+    },
+  );
+
+  test(
+    'custody storage failure does not disconnect or block local delivery',
+    () async {
+      final storage = _Storage()..fail = true;
+      final queue = NearbyQueue(storage, now: () => start);
+      final delivered = <NearbyPacket>[];
+      final courier = NearbyCourier(
+        queue: queue,
+        now: () => start,
+        onPacket: (packet) async {
+          delivered.add(packet);
+        },
+      );
+      addTearDown(courier.close);
+      final local = _Link('local');
+      final remote = _Link('remote');
+      local.other = remote;
+      remote.other = local;
+      addTearDown(remote.close);
+      await courier.attach(local);
+      final incoming = await packet(9);
+      await remote.send(Uint8List.fromList([1, ...incoming.encode()]));
+      await _until(() => delivered.isNotEmpty);
+      expect(delivered.single.id, incoming.id);
+      expect(queue.packets, isEmpty);
+      expect(storage.entries, isEmpty);
+      expect(courier.linkCount, 1);
     },
   );
 
