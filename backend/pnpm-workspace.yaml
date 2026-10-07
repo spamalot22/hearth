@@ -10,3 +10,5 @@ allowBuilds:
 # esbuild override removed — direct devDependency ^0.28.1 satisfies the floor.
 overrides:
   vite: '>=6.4.3'
+  # GHSA-68fv-2mgg-jv7q: indexed source-map offsets can block the event loop.
+  source-map-js: '^1.2.2'
