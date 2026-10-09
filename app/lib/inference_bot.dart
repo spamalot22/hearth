@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Uses fllama (GPL-2.0, github.com/Telosnex/fllama) for llama.cpp FFI bindings.
-import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:fllama/fllama.dart';
 import 'package:path_provider/path_provider.dart';
+
+import 'diagnostics.dart';
+import 'inference_job.dart';
 
 /// A local LLM inference bot. Runs a GGUF model via fllama (llama.cpp FFI).
 /// Any peer with a model file and the AI toggle enabled can serve inference
@@ -17,10 +20,36 @@ class InferenceBot {
   InferenceBot._(this._modelPath);
 
   final String _modelPath;
-  bool _busy = false;
+  // All model selections share one native engine. Replacing this bot must not
+  // permit another model load while an earlier request is still shutting down.
+  static final _job = InferenceJob(
+    start: (path, prompt, maxTokens, output) => fllamaChat(
+      OpenAiRequest(
+        maxTokens: maxTokens,
+        messages: [
+          Message(
+            Role.system,
+            'You are a helpful assistant in a group chat called Hearth. Keep responses concise.',
+          ),
+          Message(Role.user, prompt),
+        ],
+        numGpuLayers: 0,
+        modelPath: path,
+        frequencyPenalty: 0.0,
+        presencePenalty: 1.1,
+        topP: 1.0,
+        contextSize: 2048,
+      ),
+      output,
+    ),
+    cancel: fllamaCancelInference,
+    onEvent: HearthDiagnostics.log,
+  );
 
   /// Whether the bot is currently processing a request.
-  bool get busy => _busy;
+  bool get busy => _job.busy;
+
+  void cancel() => _job.cancelCurrent();
 
   /// The default model filename (placed in app documents dir).
   static const String kModelFilename = 'hearth-model.gguf';
@@ -62,31 +91,39 @@ class InferenceBot {
     String? modelId,
     String? expectedSha256,
   }) async {
-    String? path;
-    if (modelId != null) {
-      path = await pathFor(modelId);
-      if (!await File(path).exists()) path = null;
-      if (path != null && expectedSha256 != null) {
-        final marker = File('$path.sha256');
-        if (!await marker.exists() ||
-            (await marker.readAsString()).trim() != expectedSha256) {
-          path = null;
+    try {
+      String? path;
+      if (modelId != null) {
+        path = await pathFor(modelId);
+        if (!await File(path).exists()) path = null;
+        if (path != null && expectedSha256 != null) {
+          final marker = File('$path.sha256');
+          if (!await marker.exists() ||
+              (await marker.readAsString()).trim() != expectedSha256) {
+            path = null;
+          } else if ((await sha256.bind(File(path).openRead()).first)
+                  .toString() !=
+              expectedSha256) {
+            HearthDiagnostics.log('ai model checksum verification failed');
+            path = null;
+          }
         }
       }
-    }
-    // Fallback to legacy single-file name.
-    path ??= await modelPath();
-    if (path == null) return null;
-    // Validate GGUF magic bytes before loading (prevents native crash on corrupt files).
-    try {
+      // Do not replace a missing/corrupt selected model with an unrelated file.
+      if (modelId == null) path ??= await modelPath();
+      if (path == null) return null;
       final file = File(path);
       final size = await file.length();
       if (size < 1024 * 1024) {
         return null; // < 1MB is definitely not a valid model
       }
       final raf = await file.open();
-      final magic = await raf.read(4);
-      await raf.close();
+      late final List<int> magic;
+      try {
+        magic = await raf.read(4);
+      } finally {
+        await raf.close();
+      }
       // GGUF magic: 0x47 0x47 0x55 0x46 ("GGUF")
       if (magic.length < 4 ||
           magic[0] != 0x47 ||
@@ -95,79 +132,16 @@ class InferenceBot {
           magic[3] != 0x46) {
         return null;
       }
+      return InferenceBot._(path);
     } catch (_) {
+      HearthDiagnostics.log('ai model verification could not read the file');
       return null;
     }
-    return InferenceBot._(path);
   }
 
   /// Runs inference on [prompt] and returns the response text.
-  /// Returns null if busy or if inference fails.
+  /// Returns null if busy; failures are surfaced to the caller for diagnostics.
   Future<String?> generate(String prompt, {int maxTokens = 256}) async {
-    if (_busy) return null;
-    _busy = true;
-    var released = false;
-    var invocationStarted = false;
-    void release() {
-      if (released) return;
-      released = true;
-      _busy = false;
-    }
-
-    try {
-      if (!await File(_modelPath).exists()) return null;
-      // Reduce context size for large models to avoid OOM.
-      final fileSize = await File(_modelPath).length();
-      final ctx = fileSize > 4 * 1024 * 1024 * 1024 ? 1024 : 2048;
-      final completer = Completer<String>();
-      String result = '';
-      final invocation = fllamaChat(
-        OpenAiRequest(
-          maxTokens: maxTokens,
-          messages: [
-            Message(
-              Role.system,
-              'You are a helpful assistant in a group chat called Hearth. Keep responses concise.',
-            ),
-            Message(Role.user, prompt),
-          ],
-          numGpuLayers: 99,
-          modelPath: _modelPath,
-          frequencyPenalty: 0.0,
-          presencePenalty: 1.1,
-          topP: 1.0,
-          contextSize: ctx,
-        ),
-        (String partial, String jsonStr, bool done) {
-          result = partial;
-          if (done && !completer.isCompleted) completer.complete(result);
-        },
-      );
-      invocationStarted = true;
-      unawaited(
-        invocation
-            .then((_) {
-              if (!completer.isCompleted) completer.complete(result);
-              release();
-            })
-            .catchError((Object error, StackTrace stack) {
-              if (!completer.isCompleted) completer.completeError(error, stack);
-              release();
-            }),
-      );
-      return await completer.future.timeout(
-        const Duration(seconds: 60),
-        onTimeout: () => '', // Empty = treated as no response
-      );
-    } on Error catch (e) {
-      // Native FFI errors (e.g. incompatible model format).
-      throw StateError('Model inference failed: $e');
-    } catch (_) {
-      return null;
-    } finally {
-      // A UI timeout must not permit a second native inference while the first
-      // llama.cpp job is still running. The invocation completion releases it.
-      if (!invocationStarted) release();
-    }
+    return _job.generate(_modelPath, prompt, maxTokens: maxTokens);
   }
 }

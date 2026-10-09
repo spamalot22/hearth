@@ -29,6 +29,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'audio_device_defaults.dart';
 import 'background_poll.dart';
 
 import 'blob_store_hive.dart';
@@ -46,6 +47,7 @@ import 'error_details.dart';
 import 'gif_search.dart';
 import 'group_channel.dart';
 import 'inference_bot.dart';
+import 'inference_job.dart';
 import 'key_store.dart';
 import 'markdown.dart';
 import 'media_library.dart';
@@ -61,6 +63,7 @@ import 'profile.dart';
 import 'rendezvous.dart';
 import 'screen_picker.dart';
 import 'screen_share.dart';
+import 'screen_share_fullscreen.dart';
 import 'settings.dart';
 import 'sound_search.dart';
 import 'starter_sounds.dart';
@@ -1310,6 +1313,11 @@ typedef _VoiceBarState = ({
   bool controlsEnabled,
 });
 
+typedef _AudioDevices = ({
+  List<MediaDeviceInfo> devices,
+  AudioDeviceDefaults defaults,
+});
+
 class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _input = TextEditingController();
   final FocusNode _composerFocus = FocusNode();
@@ -1378,6 +1386,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, ScreenView> _screenViews = {};
   final Map<String, Object> _pendingScreenViews = {};
   String? _selectedShareHex;
+  String? _fullscreenShareHex;
   Set<String> _sharedTo = {}; // voice peers already told about my active share
   // Shared YouTube "watch party" (Windows): host-driven, synced over the voice
   // mesh. videoId null = no party; mute/hidden are local-only per member.
@@ -1628,7 +1637,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Publish our device bundle (active device set) so peers can encrypt
     }
     if (widget.autoPoll) await initRecentGifs();
-    if (!kIsWeb && widget.autoPoll && (settings?.contributeCompute ?? true)) {
+    if (!kIsWeb && widget.autoPoll) {
       final activeModel = settings?.activeModel;
       final model = _kAvailableModels
           .where((candidate) => candidate.id == activeModel)
@@ -1969,44 +1978,61 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     ).join();
   }
 
-  /// Broadcasts an inference request to all connected peers.
-  void _requestInference(String prompt) {
-    // Capture the session now — response should post here even if user switches.
-    final session = _channels?.active;
-    if (session == null) return;
-    final id = _newInferenceRequestId();
-    final completer = Completer<String?>();
-    _pendingInference[id] = (
-      channelId: session.channelId,
-      completer: completer,
-    );
-    session.broadcast(InferenceRequest(id: id, prompt: prompt));
-    // Also try locally if we have a model.
-    if (_bot != null) {
-      unawaited(
-        _bot!
-            .generate(prompt)
-            .then((text) {
-              if (text != null && !completer.isCompleted) {
-                completer.complete(text);
-              }
-            })
-            .catchError((Object e) {
-              if (mounted) _setError('AI model error: $e');
-            }),
+  /// Uses our local model first, otherwise asks connected volunteers.
+  void _requestInference(String prompt, ChannelSession session) {
+    // Use the channel where the prompt was sent, even if navigation changed
+    // while publishing the original message. Never disclose it elsewhere.
+    if (!(_channels?.sessions.contains(session) ?? false)) return;
+    if (!InferenceJob.validPrompt(prompt)) {
+      _setError(
+        'AI prompt is too long (maximum ${InferenceJob.maxPromptBytes} UTF-8 bytes)',
       );
+      return;
     }
-    // Timeout after 60s.
-    completer.future
-        .timeout(const Duration(seconds: 60), onTimeout: () => '')
-        .then((text) {
-          _pendingInference.remove(id);
-          if (text != null && text.isNotEmpty && mounted) {
-            unawaited(_publishTo(session, TextContent('🤖 $text')));
-          } else if (mounted) {
-            _setError('No AI peer responded (is anyone running a model?)');
+    final bot = _bot;
+    if (bot?.busy == true || _pendingInference.length >= 4) {
+      _setError('AI is busy; wait for the current request to finish');
+      return;
+    }
+    final id = _newInferenceRequestId();
+    unawaited(() async {
+      try {
+        String? text;
+        if (bot != null) {
+          // A local model needs no mesh fan-out. A single request must not
+          // trigger native model loads on every client in the channel.
+          text = await bot.generate(prompt);
+        } else {
+          final completer = Completer<String?>();
+          _pendingInference[id] = (
+            channelId: session.channelId,
+            completer: completer,
+          );
+          final response = completer.future.timeout(
+            const Duration(seconds: 130),
+            onTimeout: () => null,
+          );
+          try {
+            session.broadcast(InferenceRequest(id: id, prompt: prompt));
+            text = await response;
+          } finally {
+            if (!completer.isCompleted) completer.complete(null);
           }
-        });
+        }
+        if (!mounted || !(_channels?.sessions.contains(session) ?? false)) {
+          return;
+        }
+        if (text != null && text.isNotEmpty) {
+          await _publishTo(session, TextContent('🤖 $text'));
+        } else {
+          _setError('No AI response (a peer must enable Share AI compute)');
+        }
+      } catch (error, stack) {
+        if (mounted) _setError('AI request failed', details: '$error\n$stack');
+      } finally {
+        _pendingInference.remove(id);
+      }
+    }());
   }
 
   // Per-peer cooldown so one peer can't peg our CPU with back-to-back requests.
@@ -2084,16 +2110,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     if (control is InferenceRequest) {
-      if (control.id.length > 128 ||
-          control.prompt.isEmpty ||
-          control.prompt.length > 8000) {
+      final requesterRoot = _rootHexForPeer(fromHex);
+      if (_settings?.contributeCompute != true ||
+          _blocked.contains(requesterRoot) ||
+          control.id.isEmpty ||
+          control.id.length > 128 ||
+          !InferenceJob.validPrompt(control.prompt)) {
         return;
       }
       // A peer wants inference — respond if we have a model and compute is on.
       final bot = _bot;
       if (bot == null || bot.busy) return;
       final now = DateTime.now();
-      final requesterRoot = _rootHexForPeer(fromHex);
+      _inferCooldown.removeWhere(
+        (_, last) => now.difference(last) > const Duration(minutes: 1),
+      );
+      if (_inferCooldown.length >= 256) return;
       final last = _inferCooldown[requesterRoot];
       if (last != null && now.difference(last) < const Duration(seconds: 10)) {
         return; // too soon since this peer's last request
@@ -2103,7 +2135,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         bot
             .generate(control.prompt)
             .then((text) {
-              if (text == null || text.isEmpty) return;
+              if (!mounted ||
+                  _settings?.contributeCompute != true ||
+                  _blocked.contains(requesterRoot) ||
+                  text == null ||
+                  text.isEmpty) {
+                return;
+              }
               // Respond only on the channel the request came from — not every session
               // (which would leak the answer text to unrelated channels' peers).
               for (final s in _channels?.sessions ?? const <ChannelSession>[]) {
@@ -2125,7 +2163,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final pending = _pendingInference[control.id];
       if (pending != null &&
           pending.channelId == channelId &&
-          control.text.length <= 16000 &&
+          control.text.isNotEmpty &&
+          control.text.length <= InferenceJob.maxResponseCharacters &&
           !pending.completer.isCompleted) {
         pending.completer.complete(control.text);
       }
@@ -3548,8 +3587,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   /// WebRTC layer has been initialized, so we do a lightweight kick there. On
   /// mobile, opening Settings must not request microphone permission; voice chat
   /// and the explicit mic test button handle that user-visible permission flow.
-  Future<List<MediaDeviceInfo>> _enumerateAudioDevices() async {
-    var devices = await navigator.mediaDevices.enumerateDevices();
+  Future<_AudioDevices> _enumerateAudioDevices() async {
+    var devices = await navigator.mediaDevices.enumerateDevices().timeout(
+      const Duration(seconds: 3),
+    );
     // On Windows/desktop, enumerateDevices can return empty until a
     // PeerConnection has been created. Create a throwaway one to kick the
     // native layer, then re-enumerate.
@@ -3560,44 +3601,97 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         final pc = await createPeerConnection({});
         await pc.close();
         await pc.dispose();
-        devices = await navigator.mediaDevices.enumerateDevices();
+        devices = await navigator.mediaDevices.enumerateDevices().timeout(
+          const Duration(seconds: 3),
+        );
       } catch (_) {}
     }
-    return devices;
+    return (devices: devices, defaults: await readAudioDeviceDefaults());
   }
 
   Widget _audioTab() {
+    var deviceSnapshot = _enumerateAudioDevices();
+    var recoveringPlayback = false;
     return StatefulBuilder(
       builder: (context, setTabState) {
-        return FutureBuilder<List<MediaDeviceInfo>>(
-          future: _enumerateAudioDevices(),
+        return FutureBuilder<_AudioDevices>(
+          future: deviceSnapshot,
           builder: (context, snapshot) {
-            final devices = snapshot.data ?? [];
+            final devices = snapshot.data?.devices ?? [];
+            final defaults =
+                snapshot.data?.defaults ?? const AudioDeviceDefaults();
             final seen = <String>{};
             final mics = devices
-                .where((d) => d.kind == 'audioinput' && seen.add(d.deviceId))
+                .where(
+                  (d) =>
+                      d.kind == 'audioinput' &&
+                      d.deviceId.isNotEmpty &&
+                      seen.add(d.deviceId),
+                )
                 .toList();
             seen.clear();
             final speakers = devices
-                .where((d) => d.kind == 'audiooutput' && seen.add(d.deviceId))
+                .where(
+                  (d) =>
+                      d.kind == 'audiooutput' &&
+                      d.deviceId.isNotEmpty &&
+                      seen.add(d.deviceId),
+                )
                 .toList();
             final selectedMic = preferredAudioDevice(
               mics,
               'audioinput',
               _settings?.audioInputDevice,
+              systemDefaultId: defaults.inputId,
             )?.deviceId;
             final selectedSpeaker = preferredAudioDevice(
               speakers,
               'audiooutput',
               _settings?.audioOutputDevice,
+              systemDefaultId: defaults.outputId,
             )?.deviceId;
+            final defaultMic = preferredAudioDevice(
+              mics,
+              'audioinput',
+              null,
+              systemDefaultId: defaults.inputId,
+            );
+            final defaultSpeaker = preferredAudioDevice(
+              speakers,
+              'audiooutput',
+              null,
+              systemDefaultId: defaults.outputId,
+            );
+            final followsMic = !mics.any(
+              (device) => device.deviceId == _settings?.audioInputDevice,
+            );
+            final followsSpeaker = !speakers.any(
+              (device) => device.deviceId == _settings?.audioOutputDevice,
+            );
+            final desktopAudio =
+                kIsWeb ||
+                (defaultTargetPlatform != TargetPlatform.android &&
+                    defaultTargetPlatform != TargetPlatform.iOS);
             return Padding(
               padding: const EdgeInsets.all(16),
               child: ListView(
                 children: [
-                  Text(
-                    'Microphone',
-                    style: Theme.of(context).textTheme.labelLarge,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Microphone',
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Refresh audio devices',
+                        icon: const Icon(Icons.refresh),
+                        onPressed: () => setTabState(() {
+                          deviceSnapshot = _enumerateAudioDevices();
+                        }),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 4),
                   if (defaultTargetPlatform == TargetPlatform.android ||
@@ -3639,13 +3733,51 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     )
                   else if (mics.isEmpty)
                     const Text('No microphones found')
-                  else
+                  else ...[
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        followsMic
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                        size: 20,
+                      ),
+                      title: const Text('System default'),
+                      subtitle: Text(
+                        defaultMic?.label.isNotEmpty == true
+                            ? defaultMic!.label
+                            : 'Default microphone',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      onTap: () async {
+                        if (await _selectAudioInputDevice(null) &&
+                            context.mounted) {
+                          setTabState(() {});
+                        }
+                      },
+                      trailing: IconButton(
+                        icon: const Icon(Icons.mic, size: 20),
+                        tooltip: 'Test default microphone',
+                        onPressed: defaultMic == null
+                            ? null
+                            : () => unawaited(
+                                _testAudioInput(
+                                  context,
+                                  defaultMic,
+                                  setTabState,
+                                  systemDefault: true,
+                                ),
+                              ),
+                      ),
+                    ),
                     for (final mic in mics)
                       ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(
-                          mic.deviceId == selectedMic
+                          !followsMic && mic.deviceId == selectedMic
                               ? Icons.radio_button_checked
                               : Icons.radio_button_unchecked,
                           size: 20,
@@ -3656,80 +3788,123 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               : 'Microphone ${mics.indexOf(mic) + 1}',
                           overflow: TextOverflow.ellipsis,
                         ),
-                        subtitle: mic.deviceId == selectedMic
-                            ? const Text('Voice microphone')
+                        subtitle:
+                            (mic.deviceId == defaults.inputId ||
+                                mic.deviceId ==
+                                    (_voice?.audioInputId ?? selectedMic))
+                            ? Text(
+                                [
+                                  if (mic.deviceId == defaults.inputId)
+                                    'Windows default',
+                                  if (mic.deviceId ==
+                                      (_voice?.audioInputId ?? selectedMic))
+                                    'Voice microphone',
+                                ].join(' · '),
+                              )
                             : null,
                         onTap: () async {
-                          await _settings?.setAudioInputDevice(mic.deviceId);
-                          setTabState(() {});
+                          if (await _selectAudioInputDevice(mic.deviceId) &&
+                              context.mounted) {
+                            setTabState(() {});
+                          }
                         },
                         trailing: IconButton(
                           icon: const Icon(Icons.mic, size: 20),
                           tooltip: 'Test microphone',
-                          onPressed: () async {
-                            try {
-                              await _settings?.setAudioInputDevice(
-                                mic.deviceId,
-                              );
-                              setTabState(() {});
-                              final stream = await navigator.mediaDevices
-                                  .getUserMedia({
-                                    'audio': kIsWeb
-                                        ? {
-                                            'deviceId': {'exact': mic.deviceId},
-                                          }
-                                        : {
-                                            'optional': [
-                                              {'sourceId': mic.deviceId},
-                                            ],
-                                          },
-                                    'video': false,
-                                  });
-                              await Future<void>.delayed(
-                                const Duration(milliseconds: 500),
-                              );
-                              for (final t in stream.getTracks()) {
-                                await t.stop();
-                              }
-                              await stream.dispose();
-                              if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '✓ ${mic.label.isNotEmpty ? mic.label : "Mic"} is working',
-                                    ),
-                                  ),
-                                );
-                              }
-                            } catch (e) {
-                              if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '✗ ${mic.label.isNotEmpty ? mic.label : "Mic"} failed: $e',
-                                    ),
-                                  ),
-                                );
-                              }
-                            }
-                          },
+                          onPressed: () => unawaited(
+                            _testAudioInput(context, mic, setTabState),
+                          ),
                         ),
                       ),
+                  ],
                   const Divider(height: 24),
-                  Text(
-                    'Speaker',
-                    style: Theme.of(context).textTheme.labelLarge,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Speaker',
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                      ),
+                      if (!kIsWeb &&
+                          defaultTargetPlatform == TargetPlatform.windows &&
+                          _voice != null)
+                        IconButton(
+                          icon: const Icon(Icons.refresh, size: 20),
+                          tooltip: 'Reconnect voice playback',
+                          onPressed: recoveringPlayback
+                              ? null
+                              : () async {
+                                  final voice = _voice;
+                                  if (voice == null) return;
+                                  setTabState(() => recoveringPlayback = true);
+                                  final recovered = await voice
+                                      .recoverAudioPlayback();
+                                  if (!context.mounted) return;
+                                  setTabState(() => recoveringPlayback = false);
+                                  if (!recovered) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Could not reconnect voice playback',
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 4),
                   if (speakers.isEmpty)
                     const Text('No speakers found')
-                  else
+                  else ...[
+                    if (desktopAudio)
+                      ListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                          followsSpeaker
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_unchecked,
+                          size: 20,
+                        ),
+                        title: const Text('System default'),
+                        subtitle: Text(
+                          defaultSpeaker?.label.isNotEmpty == true
+                              ? defaultSpeaker!.label
+                              : 'Default speaker',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onTap: () async {
+                          if (await _selectAudioOutputDevice(null) &&
+                              context.mounted) {
+                            setTabState(() {});
+                          }
+                        },
+                        trailing: IconButton(
+                          icon: const Icon(Icons.play_arrow, size: 20),
+                          tooltip: 'Test default output',
+                          onPressed: defaultSpeaker == null
+                              ? null
+                              : () => unawaited(
+                                  _testAudioOutput(
+                                    context,
+                                    defaultSpeaker,
+                                    setTabState,
+                                    systemDefault: true,
+                                  ),
+                                ),
+                        ),
+                      ),
                     for (final spk in speakers)
                       ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(
-                          spk.deviceId == selectedSpeaker
+                          (!followsSpeaker || !desktopAudio) &&
+                                  spk.deviceId == selectedSpeaker
                               ? Icons.radio_button_checked
                               : Icons.radio_button_unchecked,
                           size: 20,
@@ -3740,14 +3915,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                               : 'Speaker ${speakers.indexOf(spk) + 1}',
                           overflow: TextOverflow.ellipsis,
                         ),
-                        subtitle: spk.deviceId == selectedSpeaker
-                            ? const Text('Voice output')
+                        subtitle:
+                            (spk.deviceId == defaults.outputId ||
+                                spk.deviceId ==
+                                    (_voice?.audioOutputId ?? selectedSpeaker))
+                            ? Text(
+                                [
+                                  if (spk.deviceId == defaults.outputId)
+                                    'Windows default',
+                                  if (spk.deviceId ==
+                                      (_voice?.audioOutputId ??
+                                          selectedSpeaker))
+                                    'Voice output',
+                                ].join(' · '),
+                              )
                             : null,
                         onTap: () async {
                           final selected = await _selectAudioOutputDevice(
                             spk.deviceId,
                           );
-                          if (selected) setTabState(() {});
+                          if (selected && context.mounted) setTabState(() {});
                         },
                         trailing: IconButton(
                           icon: const Icon(Icons.play_arrow, size: 20),
@@ -3757,6 +3944,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                           ),
                         ),
                       ),
+                  ],
                   const Divider(height: 24),
                   Text(
                     'Appearance',
@@ -3871,7 +4059,99 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  Future<bool> _selectAudioOutputDevice(String deviceId) async {
+  Future<bool> _selectAudioInputDevice(String? deviceId) async {
+    try {
+      final voice = _voice;
+      if (voice != null && !kIsWeb) {
+        if (!await voice.setAudioInput(deviceId)) return false;
+      } else if (!kIsWeb) {
+        final snapshot = await _enumerateAudioDevices();
+        final input = preferredAudioDevice(
+          snapshot.devices,
+          'audioinput',
+          deviceId,
+          systemDefaultId: snapshot.defaults.inputId,
+        );
+        if (input == null) return false;
+        await Helper.selectAudioInput(
+          input.deviceId,
+        ).timeout(const Duration(seconds: 3));
+      }
+      await _settings?.setAudioInputDevice(deviceId);
+      return true;
+    } catch (error) {
+      if (mounted) _setError('Could not select microphone', details: '$error');
+      return false;
+    }
+  }
+
+  Future<void> _testAudioInput(
+    BuildContext context,
+    MediaDeviceInfo device,
+    StateSetter setTabState, {
+    bool systemDefault = false,
+  }) async {
+    MediaStream? stream;
+    try {
+      if (!await _selectAudioInputDevice(
+        systemDefault ? null : device.deviceId,
+      )) {
+        throw StateError('input unavailable');
+      }
+      if (!context.mounted) return;
+      setTabState(() {});
+      // A test must not open and stop another capture on the shared Windows
+      // ADM while a call is using it. The call is already capturing this input.
+      if (_voice != null && !kIsWeb) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Microphone selected for current call')),
+        );
+        return;
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        'audio': kIsWeb
+            ? {
+                'deviceId': {
+                  'exact': systemDefault ? 'default' : device.deviceId,
+                },
+              }
+            : {
+                'optional': [
+                  {'sourceId': device.deviceId},
+                ],
+              },
+        'video': false,
+      });
+      if (stream.getAudioTracks().isEmpty) {
+        throw StateError('no microphone track');
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Microphone is working')));
+      }
+    } catch (error) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Microphone test failed: $error')),
+        );
+      }
+    } finally {
+      if (stream != null) {
+        for (final track in stream.getTracks()) {
+          try {
+            await track.stop().timeout(const Duration(seconds: 3));
+          } catch (_) {}
+        }
+        try {
+          await stream.dispose().timeout(const Duration(seconds: 3));
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<bool> _selectAudioOutputDevice(String? deviceId) async {
     var selected = false;
     final voice = _voice;
     if (voice != null) {
@@ -3881,27 +4161,62 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       selected = true;
     } else {
       try {
-        await Helper.selectAudioOutput(deviceId);
+        final snapshot = await _enumerateAudioDevices();
+        final output = preferredAudioDevice(
+          snapshot.devices,
+          'audiooutput',
+          deviceId,
+          systemDefaultId: snapshot.defaults.outputId,
+        );
+        if (output == null) return false;
+        await Helper.selectAudioOutput(
+          output.deviceId,
+        ).timeout(const Duration(seconds: 3));
         selected = true;
       } catch (_) {}
     }
-    if (selected) await _settings?.setAudioOutputDevice(deviceId);
+    if (selected) {
+      try {
+        await _settings?.setAudioOutputDevice(deviceId);
+      } catch (error) {
+        if (mounted) {
+          _setError('Could not save audio output', details: '$error');
+        }
+        return false;
+      }
+    }
     return selected;
   }
 
   Future<void> _testAudioOutput(
     BuildContext context,
     MediaDeviceInfo device,
-    StateSetter setTabState,
-  ) async {
+    StateSetter setTabState, {
+    bool systemDefault = false,
+  }) async {
     try {
-      if (!await _selectAudioOutputDevice(device.deviceId)) {
+      if (!await _selectAudioOutputDevice(
+        systemDefault ? null : device.deviceId,
+      )) {
         throw StateError('output unavailable');
       }
+      if (!context.mounted) return;
       setTabState(() {});
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+        var endpoint = device.deviceId;
+        if (systemDefault) {
+          final snapshot = await _enumerateAudioDevices();
+          endpoint =
+              preferredAudioDevice(
+                snapshot.devices,
+                'audiooutput',
+                null,
+                systemDefaultId: snapshot.defaults.outputId,
+              )?.deviceId ??
+              endpoint;
+        }
         final played = await _windowsAudioOutput.invokeMethod<bool>('test', {
-          'deviceId': device.deviceId,
+          'deviceId': endpoint,
         });
         if (played != true) throw StateError('output unavailable');
         return;
@@ -4353,14 +4668,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 children: [
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('AI bot'),
+                    title: const Text('Share AI compute'),
                     subtitle: const Text(
                       'Respond to @bot requests from other peers using your local model',
                     ),
-                    value: _settings?.contributeCompute ?? true,
-                    onChanged: (v) {
-                      unawaited(_settings?.setContributeCompute(v));
-                      setTabState(() {});
+                    value: _settings?.contributeCompute ?? false,
+                    onChanged: (v) async {
+                      if (!v) _bot?.cancel();
+                      try {
+                        await _settings?.setContributeCompute(v);
+                        if (context.mounted) setTabState(() {});
+                      } catch (error) {
+                        if (mounted) {
+                          _setError(
+                            'Could not save AI setting',
+                            details: '$error',
+                          );
+                        }
+                      }
                     },
                   ),
                   const Divider(height: 24),
@@ -4382,14 +4707,27 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         title: Text(model.name),
                         subtitle: Text('${model.size} · ${model.description}'),
                         onTap: downloaded.contains(model.id)
-                            ? () {
-                                unawaited(_settings?.setActiveModel(model.id));
-                                _bot = null;
-                                InferenceBot.tryCreate(
-                                  modelId: model.id,
-                                  expectedSha256: model.sha256,
-                                ).then((b) => _bot = b);
-                                setTabState(() {});
+                            ? () async {
+                                try {
+                                  await _settings?.setActiveModel(model.id);
+                                  _bot = null;
+                                  final bot = await InferenceBot.tryCreate(
+                                    modelId: model.id,
+                                    expectedSha256: model.sha256,
+                                  );
+                                  if (mounted &&
+                                      _settings?.activeModel == model.id) {
+                                    _bot = bot;
+                                  }
+                                  if (context.mounted) setTabState(() {});
+                                } catch (error) {
+                                  if (mounted) {
+                                    _setError(
+                                      'Could not open AI model',
+                                      details: '$error',
+                                    );
+                                  }
+                                }
                               }
                             : null,
                         trailing: _downloadingModel == model.id
@@ -4438,9 +4776,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _ModelInfo model,
     void Function(void Function()) setTabState,
   ) async {
-    final path = await InferenceBot.pathFor(model.id);
-    final file = File(path);
-    final partial = File('$path.part');
+    if (_downloadingModel != null) return;
+    _downloadingModel = model.id;
+    _downloadProgress = 0;
+    File? pendingFile;
     final client = HttpClient();
     void updateTab(void Function() update) {
       if (!mounted) return;
@@ -4451,11 +4790,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
 
-    updateTab(() {
-      _downloadingModel = model.id;
-      _downloadProgress = 0;
-    });
+    updateTab(() {});
     try {
+      final path = await InferenceBot.pathFor(model.id);
+      final file = File(path);
+      final partial = File('$path.part');
+      pendingFile = partial;
       if (await partial.exists()) await partial.delete();
       final request = await client.getUrl(Uri.parse(model.url));
       final response = await request.close();
@@ -4518,10 +4858,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       await File('$path.sha256').writeAsString(model.sha256, flush: true);
       // Auto-select the newly downloaded model.
       await _settings?.setActiveModel(model.id);
-      _bot = await InferenceBot.tryCreate(
+      final bot = await InferenceBot.tryCreate(
         modelId: model.id,
         expectedSha256: model.sha256,
       );
+      if (mounted && _settings?.activeModel == model.id) _bot = bot;
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -4530,7 +4871,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     } catch (e) {
       // Clean up partial download.
       try {
-        if (await partial.exists()) await partial.delete();
+        if (await pendingFile?.exists() == true) await pendingFile!.delete();
       } catch (_) {}
       if (mounted) {
         ScaffoldMessenger.of(
@@ -4539,10 +4880,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     } finally {
       client.close(force: true);
-      updateTab(() {
-        _downloadingModel = null;
-        _downloadProgress = null;
-      });
+      _downloadingModel = null;
+      _downloadProgress = null;
+      updateTab(() {});
     }
   }
 
@@ -4655,6 +4995,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _bot?.cancel();
+    for (final pending in _pendingInference.values) {
+      if (!pending.completer.isCompleted) pending.completer.complete(null);
+    }
+    _pendingInference.clear();
     _voiceBarDisposed = true;
     _voiceBar.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -4723,8 +5068,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // @bot trigger — broadcast an inference request to the mesh.
     if (raw.startsWith('@bot ')) {
       final prompt = raw.substring(5).trim();
-      if (prompt.isNotEmpty) {
-        _requestInference(prompt);
+      if (prompt.isNotEmpty && session != null) {
+        _requestInference(prompt, session);
       }
     }
     // Fire effect: if 4+ messages in 5 seconds, ignite the composer.
@@ -6056,6 +6401,67 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   // --- screen share (Windows) ---
+
+  Future<void> _showFullscreenShare(ScreenView view, String title) async {
+    if (_fullscreenShareHex != null || view.isClosed) return;
+    setState(() => _fullscreenShareHex = view.sharerHex);
+    final desktop =
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.linux ||
+            defaultTargetPlatform == TargetPlatform.macOS);
+    var restoreWindow = false;
+    final navigator = Navigator.of(context);
+    late final PageRoute<void> route;
+    void exit() {
+      if (!navigator.mounted || !route.isActive) return;
+      if (route.isCurrent) {
+        navigator.pop();
+      } else {
+        navigator.removeRoute(route);
+      }
+    }
+
+    void changed() {
+      if (view.isClosed) exit();
+    }
+
+    try {
+      if (desktop) {
+        try {
+          if (!await windowManager.isFullScreen()) {
+            await windowManager.setFullScreen(true);
+            restoreWindow = true;
+          }
+        } catch (_) {
+          // The stream can still fill the app if OS fullscreen is unavailable.
+        }
+      }
+      if (!mounted || view.isClosed) return;
+      route = PageRouteBuilder<void>(
+        pageBuilder: (_, _, _) =>
+            ScreenShareFullscreen(view: view, title: title, onExit: exit),
+        transitionsBuilder: (_, animation, _, child) =>
+            FadeTransition(opacity: animation, child: child),
+        transitionDuration: const Duration(milliseconds: 150),
+        reverseTransitionDuration: const Duration(milliseconds: 150),
+      );
+      view.addListener(changed);
+      try {
+        await navigator.push(route);
+        await route.completed;
+      } finally {
+        view.removeListener(changed);
+      }
+    } finally {
+      if (restoreWindow) {
+        try {
+          await windowManager.setFullScreen(false);
+        } catch (_) {}
+      }
+      if (mounted) setState(() => _fullscreenShareHex = null);
+    }
+  }
 
   /// The desktop-webview features (screen share + YouTube watch party) are
   /// Windows-only for now.
@@ -7644,6 +8050,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     icon: const Icon(Icons.stop_screen_share, size: 16),
                     label: const Text('Stop sharing'),
                   ),
+                if (selected != null)
+                  IconButton(
+                    tooltip: 'View fullscreen',
+                    icon: const Icon(Icons.fullscreen),
+                    onPressed: () =>
+                        unawaited(_showFullscreenShare(selected!, headerText)),
+                  ),
               ],
             ),
           ),
@@ -7678,11 +8091,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 aspectRatio: 16 / 9,
                 child: ColoredBox(
                   color: Colors.black,
-                  child: RTCVideoView(
-                    selected.renderer,
-                    objectFit:
-                        RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                  ),
+                  child: selected.sharerHex == _fullscreenShareHex
+                      ? const SizedBox.expand()
+                      : RTCVideoView(
+                          selected.renderer,
+                          objectFit: RTCVideoViewObjectFit
+                              .RTCVideoViewObjectFitContain,
+                        ),
                 ),
               ),
             ),

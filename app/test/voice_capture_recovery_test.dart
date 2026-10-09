@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hearth/audio_device_defaults.dart';
 import 'package:hearth/voice.dart';
 import 'package:hearth/webrtc_mesh.dart';
 import 'package:http/http.dart' as http;
@@ -31,6 +32,10 @@ void main() {
   late WebRtcMesh parent;
   late _CaptureDevices devices;
   VoiceSession? session;
+  var defaults = const AudioDeviceDefaults();
+  Future<AudioDeviceDefaults> Function()? defaultsRequest;
+  var failOutputSelection = false;
+  final audioSelections = <String>[];
 
   void mockEvents(String name) {
     final channel = EventChannel(name);
@@ -44,6 +49,10 @@ void main() {
   setUp(() async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     devices = _CaptureDevices();
+    defaults = const AudioDeviceDefaults();
+    defaultsRequest = null;
+    failOutputSelection = false;
+    audioSelections.clear();
     identity = await Identity.generate();
     parent = WebRtcMesh(
       baseUrl: Uri.parse('https://relay.example'),
@@ -52,7 +61,18 @@ void main() {
       relayFallbackDelay: const Duration(hours: 1),
       client: MockClient((_) async => http.Response('{}', 503)),
     );
-    messenger.setMockMethodCallHandler(rtc, (_) async => null);
+    messenger.setMockMethodCallHandler(rtc, (call) async {
+      if (call.method == 'selectAudioOutput' && failOutputSelection) {
+        throw PlatformException(code: 'output_unavailable');
+      }
+      if (call.method == 'selectAudioInput' ||
+          call.method == 'selectAudioOutput') {
+        audioSelections.add(
+          '${call.method}:${(call.arguments as Map)['deviceId']}',
+        );
+      }
+      return null;
+    });
     messenger.setMockMethodCallHandler(global, (_) async => null);
     mockEvents('xyz.luan/audioplayers.global/events');
     messenger.setMockMethodCallHandler(audio, (call) async {
@@ -92,8 +112,169 @@ void main() {
     enhancedNoiseSuppression: true,
     getUserMedia: devices.getUserMedia,
     enumerateDevices: devices.enumerateDevices,
+    audioDefaults: () => defaultsRequest?.call() ?? Future.value(defaults),
     captureTimeout: captureTimeout,
     onChange: () {},
+  );
+
+  test(
+    'Windows selects actual defaults rather than enumeration order',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      defaults = const AudioDeviceDefaults(
+        inputId: 'mic-2',
+        outputId: 'speaker-2',
+      );
+      final call = await join();
+      final constraint = devices.requests.first['audio'] as Map;
+      expect(constraint['deviceId'], 'speaker-2');
+      expect(constraint['optional'], [
+        {'sourceId': 'mic-2'},
+      ]);
+      expect(call.audioInputId, 'mic-2');
+      expect(call.audioOutputId, 'speaker-2');
+    },
+  );
+
+  test(
+    'live default changes preserve mute and do not open extra captures',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      defaults = const AudioDeviceDefaults(
+        inputId: 'mic',
+        outputId: 'speaker-1',
+      );
+      final call = await join();
+      call.toggleMute();
+      defaults = const AudioDeviceDefaults(
+        inputId: 'mic-2',
+        outputId: 'speaker-2',
+      );
+      await call.refreshAudioDevices();
+      expect(call.audioInputId, 'mic-2');
+      expect(call.audioOutputId, 'speaker-2');
+      expect(call.isMuted, isTrue);
+      expect(devices.requests, hasLength(1));
+      expect(audioSelections, contains('selectAudioInput:mic-2'));
+      expect(audioSelections, contains('selectAudioOutput:speaker-2'));
+    },
+  );
+
+  test('fixed output ignores defaults until reset to system mode', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final call = await join();
+    expect(await call.setAudioOutput('speaker-1'), isTrue);
+    defaults = const AudioDeviceDefaults(outputId: 'speaker-2');
+    await call.refreshAudioDevices();
+    expect(call.audioOutputId, 'speaker-1');
+    expect(await call.setAudioOutput(null), isTrue);
+    expect(call.audioOutputId, 'speaker-2');
+    defaults = const AudioDeviceDefaults(outputId: 'speaker-1');
+    await call.refreshAudioDevices();
+    expect(call.audioOutputId, 'speaker-1');
+  });
+
+  test(
+    'reselecting the current speaker restarts the native output route',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final call = await join();
+      audioSelections.clear();
+      expect(await call.setAudioOutput(call.audioOutputId), isTrue);
+      expect(audioSelections, ['selectAudioOutput:speaker-1']);
+      expect(devices.requests, hasLength(1));
+    },
+  );
+
+  test('playback recovery preserves mute, deafen and fixed output', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final call = await join();
+    await call.setAudioOutput('speaker-2');
+    call.toggleDeafen();
+    await call.setVolume('peer', 0);
+    defaults = const AudioDeviceDefaults(outputId: 'speaker-1');
+    audioSelections.clear();
+    expect(await call.recoverAudioPlayback(), isTrue);
+    expect(audioSelections, ['selectAudioOutput:speaker-2']);
+    expect(call.isMuted, isTrue);
+    expect(call.isDeafened, isTrue);
+    expect(call.volumeOf('peer'), 0);
+    expect(devices.requests, hasLength(1));
+  });
+
+  test(
+    'playback recovery reports unavailable devices and stops on leave',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final call = await join();
+      devices.removed.addAll(['speaker-1', 'speaker-2']);
+      expect(await call.recoverAudioPlayback(), isFalse);
+      expect(call.diagnosticReport(), contains('Speaker route failed'));
+      await call.leave();
+      audioSelections.clear();
+      expect(await call.recoverAudioPlayback(), isFalse);
+      expect(audioSelections, isEmpty);
+    },
+  );
+
+  test(
+    'a failed speaker reset can be retried without reopening capture',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final call = await join();
+      failOutputSelection = true;
+      expect(await call.recoverAudioPlayback(), isFalse);
+      expect(call.diagnosticReport(), contains('Speaker route failed'));
+      failOutputSelection = false;
+      expect(await call.recoverAudioPlayback(), isTrue);
+      expect(call.diagnosticReport(), isNot(contains('Speaker route failed')));
+      expect(devices.requests, hasLength(1));
+    },
+  );
+
+  test('leave during a defaults query cannot reroute a later call', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final call = await join();
+    final pending = Completer<AudioDeviceDefaults>();
+    var queried = false;
+    defaultsRequest = () {
+      queried = true;
+      return pending.future;
+    };
+    final recovery = call.recoverAudioPlayback();
+    await _until(() => queried);
+    await call.leave();
+    audioSelections.clear();
+    pending.complete(const AudioDeviceDefaults(outputId: 'speaker-2'));
+    expect(await recovery, isFalse);
+    expect(audioSelections, isEmpty);
+  });
+
+  test('unplugged fixed output returns after reconnection', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    defaults = const AudioDeviceDefaults(outputId: 'speaker-1');
+    final call = await join();
+    expect(await call.setAudioOutput('speaker-2'), isTrue);
+    devices.removed.add('speaker-2');
+    await call.refreshAudioDevices();
+    expect(call.audioOutputId, 'speaker-1');
+    devices.removed.clear();
+    await call.refreshAudioDevices();
+    expect(call.audioOutputId, 'speaker-2');
+  });
+
+  test(
+    'capture recovery follows updated system output without pinning old default',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      defaults = const AudioDeviceDefaults(outputId: 'speaker-1');
+      final call = await join();
+      defaults = const AudioDeviceDefaults(outputId: 'speaker-2');
+      devices.streams.first.track.onEnded!();
+      await _until(() => devices.streams.first.disposed);
+      expect((devices.requests.last['audio'] as Map)['deviceId'], 'speaker-2');
+      expect(call.audioOutputId, 'speaker-2');
+    },
   );
 
   test(
@@ -237,9 +418,15 @@ class _CaptureDevices {
   Completer<MediaStream>? pending;
   bool failConstrained = false;
   bool empty = false;
+  final removed = <String>{};
 
   Future<List<MediaDeviceInfo>> enumerateDevices() async => [
     MediaDeviceInfo(deviceId: 'mic', label: 'Microphone', kind: 'audioinput'),
+    MediaDeviceInfo(
+      deviceId: 'mic-2',
+      label: 'Microphone 2',
+      kind: 'audioinput',
+    ),
     MediaDeviceInfo(
       deviceId: 'speaker-1',
       label: 'Speaker 1',
@@ -250,7 +437,7 @@ class _CaptureDevices {
       label: 'Speaker 2',
       kind: 'audiooutput',
     ),
-  ];
+  ].where((device) => !removed.contains(device.deviceId)).toList();
 
   Future<MediaStream> getUserMedia(Map<String, dynamic> constraints) async {
     requests.add(constraints);

@@ -3,10 +3,18 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hearth/voice.dart';
 
+import 'support/audio_device_checks.dart';
+
 MediaDeviceInfo _device(String id, String kind) =>
     MediaDeviceInfo(deviceId: id, label: id, kind: kind);
 
 void main() {
+  test(
+    'audio selection follows OS defaults without losing fixed preferences',
+    () {
+      expect(checkAudioDevicePolicy(), 12);
+    },
+  );
   test('preferred audio device keeps an available saved choice', () {
     final devices = [
       _device('mic-1', 'audioinput'),

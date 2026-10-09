@@ -233,15 +233,49 @@ Fresh offers replace retired connections; signed attempt IDs keep delayed answer
 and ICE from an earlier connection out of its replacement. Both devices must use
 the updated signalling implementation. Voice media remains direct P2P, with no TURN.
 
+Windows audio settings offer **System default** for microphone and speakers,
+using Windows' actual standard (eConsole) endpoint IDs rather than enumeration
+order. Active calls follow default changes and device removals, while explicit
+choices remain saved and take precedence when reconnected. Device switches are
+serialized with capture recovery. Testing a microphone during a Windows call
+selects its existing capture rather than opening/stopping a second capture.
+The Windows speaker route is reasserted when the first remote audio arrives and
+on call recovery. Selecting the same speaker again also reasserts that route;
+Settings' audio tab offers a voice-playback reconnect button during a call.
+If audio RTP keeps arriving but jitter-buffer output stalls for 15 seconds,
+Hearth attempts a rate-limited speaker reset, then repairs the affected P2P
+receiver if the stall persists. Missing statistics, deafen, and per-peer mute
+do not trigger this recovery. Voice diagnostics distinguish incoming packets
+from jitter-buffer output; neither counter by itself proves audible sound.
+Windows builds apply a source-checked `flutter_webrtc` 1.6.0 patch so Unified
+Plan and streamless receiver tracks remain accessible to mute/volume controls.
+Soundboard clips and speaker test tones use separate playback paths, so hearing
+those does not establish that WebRTC voice playout is working.
+
+Incoming screen shares have a fullscreen viewer. It reuses the same P2P stream,
+preserves aspect ratio, exits using Escape or the fullscreen-exit button, and
+restores the prior desktop window fullscreen state. Temporary reconnects keep
+the viewer open; ending the share or leaving voice closes it automatically.
+
 ### AI bot (local LLM, decentralised hosting)
 [`app/lib/inference_bot.dart`](app/lib/inference_bot.dart) provides an **@bot**
 you can mention in any channel. The bot runs a GGUF model locally on whichever
 peer has one installed — inference is **not distributed** across devices (the full
 model runs on one machine), but hosting is **decentralised**: there's no AI server,
-any peer can volunteer by downloading a model in Settings → AI. Requests are
-broadcast via the mesh; the first available peer responds. Uses llama.cpp under
-the hood (via fllama FFI); runs on CPU by default, with automatic GPU offload on
-macOS (Metal) and Linux/Windows (CUDA if available).
+any peer can volunteer by downloading a model and enabling **Share AI compute**
+in Settings → AI (peer-serving is opt-in). Your own model is tried locally without
+broadcasting; without a local model, requests use the mesh and the first available
+volunteer responds. Uses llama.cpp via fllama FFI, with CPU-only execution, one
+native inference slot and a bounded context. Timeout requests cancellation but
+keeps the engine busy until the final native callback. Prompts are limited to
+1536 UTF-8 bytes and output to 256 tokens.
+
+After `flutter pub get`, run `node .github/scripts/patch-fllama.mjs` from the repo
+root before native builds or tests. CI and release workflows do this automatically.
+This small, version-checked patch fixes the pinned dependency's obsolete CPU
+portability option, removes forced Android dot-product instructions, and prevents
+four native slots from splitting the context or inflating memory use. Do not run
+native builds on the resource-constrained development host; see `AGENTS.md`.
 
 ### The relay (backend)
 [`backend/`](backend) is a small **Hono** app, and a *dumb relay*: it verifies each

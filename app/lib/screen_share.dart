@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:core/core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'webrtc_mesh.dart';
@@ -126,7 +126,7 @@ class ScreenBroadcast {
 /// sharer's `screen:<channelId>:<sharerHex>`, rendering their video into
 /// [renderer]. Answer-only ([WebRtcMesh.forceInitiator] = false) — the sharer
 /// drives the connection.
-class ScreenView {
+class ScreenView extends ChangeNotifier {
   ScreenView._(this.sharerHex, this._mesh, this.renderer);
 
   /// Pubkey hex of the peer whose screen this shows.
@@ -138,6 +138,7 @@ class ScreenView {
   final WebRtcMesh _mesh;
   StreamSubscription<void>? _sub;
   bool _closed = false;
+  bool get isClosed => _closed;
 
   /// Whether a live video stream is currently bound — false while first
   /// connecting, and briefly during a reconnect.
@@ -170,6 +171,7 @@ class ScreenView {
       onRemoteStream: (peer, stream) {
         if (view._closed || peer != sharerHex) return;
         renderer.srcObject = stream;
+        view.notifyListeners();
         onChange();
       },
       onPeerLeft: (peer) {
@@ -178,6 +180,7 @@ class ScreenView {
         // view is torn down only on an explicit stop or when the sharer leaves
         // the voice call (handled a layer up).
         renderer.srcObject = null;
+        view.notifyListeners();
         onChange();
       },
     );
@@ -189,12 +192,17 @@ class ScreenView {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    notifyListeners();
     try {
       await _sub?.cancel();
       await _mesh.close();
     } finally {
       renderer.srcObject = null;
-      await renderer.dispose();
+      try {
+        await renderer.dispose();
+      } finally {
+        dispose();
+      }
     }
   }
 

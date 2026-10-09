@@ -64,18 +64,20 @@ class SettingsStore {
   Future<void> setNoiseSuppression(bool enabled) =>
       _box.put(_noiseKey, enabled.toString());
 
-  /// Preferred WebRTC capture device. A missing device falls back to the first
-  /// device currently reported by the platform.
+  /// Null follows the OS default. A removed explicit device also falls back to
+  /// that default without discarding the saved choice.
   String? get audioInputDevice => _box.get(_audioInputKey);
 
-  Future<void> setAudioInputDevice(String deviceId) =>
-      _box.put(_audioInputKey, deviceId);
+  Future<void> setAudioInputDevice(String? deviceId) => deviceId == null
+      ? _box.delete(_audioInputKey)
+      : _box.put(_audioInputKey, deviceId);
 
   /// Preferred WebRTC playout device used for voice calls.
   String? get audioOutputDevice => _box.get(_audioOutputKey);
 
-  Future<void> setAudioOutputDevice(String deviceId) =>
-      _box.put(_audioOutputKey, deviceId);
+  Future<void> setAudioOutputDevice(String? deviceId) => deviceId == null
+      ? _box.delete(_audioOutputKey)
+      : _box.put(_audioOutputKey, deviceId);
 
   static const _themeKey = 'themeMode';
 
@@ -86,9 +88,8 @@ class SettingsStore {
 
   static const _computeKey = 'contributeCompute';
 
-  /// Whether this device serves as an AI bot for peers (on by default).
-  /// The model runs locally on this device's CPU (and GPU if available via Metal/CUDA).
-  bool get contributeCompute => _box.get(_computeKey) != 'false';
+  /// Peer-triggered native inference is opt-in; local requests are independent.
+  bool get contributeCompute => _box.get(_computeKey) == 'true';
 
   Future<void> setContributeCompute(bool enabled) =>
       _box.put(_computeKey, enabled.toString());

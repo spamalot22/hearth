@@ -8,9 +8,12 @@ import 'package:core/core.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'audio_device_defaults.dart';
+import 'audio_device_policy.dart';
 import 'diagnostics.dart';
 import 'mesh_control.dart';
 import 'voice_delivery_health.dart';
+import 'voice_playout_health.dart';
 import 'webrtc_mesh.dart';
 
 /// A live voice call in a channel: a second [WebRtcMesh] on a `voice:<channelId>`
@@ -32,6 +35,9 @@ class VoiceSession {
     this._audioInputId,
     this._getUserMedia,
     this._enumerateDevices,
+    this._readAudioDefaults,
+    this._activeInputId,
+    this._preferredOutputId,
   );
 
   /// The channel this call belongs to.
@@ -39,12 +45,21 @@ class VoiceSession {
 
   final WebRtcMesh _mesh;
   MediaStream _localStream;
-  final Object _audioConstraint;
-  final String? _audioInputId;
+  Object _audioConstraint;
+  String? _audioInputId;
+  String? _activeInputId;
+  String? _preferredOutputId;
   final Future<MediaStream> Function(Map<String, dynamic>) _getUserMedia;
   final Future<List<MediaDeviceInfo>> Function() _enumerateDevices;
+  final Future<AudioDeviceDefaults> Function() _readAudioDefaults;
   final void Function() _onChange;
   String? _audioOutputId;
+  Future<void> _audioUpdates = Future<void>.value();
+  Timer? _audioDefaultsTimer;
+  bool _refreshingAudioDevices = false;
+
+  String? get audioInputId => _activeInputId;
+  String? get audioOutputId => _audioOutputId;
 
   final AudioPlayer _cuePlayer = AudioPlayer();
   final DateTime _joinedAt = DateTime.now();
@@ -66,6 +81,15 @@ class VoiceSession {
   bool _loggedInboundRtp = false;
   bool _loggedOutboundRtp = false;
   final Map<String, VoiceDeliveryHealth> _deliveryHealth = {};
+  final Map<String, VoicePlayoutHealth> _playoutHealth = {};
+  final Map<String, String> _playoutStats = {};
+  final Map<String, String> _volumeErrors = {};
+  final Map<String, Future<void>> _volumeUpdates = {};
+  final Map<String, int> _playoutRepairSamples = {};
+  bool _playoutPrepared = false;
+  DateTime? _playoutRepairAt;
+  int _playoutRepairs = 0;
+  String? _playoutError;
   final Map<String, DateTime> _receiptSentAt = {};
   final Map<String, DateTime> _peerRepairAt = {};
   VoiceCaptureHealth _captureHealth = VoiceCaptureHealth();
@@ -84,8 +108,16 @@ class VoiceSession {
 
   String diagnosticReport({Iterable<String>? peers}) => [
     'Microphone tracks: ${_localStream.getAudioTracks().length}',
+    'Audio selection: input=${_audioInputId == null ? "system default" : "fixed"}; '
+        'output=${_preferredOutputId == null ? "system default" : "fixed"}',
     'Muted: $isMuted; deafened: $isDeafened',
     'Audio RTP observed: sent=$_loggedOutboundRtp received=$_loggedInboundRtp',
+    'Remote audio tracks: ${_remoteStreams.values.fold<int>(0, (count, stream) => count + stream.getAudioTracks().length)}; '
+        'enabled: ${_remoteStreams.values.expand((stream) => stream.getAudioTracks()).where((track) => track.enabled).length}',
+    'Playback repairs: $_playoutRepairs; speaker route reasserted=$_playoutPrepared',
+    if (_playoutError != null) 'Playback recovery: $_playoutError',
+    for (final error in _volumeErrors.values) 'Remote playback: $error',
+    for (final stats in _playoutStats.values) 'Audio receiver: $stats',
     'Capture ended=$_captureEnded suspended=$_captureSuspended repairing=$_captureRepairing',
     'Capture repairs: $_captureRepairs; media link repairs: $_mediaRepairs',
     if (_captureError != null) 'Capture recovery: $_captureError',
@@ -118,6 +150,10 @@ class VoiceSession {
     if (_closed) return;
     _captureHealth = VoiceCaptureHealth();
     _deliveryHealth.clear();
+    _playoutHealth.clear();
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      unawaited(recoverAudioPlayback());
+    }
     if (_captureEnded ||
         (_captureSuspended && !isMuted) ||
         _localStream.getAudioTracks().isEmpty) {
@@ -152,11 +188,13 @@ class VoiceSession {
     Uint8List? channelAuthKey,
     Future<MediaStream> Function(Map<String, dynamic>)? getUserMedia,
     Future<List<MediaDeviceInfo>> Function()? enumerateDevices,
+    Future<AudioDeviceDefaults> Function()? audioDefaults,
     Duration captureTimeout = const Duration(seconds: 30),
   }) async {
     final openCapture = getUserMedia ?? navigator.mediaDevices.getUserMedia;
     final listDevices =
         enumerateDevices ?? navigator.mediaDevices.enumerateDevices;
+    final readDefaults = audioDefaults ?? readAudioDeviceDefaults;
     Future<MediaStream> capture(Object constraint) =>
         _openCapture(openCapture, constraint, timeout: captureTimeout);
     // On desktop, select devices before opening the first real capture stream.
@@ -165,6 +203,7 @@ class VoiceSession {
     // throwaway microphone before the configured devices are applied.
     Object audioConstraint = true;
     String? activeOutputId = audioOutputId;
+    String? activeInputId;
     if (defaultTargetPlatform != TargetPlatform.android &&
         defaultTargetPlatform != TargetPlatform.iOS) {
       if (kIsWeb) {
@@ -185,10 +224,22 @@ class VoiceSession {
           await _initializeAudioFactory();
           devices = await listDevices().timeout(const Duration(seconds: 3));
         }
-        final mic = preferredAudioDevice(devices, 'audioinput', audioInputId);
+        final defaults = await readDefaults();
+        final mic = preferredAudioDevice(
+          devices,
+          'audioinput',
+          audioInputId,
+          systemDefaultId: defaults.inputId,
+        );
         final output = kIsWeb
             ? null
-            : preferredAudioDevice(devices, 'audiooutput', audioOutputId);
+            : preferredAudioDevice(
+                devices,
+                'audiooutput',
+                audioOutputId,
+                systemDefaultId: defaults.outputId,
+              );
+        activeInputId = mic?.deviceId;
         if (output != null) activeOutputId = output.deviceId;
         if (mic != null || output != null || enhancedNoiseSuppression) {
           audioConstraint = desktopVoiceAudioConstraint(
@@ -306,6 +357,9 @@ class VoiceSession {
         audioInputId,
         openCapture,
         listDevices,
+        readDefaults,
+        activeInputId,
+        audioOutputId,
       );
       session._bindCapture();
       session._externalSignalSub = signalingMesh?.externalSignals
@@ -327,6 +381,12 @@ class VoiceSession {
         const Duration(milliseconds: 250),
         (_) => unawaited(session?._pollLevels()),
       );
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+        session._audioDefaultsTimer = Timer.periodic(
+          const Duration(seconds: 3),
+          (_) => unawaited(session?.refreshAudioDevices()),
+        );
+      }
       unawaited(session._playCue(connect: true)); // you joined
       return session;
     } catch (_) {
@@ -369,7 +429,12 @@ class VoiceSession {
         if (!identical(_mesh.connections[entry.key], entry.value)) continue;
         int? sentPackets;
         int? receivedPackets;
+        int? emittedSamples;
         for (final report in reports) {
+          // Some native versions use mediaType rather than kind. Never treat
+          // video jitter-buffer frames as audio samples.
+          final kind = report.values['kind'] ?? report.values['mediaType'];
+          if (kind != null && kind != 'audio') continue;
           final samples = report.values['totalSamplesDuration'];
           if (report.type == 'media-source' &&
               samples is num &&
@@ -385,6 +450,13 @@ class VoiceSession {
               packetsReceived.isFinite &&
               packetsReceived >= 0) {
             receivedPackets = (receivedPackets ?? 0) + packetsReceived.toInt();
+          }
+          final emitted = report.values['jitterBufferEmittedCount'];
+          if (report.type == 'inbound-rtp' &&
+              emitted is num &&
+              emitted.isFinite &&
+              emitted >= 0) {
+            emittedSamples = (emittedSamples ?? 0) + emitted.toInt();
           }
           if (!_loggedInboundRtp &&
               report.type == 'inbound-rtp' &&
@@ -420,6 +492,28 @@ class VoiceSession {
           }
         }
         final now = DateTime.now();
+        _playoutStats[entry.key] =
+            'packets=${receivedPackets ?? "unavailable"}; '
+            'jitter-buffer samples=${emittedSamples ?? "unavailable"}; '
+            'volume=${volumeOf(entry.key)}';
+        if (!kIsWeb &&
+            defaultTargetPlatform == TargetPlatform.windows &&
+            _playoutHealth
+                .putIfAbsent(entry.key, VoicePlayoutHealth.new)
+                .sample(
+                  packets: receivedPackets,
+                  emitted: emittedSamples,
+                  enabled: !_deafened && volumeOf(entry.key) > 0,
+                  now: now,
+                )) {
+          _repairPlayout(entry.key, emittedSamples!);
+        }
+        final repairedAt = _playoutRepairSamples[entry.key];
+        if (repairedAt != null &&
+            emittedSamples != null &&
+            emittedSamples > repairedAt) {
+          _playoutRepairSamples.remove(entry.key);
+        }
         if (receivedPackets != null &&
             !_deafened &&
             volumeOf(entry.key) > 0 &&
@@ -446,6 +540,8 @@ class VoiceSession {
       } catch (_) {
         // A transient stats failure just skips this tick.
         _deliveryHealth.remove(entry.key);
+        _playoutHealth.remove(entry.key);
+        _playoutStats.remove(entry.key);
       }
     }
     if (_closed) return;
@@ -570,7 +666,9 @@ class VoiceSession {
     retired: () => _closed,
   );
 
-  Future<void> _repairCapture() async {
+  Future<void> _repairCapture() => _scheduleAudioUpdate(_repairCaptureLocked);
+
+  Future<void> _repairCaptureLocked() async {
     final now = DateTime.now();
     if (_closed ||
         _captureRepairing ||
@@ -593,15 +691,19 @@ class VoiceSession {
           final devices = await _enumerateDevices().timeout(
             const Duration(seconds: 3),
           );
+          final defaults = await _readAudioDefaults();
+          if (_closed) return;
           final input = preferredAudioDevice(
             devices,
             'audioinput',
             _audioInputId,
+            systemDefaultId: defaults.inputId,
           );
           final output = preferredAudioDevice(
             devices,
             'audiooutput',
-            _audioOutputId,
+            _preferredOutputId,
+            systemDefaultId: defaults.outputId,
           );
           constraint = desktopVoiceAudioConstraint(
             input: input,
@@ -616,13 +718,17 @@ class VoiceSession {
             await Helper.selectAudioInput(
               input.deviceId,
             ).timeout(const Duration(seconds: 3));
+            if (_closed) return;
+            _activeInputId = input.deviceId;
           }
           if (output != null) {
             await Helper.selectAudioOutput(
               output.deviceId,
             ).timeout(const Duration(seconds: 3));
+            if (_closed) return;
             _audioOutputId = output.deviceId;
           }
+          _audioConstraint = constraint;
         } catch (_) {}
       }
       if (_closed) return;
@@ -695,50 +801,66 @@ class VoiceSession {
     final update = Object();
     _remoteUpdates[peerHex] = update;
     bool current() => !_closed && identical(_remoteUpdates[peerHex], update);
+    final isNew = !_remoteStreams.containsKey(peerHex);
     // Apply hard mute before asynchronous renderer setup or device selection.
     _remoteStreams[peerHex] = remote;
     for (final track in remote.getAudioTracks()) {
       track.enabled = !_deafened && volumeOf(peerHex) > 0;
     }
-    final isNew = !_remotes.containsKey(peerHex);
-    final renderer = _remotes[peerHex] ?? RTCVideoRenderer();
-    if (isNew) {
-      try {
-        await renderer.initialize();
-      } catch (error) {
-        HearthDiagnostics.log(
-          '[hearth][voice] remote renderer initialization failed: ${error.runtimeType}',
-        );
+    // Windows audio is rendered by the ADM, not a video texture. A missing or
+    // failed video renderer must not block speaker routing or audio controls.
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
+      final renderer = _remotes[peerHex] ?? RTCVideoRenderer();
+      if (!_remotes.containsKey(peerHex)) {
         try {
+          await renderer.initialize();
+        } catch (error) {
+          HearthDiagnostics.log(
+            '[hearth][voice] remote renderer initialization failed: ${error.runtimeType}',
+          );
+          try {
+            await renderer.dispose();
+          } catch (_) {}
+          return;
+        }
+        if (!current()) {
           await renderer.dispose();
-        } catch (_) {}
-        return;
+          return;
+        }
+        _remotes[peerHex] = renderer;
       }
-      if (!current()) {
-        await renderer.dispose();
-        return;
-      }
-      _remotes[peerHex] = renderer;
-    }
-    renderer.srcObject = remote;
-    final outputId = _audioOutputId;
-    if (kIsWeb && outputId != null && outputId.isNotEmpty) {
-      try {
-        final selected = await renderer.audioOutput(outputId);
-        HearthDiagnostics.log(
-          '[hearth][voice] remote audio output '
-          '${selected ? 'attached' : 'attachment failed'}',
-        );
-      } catch (error) {
-        HearthDiagnostics.log(
-          '[hearth][voice] remote audio output attachment failed: '
-          '${error.runtimeType}',
-        );
+      renderer.srcObject = remote;
+      final outputId = _audioOutputId;
+      if (kIsWeb && outputId != null && outputId.isNotEmpty) {
+        try {
+          final selected = await renderer.audioOutput(outputId);
+          HearthDiagnostics.log(
+            '[hearth][voice] remote audio output '
+            '${selected ? 'attached' : 'attachment failed'}',
+          );
+        } catch (error) {
+          HearthDiagnostics.log(
+            '[hearth][voice] remote audio output attachment failed: '
+            '${error.runtimeType}',
+          );
+        }
       }
     }
     if (!current()) return;
     await _applyVolume(peerHex); // honour deafen / a prior volume for this peer
     if (!current()) return;
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.windows &&
+        !_playoutPrepared) {
+      // Reassert the route after the receiver exists, not just before capture.
+      // Native ADM selection before negotiation is not proof of live playout.
+      await _scheduleAudioUpdate(() async {
+        if (!_playoutPrepared && current()) {
+          await _recoverAudioPlaybackLocked();
+        }
+      });
+      if (!current()) return;
+    }
     // Cue a join only for peers arriving after the initial mesh-connect burst,
     // so joining a busy call doesn't fire one blip per person already there.
     if (isNew && DateTime.now().difference(_joinedAt).inMilliseconds > 1500) {
@@ -751,14 +873,19 @@ class VoiceSession {
     _remoteUpdates.remove(peerHex);
     _levels.remove(peerHex);
     final renderer = _remotes.remove(peerHex);
-    _remoteStreams.remove(peerHex);
+    final hadStream = _remoteStreams.remove(peerHex) != null;
     _deliveryHealth.remove(peerHex);
+    _playoutHealth.remove(peerHex);
+    _playoutStats.remove(peerHex);
+    _volumeErrors.remove(peerHex);
+    _volumeUpdates.remove(peerHex);
+    _playoutRepairSamples.remove(peerHex);
     _receiptSentAt.remove(peerHex);
     if (renderer != null) {
       renderer.srcObject = null;
       unawaited(renderer.dispose().catchError((Object _) {}));
-      unawaited(_playCue(connect: false));
     }
+    if (hadStream) unawaited(_playCue(connect: false));
     if (!_closed) _onChange();
   }
 
@@ -808,23 +935,211 @@ class VoiceSession {
 
   /// Switches WebRTC playout immediately and remembers the choice for remote
   /// renderers that arrive later in this call.
-  Future<bool> setAudioOutput(String deviceId) async {
-    if (deviceId.isEmpty) return false;
-    try {
-      if (kIsWeb) {
-        var selected = true;
-        for (final renderer in _remotes.values.toList()) {
-          selected = await renderer.audioOutput(deviceId) && selected;
+  Future<bool> setAudioOutput(String? preferredId) =>
+      _scheduleAudioUpdate(() async {
+        if (_closed || preferredId == '') return false;
+        try {
+          String? deviceId = preferredId;
+          if (kIsWeb) {
+            deviceId ??= 'default';
+            var selected = true;
+            for (final renderer in _remotes.values.toList()) {
+              selected = await renderer.audioOutput(deviceId) && selected;
+            }
+            if (!selected || _closed) return false;
+          } else {
+            final devices = await _enumerateDevices().timeout(
+              const Duration(seconds: 3),
+            );
+            final defaults = await _readAudioDefaults();
+            deviceId = preferredAudioDevice(
+              devices,
+              'audiooutput',
+              preferredId,
+              systemDefaultId: defaults.outputId,
+            )?.deviceId;
+            if (deviceId == null || _closed) return false;
+            // An explicit reselection is also a playback restart. The tracked
+            // endpoint ID cannot tell us whether Windows' ADM is still alive.
+            await Helper.selectAudioOutput(
+              deviceId,
+            ).timeout(const Duration(seconds: 3));
+          }
+          if (_closed) return false;
+          _preferredOutputId = preferredId;
+          _audioOutputId = deviceId;
+          _playoutError = null;
+          _onChange();
+          return true;
+        } catch (_) {
+          return false;
         }
-        if (!selected) return false;
-      } else {
-        await Helper.selectAudioOutput(deviceId);
-      }
-      _audioOutputId = deviceId;
-      return true;
-    } catch (_) {
+      });
+
+  /// Restarts only the Windows speaker route, without opening the microphone
+  /// or replacing working P2P links. Does not override deafen or per-peer mute.
+  Future<bool> recoverAudioPlayback() =>
+      _scheduleAudioUpdate(_recoverAudioPlaybackLocked);
+
+  Future<bool> _recoverAudioPlaybackLocked() async {
+    if (_closed || kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
       return false;
     }
+    try {
+      final devices = await _enumerateDevices().timeout(
+        const Duration(seconds: 3),
+      );
+      final defaults = await _readAudioDefaults();
+      if (_closed) return false;
+      final output = preferredAudioDevice(
+        devices,
+        'audiooutput',
+        _preferredOutputId,
+        systemDefaultId: defaults.outputId,
+      );
+      if (output == null) throw StateError('No audio output is available');
+      await Helper.selectAudioOutput(
+        output.deviceId,
+      ).timeout(const Duration(seconds: 3));
+      if (_closed) return false;
+      _audioOutputId = output.deviceId;
+      for (final peer in _remoteStreams.keys.toList()) {
+        await _applyVolume(peer);
+        if (_closed) return false;
+      }
+      _playoutPrepared = true;
+      _playoutError = null;
+      _playoutHealth.clear();
+      HearthDiagnostics.log('[hearth][voice] Windows audio output reasserted');
+      _onChange();
+      return true;
+    } catch (error) {
+      _playoutPrepared = false;
+      _playoutError = 'Speaker route failed (${error.runtimeType})';
+      HearthDiagnostics.log('[hearth][voice] $_playoutError');
+      if (!_closed) _onChange();
+      return false;
+    }
+  }
+
+  void _repairPlayout(String peer, int emitted) {
+    final now = DateTime.now();
+    if (_closed ||
+        (_playoutRepairAt != null &&
+            now.difference(_playoutRepairAt!) < const Duration(seconds: 30))) {
+      return;
+    }
+    _playoutRepairAt = now;
+    _playoutRepairs++;
+    final previousRepair = _playoutRepairSamples[peer];
+    _playoutRepairSamples[peer] = emitted;
+    if (previousRepair == emitted) {
+      // A route reset returned successfully but audio is still not consumed.
+      // Recreate only the affected receiver, using the existing P2P recovery.
+      _repairMediaPeer(peer);
+    }
+    HearthDiagnostics.log(
+      '[hearth][voice] RTP arriving but jitter-buffer output stalled; '
+      'repairing Windows playout',
+    );
+    unawaited(recoverAudioPlayback());
+  }
+
+  Future<bool> setAudioInput(String? preferredId) =>
+      _scheduleAudioUpdate(() async {
+        if (_closed || kIsWeb || preferredId == '') return false;
+        try {
+          final devices = await _enumerateDevices().timeout(
+            const Duration(seconds: 3),
+          );
+          final defaults = await _readAudioDefaults();
+          final input = preferredAudioDevice(
+            devices,
+            'audioinput',
+            preferredId,
+            systemDefaultId: defaults.inputId,
+          );
+          if (input == null || _closed) return false;
+          if (input.deviceId != _activeInputId) {
+            await Helper.selectAudioInput(
+              input.deviceId,
+            ).timeout(const Duration(seconds: 3));
+          }
+          if (_closed) return false;
+          _audioInputId = preferredId;
+          _activeInputId = input.deviceId;
+          _captureHealth = VoiceCaptureHealth();
+          _onChange();
+          return true;
+        } catch (_) {
+          return false;
+        }
+      });
+
+  /// Follow Windows defaults and hotplug fallbacks without overwriting the
+  /// saved explicit preference. All ADM switches serialize with capture repair.
+  Future<void> refreshAudioDevices() async {
+    if (_closed || kIsWeb || _refreshingAudioDevices) return;
+    _refreshingAudioDevices = true;
+    try {
+      await _scheduleAudioUpdate(() async {
+        if (_closed) return;
+        final devices = await _enumerateDevices().timeout(
+          const Duration(seconds: 3),
+        );
+        final defaults = await _readAudioDefaults();
+        if (_closed) return;
+        final input = preferredAudioDevice(
+          devices,
+          'audioinput',
+          _audioInputId,
+          systemDefaultId: defaults.inputId,
+        );
+        final output = preferredAudioDevice(
+          devices,
+          'audiooutput',
+          _preferredOutputId,
+          systemDefaultId: defaults.outputId,
+        );
+        var changed = false;
+        if (input != null && input.deviceId != _activeInputId) {
+          await Helper.selectAudioInput(
+            input.deviceId,
+          ).timeout(const Duration(seconds: 3));
+          if (_closed) return;
+          _activeInputId = input.deviceId;
+          _captureHealth = VoiceCaptureHealth();
+          changed = true;
+        }
+        if (output != null && output.deviceId != _audioOutputId) {
+          await Helper.selectAudioOutput(
+            output.deviceId,
+          ).timeout(const Duration(seconds: 3));
+          if (_closed) return;
+          _audioOutputId = output.deviceId;
+          changed = true;
+        }
+        if (changed) {
+          HearthDiagnostics.log('[hearth][voice] system audio route updated');
+          _onChange();
+        }
+      });
+    } catch (error) {
+      HearthDiagnostics.log(
+        '[hearth][voice] audio route refresh failed: ${error.runtimeType}',
+      );
+    } finally {
+      _refreshingAudioDevices = false;
+    }
+  }
+
+  Future<T> _scheduleAudioUpdate<T>(Future<T> Function() action) {
+    final update = _audioUpdates.then((_) => action());
+    _audioUpdates = update.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return update;
   }
 
   // Your mic is live only when neither muted nor deafened.
@@ -834,18 +1149,46 @@ class VoiceSession {
     }
   }
 
-  Future<void> _applyVolume(String peerHex) async {
+  Future<void> _applyVolume(String peerHex) {
+    if (_closed || !_remoteStreams.containsKey(peerHex)) {
+      return Future<void>.value();
+    }
+    final previous = _volumeUpdates[peerHex] ?? Future<void>.value();
+    final update = previous.then((_) => _applyVolumeLocked(peerHex));
+    final settled = update.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {
+        if (!_closed && _remoteStreams.containsKey(peerHex)) {
+          _volumeErrors[peerHex] =
+              'Volume update failed (${error.runtimeType})';
+          HearthDiagnostics.log('[hearth][voice] ${_volumeErrors[peerHex]}');
+        }
+      },
+    );
+    _volumeUpdates[peerHex] = settled;
+    return settled;
+  }
+
+  Future<void> _applyVolumeLocked(String peerHex) async {
     final stream = _remoteStreams[peerHex];
     if (stream == null) return;
-    final volume = _deafened ? 0.0 : volumeOf(peerHex);
     for (final track in stream.getAudioTracks()) {
+      if (_closed || !identical(_remoteStreams[peerHex], stream)) return;
+      final volume = _deafened ? 0.0 : volumeOf(peerHex);
       track.enabled = volume > 0; // hard mute at 0 (reliable on the receiver)
       try {
         await Helper.setVolume(
           volume,
           track,
         ).timeout(const Duration(seconds: 3));
+        if (!_closed && identical(_remoteStreams[peerHex], stream)) {
+          _volumeErrors.remove(peerHex);
+        }
       } catch (error) {
+        if (!_closed && identical(_remoteStreams[peerHex], stream)) {
+          _volumeErrors[peerHex] =
+              'Volume update failed (${error.runtimeType})';
+        }
         HearthDiagnostics.log(
           '[hearth][voice] volume update failed: ${error.runtimeType}',
         );
@@ -898,6 +1241,7 @@ class VoiceSession {
     if (_closed) return;
     _closed = true;
     _remoteUpdates.clear();
+    _audioDefaultsTimer?.cancel();
     _levelTimer?.cancel();
     // Silence capture immediately; native stop must not delay the leave frame.
     for (final track in _localStream.getTracks()) {
@@ -932,6 +1276,11 @@ class VoiceSession {
     _remoteStreams.clear();
     _levels.clear();
     _deliveryHealth.clear();
+    _playoutHealth.clear();
+    _playoutStats.clear();
+    _volumeErrors.clear();
+    _volumeUpdates.clear();
+    _playoutRepairSamples.clear();
     _receiptSentAt.clear();
     _peerRepairAt.clear();
     _volumes.clear();
@@ -992,16 +1341,16 @@ Uint8List _toneWav(
 MediaDeviceInfo? preferredAudioDevice(
   Iterable<MediaDeviceInfo> devices,
   String kind,
-  String? preferredId,
-) {
-  MediaDeviceInfo? first;
-  for (final device in devices) {
-    if (device.kind != kind || device.deviceId.isEmpty) continue;
-    first ??= device;
-    if (preferredId != null && device.deviceId == preferredId) return device;
-  }
-  return first;
-}
+  String? preferredId, {
+  String? systemDefaultId,
+}) => resolveAudioDevice(
+  devices,
+  kind: kind,
+  kindOf: (device) => device.kind ?? '',
+  idOf: (device) => device.deviceId,
+  preferredId: preferredId,
+  systemDefaultId: systemDefaultId,
+);
 
 /// Builds flutter_webrtc's desktop audio constraint shape. On native desktop,
 /// the plugin intentionally uses `deviceId` for playout and legacy `sourceId`

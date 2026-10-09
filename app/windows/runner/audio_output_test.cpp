@@ -17,6 +17,29 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
+std::string DefaultEndpointId(IMMDeviceEnumerator* enumerator, EDataFlow flow) {
+  ComPtr<IMMDevice> device;
+  if (FAILED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &device))) {
+    return {};
+  }
+  LPWSTR id = nullptr;
+  if (FAILED(device->GetId(&id)) || id == nullptr) return {};
+  const int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, id, -1,
+                                        nullptr, 0, nullptr, nullptr);
+  std::string value;
+  if (length > 0) {
+    value.resize(static_cast<size_t>(length));
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, id, -1,
+                            value.data(), length, nullptr, nullptr) == length) {
+      value.pop_back();  // Remove the terminating null byte.
+    } else {
+      value.clear();
+    }
+  }
+  CoTaskMemFree(id);
+  return value;
+}
+
 std::wstring Utf8ToWide(const std::string& value) {
   if (value.empty()) return {};
   const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
@@ -98,6 +121,25 @@ void FillTone(BYTE* buffer, UINT32 frames, UINT32 start_frame,
 }
 
 }  // namespace
+
+bool GetDefaultAudioDevices(std::string* input_id, std::string* output_id) {
+  if (input_id == nullptr || output_id == nullptr) return false;
+  input_id->clear();
+  output_id->clear();
+  const HRESULT com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const bool uninitialize_com = SUCCEEDED(com_result);
+  if (FAILED(com_result) && com_result != RPC_E_CHANGED_MODE) return false;
+  ComPtr<IMMDeviceEnumerator> enumerator;
+  const HRESULT result = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                                          CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+  if (SUCCEEDED(result)) {
+    *input_id = DefaultEndpointId(enumerator.Get(), eCapture);
+    *output_id = DefaultEndpointId(enumerator.Get(), eRender);
+  }
+  enumerator.Reset();
+  if (uninitialize_com) CoUninitialize();
+  return SUCCEEDED(result);
+}
 
 bool PlayAudioOutputTestTone(const std::string& device_id) {
   const std::wstring wide_device_id = Utf8ToWide(device_id);

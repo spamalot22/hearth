@@ -35,6 +35,19 @@ bool FlutterWindow::OnCreate() {
   audio_output_channel_->SetMethodCallHandler(
       [](const flutter::MethodCall<flutter::EncodableValue>& call,
          std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() == "defaults") {
+          std::string input_id;
+          std::string output_id;
+          if (!GetDefaultAudioDevices(&input_id, &output_id)) {
+            result->Error("defaults_unavailable", "Windows audio defaults unavailable");
+            return;
+          }
+          result->Success(flutter::EncodableValue(flutter::EncodableMap{
+              {flutter::EncodableValue("inputId"), flutter::EncodableValue(input_id)},
+              {flutter::EncodableValue("outputId"), flutter::EncodableValue(output_id)},
+          }));
+          return;
+        }
         if (call.method_name() != "test") {
           result->NotImplemented();
           return;
