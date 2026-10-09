@@ -61,13 +61,16 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   const permissions = MethodChannel('flutter.baseflow.com/permissions/methods');
   const service = MethodChannel('hearth/voice_service');
+  const rtc = MethodChannel('FlutterWebRTC.Method');
   late HearthTestApi api;
   late List<String> serviceCalls;
   late List<_Voice> calls;
+  late List<String> rtcCalls;
 
   setUp(() {
     serviceCalls = [];
     calls = [];
+    rtcCalls = [];
     api = HearthTestApi()
       ..createVoiceSession = (id) async {
         final voice = _Voice(id);
@@ -84,11 +87,18 @@ void main() {
       serviceCalls.add(call.method);
       return null;
     });
+    messenger.setMockMethodCallHandler(rtc, (call) async {
+      rtcCalls.add(call.method);
+      if (call.method == 'getSources') return {'sources': <Object>[]};
+      if (call.method == 'initialize') return null;
+      throw PlatformException(code: 'unexpected-rtc-${call.method}');
+    });
   });
 
   tearDown(() {
     messenger.setMockMethodCallHandler(permissions, null);
     messenger.setMockMethodCallHandler(service, null);
+    messenger.setMockMethodCallHandler(rtc, null);
   });
 
   Future<void> boot(WidgetTester tester) async {
@@ -300,6 +310,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Settings'), findsOneWidget);
     expect(find.byType(VoiceCallBar), findsOneWidget);
+    expect(rtcCalls, contains('getSources'));
+    expect(rtcCalls, isNot(contains('getUserMedia')));
     await tester.tap(find.byKey(const Key('voice-call-mute')));
     await tester.pumpAndSettle();
     expect(calls.single.isMuted, isTrue);
